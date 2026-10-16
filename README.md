@@ -102,7 +102,7 @@ Your deck is now exactly as it started before modding.
 | [**Drum Roll**](#drum-roll) | A sample roll instrument on the X-PAD, locked to the deck's BPM |
 | [**60 FPS Waveforms**](#60-fps-waveforms) | Lifts the stock ~30 FPS waveform cap to 60 |
 | [**Themes**](#themes) | A light Day theme for bright rooms, plus four dark color themes |
-| [**Community Mods**](#community-mods) | Browse, install and manage mods made by other DJs from the Mod Menu |
+| [**Community Mods**](#community-mods) | Browse, install and manage mods made by other developers from the Mod Menu |
 
 ### Mod Menu
 
@@ -299,7 +299,7 @@ Playlist Editing, and those edits are written the way rekordbox expects.
 
 ## Community Mods
 
-Mods made by other DJs, installed from the deck: open **Mod Menu > Community
+Mods made by other developers, installed from the deck: open **Mod Menu > Community
 Mods**, browse the Mod Index or add a repository by its address, and install.
 The AZ-MODS desktop app has a Community Mods tab that does the same from your computer.
 
