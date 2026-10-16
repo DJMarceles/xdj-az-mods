@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Unit]
+Description=AZ USB mod updater (refresh persisted p7 mods from the stick, after EP147)
+DefaultDependencies=no
+# After= only (ordering, no Requires/BindsTo): EP147 is Type=simple so it reaches
+# "active" on the first fork, satisfying this even if a bad mod then crash-loops it,
+# so the master switch (mods = off in MODS/azmods.cfg) can still run and recover the deck.
+After=EP147.service systemd-udevd.service local-fs.target
+[Service]
+# simple, not oneshot: the restart gate waits for `systemctl is-system-running`,
+# which a still-activating oneshot would hold at "starting" forever.
+Type=simple
+ExecStart=/usr/sbin/az-usbload
+TimeoutStartSec=120
+[Install]
+WantedBy=multi-user.target

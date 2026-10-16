@@ -1,0 +1,9 @@
+# shellcheck settings for the deck scripts (the trees test/lint.sh lists) and their tests.
+# The deck and the test container run them under busybox ash: check with -s busybox.
+source-path=SCRIPTDIR
+external-sources=true
+# "A && B || C" is used throughout as "A and B, or else C": C runs when either fails,
+# which is what every such line intends (each was reviewed).
+disable=SC2015
+# awk programs are kept in single-quoted shell strings, where $1 is awk's, not the shell's.
+disable=SC2016

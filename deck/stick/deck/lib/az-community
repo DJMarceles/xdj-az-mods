@@ -1,0 +1,896 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# az-community: the deck side of community mods. Browse community repositories,
+# download, verify, install, remove, enable and disable community plugins, from the
+# deck, over WiFi.
+#
+#   az-community refresh                 Mod Index + every repository file + icons -> catalog
+#   az-community install <repo> <id>     download, size + sha256 check, safe unpack, manifest
+#                                        check, atomic install into MODS/community-mods/<id>/
+#   az-community remove|enable|disable <id>
+#   az-community addrepo|delrepo <repo>  edit MODS/community-mods/repos.txt (then rebuild the catalog)
+#   az-community catalog                 rebuild the catalog from the caches and the stick (no network)
+#   az-community apply                   ask the loader for the gated EP147 reload (state=reloading)
+#   az-community settle                  (the watcher, after its re-run) reloading -> done
+# <repo> is "owner/name", a github.com repo URL, or a full https:// URL ending in
+# azmods-repo.json; it is normalized to the URL the catalog shows in its url= line.
+#
+# Runs under az-usbload's request watcher (deck/az-usbload, modupdate_watch), never
+# inside EP147: azmod writes /run/az-community.req (one line: the arguments above) and
+# renders /tmp/az-community/status + /tmp/az-community/catalog; azmod itself never talks to
+# the network and never forks. The watcher passes the pick: AZ_MNT, AZ_MODS.
+#
+# Safety: a community mod must never crash a DJ's set, and neither may installing one.
+#   - writes only to $AZ_MODS/community-mods/ (the stick), /tmp/az-community/ and one p7 file,
+#     the deck's approved list (settings/azmod-community/approved, below). The p7
+#     stage's community/ is written by the loader alone, when it mirrors the stick
+#     (az-usbload community_mirror): so an install takes effect only through `apply`, never through an
+#     EP147 crash-restart that happens to pick up a half-chosen set mid-set.
+#   - approved mods: core loads an enabled mod only when the deck's own list holds its id
+#     with the sha256 of exactly its <id>.so ("<id> <64 hex>", one line per id). An install
+#     or update requested from the deck is the DJ's approval (the Mod Menu sends it after
+#     its trust screen), so it writes the new .so's line, replacing the id's old one; a
+#     remove drops it. A stick written anywhere else (the desktop app, by hand) carries no
+#     approval: core shows such a mod as "New mod found: allow?" until the DJ allows it.
+#     The line is written under the lock core takes too (flock), tmp + mv.
+#   - nothing downloaded is ever executed, sourced, eval'd or made executable. JSON is
+#     tokenized by grep and parsed by awk into "path TAB type TAB value" lines; values
+#     are only ever data.
+#   - every download: https only (redirects too), 10 s to connect, aborted when it
+#     stalls (<1 KB/s for 10 s), a hard size cap (repository file 256 KB, icon 256 KB, package
+#     16 MB) enforced by curl and re-checked on disk.
+#   - a package is checked against the repository file's size + sha256 before it is opened.
+#   - unpack never lets the archive choose a path: every member name is validated
+#     (no absolute paths, no "..", no hidden names, a safe character set), and each
+#     file is written by this script via `unzip -p <name> | head -c <cap>` to a path
+#     built from the validated name. busybox 1.27 unzip strips a leading ../ or / and
+#     only says so on stderr, so any stderr from the listing refuses the package.
+#   - install is atomic: unpack + validate in /tmp, copy to community/.<id>.new on the
+#     stick, verify the copy, then swap directories. A failure at any step leaves the
+#     previous state (old version, or nothing) and never a half-installed mod.
+#   - ELF validation is not done here (no readelf on the deck): core validates the .so
+#     in C before it dlopens it.
+# Exit status is always 0: the watcher must never die. The answer is the status file.
+#
+# The files azmod reads are the contract with the Mod Menu; this script emits exactly
+# that:
+# status: /tmp/az-community/status, key=value, rewritten whole (tmp + mv) on every change:
+#   state   idle|refreshing|downloading|verifying|installing|done|error, plus reloading
+#           after "apply" (the loader's watcher re-runs the loader on it, the same
+#           handshake as az-modupdate; "settle" turns it into done afterwards)
+#   op      the request being served (refresh, install, remove, ...)
+#   id      the mod id for install/remove/enable/disable ("" otherwise)
+#   done/total  bytes while downloading a package; otherwise progress counts (repos, icons)
+#   stamp   seconds since boot when written
+#   serial  bumps every time the catalog is rewritten (extra; a reader may ignore it)
+#   off     1 when MODS/azmods.cfg says community-mods = off (extra)
+#   msg     one user-facing line, at most 111 bytes (always last)
+# catalog: /tmp/az-community/catalog, rewritten whole (tmp + mv): "v1", then one
+#   repo|<repo>|<name>|<ok>|<listed>|<error>  line per repository and one
+#   mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>
+#   (one mod line per listed id, see build_catalog; min_core: MAJOR.MINOR.PATCH or empty;
+#   description: one line, at most 599 bytes; assets_kb: files the mod keeps on the USB, 0 =
+#   none or not said; held/also/nalso: the same id elsewhere, see build_catalog. Later fields
+#   are appended last, so a reader of fewer fields still works.) | CR LF are stripped from
+#   every value, and byte caps keep UTF-8 whole.
+#   At most CAT_MODS mod lines (installed ones first when there are more); then, only when
+#   some were left out, one closing  more|<n>  line with how many.
+# icons: /tmp/az-community/icons/<hash>.png, PNG-signature checked, 256 KB cap.
+set -u
+umask 022
+ST=/tmp/az-community; STATUS=$ST/status; LOG=$ST/log; CACHE=$ST/cache; ICONS=$ST/icons
+CAT=$ST/catalog; WORK=$ST/work
+MNT=${AZ_MNT:-}; MODS=${AZ_MODS:-}
+COMM=""; [ -n "$MODS" ] && COMM=$MODS/community-mods
+P7=${AZ_STAGE:-/home/root/settings/az-usbload}
+# core's per-mod state beside the stage (azmod community.c CM_STATE): the approved list
+CSTATE=${P7%/*}/azmod-community; APPROVED=$CSTATE/approved; APPROVED_MAX=64
+# the curated list (Kyle-Hosman/az-mods-index, reviewed by pull request: {"azmods_repos": 1,
+# "repos": ["https://github.com/OWNER/REPO", ...]}; a 404 means "no curated repos", not an
+# error) and the reachability probe; both overridable for the emulator (no DNS) and the
+# test fixture
+LIST_URL=${AZ_COMMUNITY_LIST:-https://raw.githubusercontent.com/Kyle-Hosman/az-mods-index/HEAD/azmods-repos.json}
+PING=${AZ_COMMUNITY_PING:-https://github.com}
+CAP_INDEX=262144; CAP_ICON=262144; CAP_LIST=65536; CAP_PKG=16777216
+# CAP_MANIFEST: the core reads azmod.json into a 16384-byte buffer (one byte for the NUL), so a
+# longer manifest installs here and then fails to load: refuse it at install instead.
+CAP_UNPACK=16777216; CAP_MANIFEST=16383; MAX_FILES=256
+MAX_USER_REPOS=32; MAX_LIST_REPOS=64; MAX_MODS=256
+# the catalog holds at most CAT_MODS mod lines (what the Mod Menu shows: azmod screen_community.c CM_NCAT); the
+# rest are counted on a closing more|<n> line so the menu can say it shows only the first ones
+CAT_MODS=128
+P7_RESERVE_KB=${AZ_COMMUNITY_P7_RESERVE_KB:-12288}   # never let a mirror leave p7 below this
+ICON_BUDGET=${AZ_COMMUNITY_ICON_BUDGET:-60}          # seconds of icon fetching per refresh
+ICON_CAP=${AZ_COMMUNITY_ICON_CAP:-8388608}           # bytes of icons kept in /tmp (RAM)
+TAB=$(printf '\t')
+
+mkdir -p "$ST" "$CACHE" "$ICONS" 2>/dev/null
+# the log is diagnostics only, capped (RAM) on every line by azlog_cap; flushed per line by construction (>>)
+azlog_cap() { return 0; }   # replaced below by deck/lib/az-logcap.sh, the shared cap
+for _azl_f in "${0%/*}/az-logcap.sh" "${0%/*}/../lib/az-logcap.sh" "${0%/*}/lib/az-logcap.sh" \
+    /tmp/az-deck/lib/az-logcap.sh; do
+    # shellcheck source=az-logcap.sh
+    [ -f "$_azl_f" ] && { . "$_azl_f"; break; }
+done
+# MODS/azmods.cfg holds each mod's switch (community-mods.<id> = on|off) and the master switch
+# (community-mods = off): az-conf.sh, next to this script (or in this boot's deck/ copy)
+for _azc_f in "${0%/*}/az-conf.sh" /tmp/az-deck/lib/az-conf.sh; do
+    # shellcheck source=az-conf.sh
+    [ -f "$_azc_f" ] && { . "$_azc_f"; break; }
+done
+log(){ azlog_cap "$LOG"; echo "[community $(date '+%H:%M:%S' 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; return 0; }
+upt(){ cut -d. -f1 /proc/uptime 2>/dev/null || echo 0; }
+fsize(){ [ -f "$1" ] || { echo 0; return; }; n=$(wc -c < "$1" | tr -cd 0-9); echo "${n:-0}"; }
+# one line for the status file: no control characters, no |, at most 111 bytes, UTF-8 whole
+oneline(){ printf '%s' "$1" | tr '\t\r\n' '   ' | tr -d '\000-\037\177|' | awk -v n=111 "$CAPAWK"'{ print cap($0,n) }'; }
+
+# cap(s,n): s without | CR LF, cut to n bytes without splitting a UTF-8 sequence
+# (busybox awk is byte-based: length/substr count bytes; HB maps a byte to its value)
+CAPAWK='BEGIN{ for(i=128;i<256;i++) HB=HB sprintf("%c",i) }
+function byte(c,  j){ j=index(HB,c); return j? 127+j : 0 }
+function cap(s,n,  t,k,b,L){ gsub(/[|\r\n]/,"",s); if(length(s)<=n) return s; t=substr(s,1,n)
+  for(k=0;k<4&&k<n;k++){ b=byte(substr(t,n-k,1)); if(b==0) return t; if(b>=192){ L=(b>=240)?4:((b>=224)?3:2); return (k+1>=L)?t:substr(t,1,n-k-1) } }
+  return t }
+'
+OP=""; ID=""; DONE=0; TOTAL=0; SERIAL=$(tr -cd 0-9 < "$ST/serial" 2>/dev/null); SERIAL=${SERIAL:-0}
+CFG=""; [ -n "$MODS" ] && CFG="$MODS/${CFG_NAME:-azmods.cfg}"
+OFF=0; [ -n "$CFG" ] && command -v cfg_off >/dev/null 2>&1 && cfg_off "$CFG" community-mods && OFF=1
+status(){   # $1 state, $2 msg
+    { printf 'state=%s\nop=%s\nid=%s\ndone=%s\ntotal=%s\nstamp=%s\nserial=%s\noff=%s\n' \
+        "$1" "$OP" "$ID" "$DONE" "$TOTAL" "$(upt)" "$SERIAL" "$OFF"
+      printf 'msg=%s\n' "$(oneline "$2")"; } > "$STATUS.new" 2>/dev/null
+    mv -f "$STATUS.new" "$STATUS" 2>/dev/null; log "$1: $2"; return 0
+}
+RO=""
+stick_restore(){ [ "$RO" = 1 ] && { sync; mount -o remount,ro "$MNT" 2>>"$LOG"; }; RO=""; return 0; }
+fail(){ stick_restore; rm -rf "$WORK" 2>/dev/null; status error "$1"; exit 0; }
+# remount the stick rw only if it is ro (the stock mount), restored by stick_restore/fail
+stick_rw(){
+    [ -n "$MNT" ] && [ -d "$MODS" ] || return 1
+    RO=$(awk -v m="$MNT" '$2==m{print ($4 ~ /(^|,)ro(,|$)/)?1:0; exit}' /proc/mounts 2>/dev/null)
+    if [ "$RO" = 1 ]; then mount -o remount,rw "$MNT" 2>>"$LOG" || { RO=""; return 1; }; fi
+    return 0
+}
+need_stick(){ [ -n "$MNT" ] && [ -d "$MODS" ] || fail "No AZ-MODS USB stick in the deck."; [ -L "$COMM" ] && fail "MODS/community-mods is a link"; return 0; }
+# Reserved ids, exact match (the core, the app and azmod-pack refuse the same list):
+# "enabled" is the name of the stage's enabled list (core reads it; a mod folder by that
+# name breaks it); azmod, azstem, az-mods, azmods name the official mods. repos.txt and the
+# .<id>.new/.old/.del leftovers are not valid id shapes, so they need no entry.
+RESERVED_IDS="enabled azmod azstem az-mods azmods"
+valid_id(){ case "$1" in ""|*[!a-z0-9-]*) return 1 ;; esac; case " $RESERVED_IDS " in *" $1 "*) return 1 ;; esac; [ ${#1} -ge 3 ] && [ ${#1} -le 32 ]; }
+hash16(){ printf '%s' "$1" | sha256sum | cut -c1-16; }
+
+# ---- downloads -----------------------------------------------------------------
+# get <url> <out> <cap bytes> [max seconds]: https only (redirects too), no URL globbing,
+# 10 s connect, abort on a 10 s stall, size capped by curl and re-checked on disk.
+# 0 ok | 1 failed | 2 too big; the HTTP status lands in $GET_CODE. The partial file
+# never survives a failure.
+get(){
+    rm -f "$2" 2>/dev/null
+    GET_CODE=$(curl -sS -f -L -g --proto =https --proto-redir =https --max-redirs 5 \
+        --connect-timeout 10 --speed-limit 1024 --speed-time 10 -m "${4:-10}" \
+        --max-filesize "$3" -H 'User-Agent: AZ-MODS-deck' -w '%{http_code}' -o "$2" -- "$1" 2>>"$LOG")
+    rc=$?
+    if [ "$rc" = 63 ]; then rm -f "$2"; return 2; fi
+    [ "$rc" = 0 ] && [ -f "$2" ] || { rm -f "$2" 2>/dev/null; return 1; }
+    [ "$(fsize "$2")" -le "$3" ] || { rm -f "$2"; return 2; }
+    return 0
+}
+online(){ curl -sS -g --proto =https --connect-timeout 10 -m 10 -o /dev/null -- "$PING" 2>>"$LOG"; }
+
+# ---- JSON -> "path TAB type TAB value" ------------------------------------------
+# Tokens come from grep -oE; anything between tokens that is not whitespace means the
+# file is not JSON (the length check). The awk state machine checks the structure and
+# writes one line per value: type s(tring) n(umber) b(ool) z(null) o(bject) a(rray).
+# Paths are dotted (mods.0.firmware.1). Strings are decoded (\uXXXX -> UTF-8) and every
+# control character becomes a space, so a value is always one line with no tabs.
+TOKRE='"([^"\\]|\\.)*"|-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?|true|false|null|[][{}:,]'
+JFLAT='
+function bad(m){ if(err=="") err=m }
+function hexv(h,  i,c,v){ v=0; h=tolower(h); if(length(h)!=4) return -1; for(i=1;i<=4;i++){ c=index("0123456789abcdef",substr(h,i,1)); if(c==0) return -1; v=v*16+c-1 } return v }
+function u8(c){ if(c<32) return " "; if(c<128) return sprintf("%c",c); if(c<2048) return sprintf("%c%c",192+int(c/64),128+c%64); return sprintf("%c%c%c",224+int(c/4096),128+int(c/64)%64,128+c%64) }
+function dec(s,  o,i,c,cp){ s=substr(s,2,length(s)-2); o=""
+  while((i=index(s,"\\"))>0){ o=o substr(s,1,i-1); c=substr(s,i+1,1)
+    if(c=="u"){ cp=hexv(substr(s,i+2,4)); if(cp<0){ bad("bad unicode escape"); cp=63 } if(cp>=55296&&cp<=57343) cp=63; o=o u8(cp); s=substr(s,i+6); continue }
+    if(c=="n"||c=="r"||c=="t"||c=="b"||c=="f") o=o " "; else if(c=="\""||c=="\\"||c=="/") o=o c; else bad("bad escape")
+    s=substr(s,i+2) }
+  o=o s; gsub(CC," ",o); return o }
+function path(  k){ if(d==0) return ""; k=(ty[d]=="o")?key:cnt[d]; return (pa[d]=="")?k:pa[d] "." k }
+function aft(){ ex=(d==0)?"eof":"ce" }
+function cls(w){ if(ty[d]!=w){ bad("mismatched bracket"); return } d--; aft() }
+function val(t,  p){ if(d==0&&t!="{"){ bad("not a JSON object"); return } p=path()
+  if(t=="{"||t=="["){ if(d>=16){ bad("nested too deep"); return } d++; ty[d]=(t=="{")?"o":"a"; pa[d]=p; cnt[d]=0; if(d>1) print p "\t" ty[d] "\t"; ex=(t=="{")?"ke":"ve"; return }
+  if(substr(t,1,1)=="\"") print p "\ts\t" dec(t)
+  else if(t=="true"||t=="false") print p "\tb\t" t
+  else if(t=="null") print p "\tz\t"
+  else if(t ~ /^-?[0-9]/) print p "\tn\t" t
+  else { bad("unexpected token"); return }
+  aft() }
+BEGIN{ CC="["; for(i=1;i<32;i++) CC=CC sprintf("%c",i); CC=CC sprintf("%c",127) "]"; d=0; ex="val"; n=0; err="" }
+{ t=$0; if(err!="") next; if(++n>100000){ bad("too many tokens"); next }
+  if(ex=="eof"){ bad("data after the end"); next }
+  if(ex=="val"){ val(t); next }
+  if(ex=="ve"){ if(t=="]") cls("a"); else val(t); next }
+  if(ex=="ke"||ex=="k"){ if(ex=="ke"&&t=="}"){ cls("o"); next } if(substr(t,1,1)!="\""){ bad("expected a key"); next } key=dec(t); gsub(/[.]/,"_",key); ex="col"; next }
+  if(ex=="col"){ if(t!=":") bad("expected a colon"); else ex="val"; next }
+  if(ex=="ce"){ if(t==","){ if(ty[d]=="o") ex="k"; else { cnt[d]++; ex="val" } next }
+    if(t=="}") cls("o"); else if(t=="]") cls("a"); else bad("expected a comma"); next }
+}
+END{ if(err==""&&ex!="eof") err="truncated"; if(err!=""){ print err > "/dev/stderr"; exit 1 } }'
+# jflat <json> <out>: 0 ok, else the reason is in $JERR
+jflat(){
+    JERR=""; f=$1
+    # a UTF-8 byte-order mark is skipped, not refused (Windows editors write one)
+    if [ "$(head -c 3 "$f" | hexdump -v -e '/1 "%02x"')" = efbbbf ]; then tail -c +4 "$f" > "$f.nobom" && f=$f.nobom; fi
+    a=$(tr -d ' \t\r\n' < "$f" | wc -c | tr -cd 0-9)
+    b=$(grep -oE "$TOKRE" "$f" | tr -d ' \t\r\n' | wc -c | tr -cd 0-9)
+    if [ "$a" != "$b" ]; then JERR="not valid JSON"; rm -f "$f.nobom"; return 1; fi
+    if ! grep -oE "$TOKRE" "$f" | awk "$JFLAT" > "$2" 2>"$2.err"; then
+        JERR="not valid JSON ($(head -1 "$2.err"))"; rm -f "$2" "$2.err" "$f.nobom"; return 1
+    fi
+    rm -f "$2.err" "$f.nobom"; return 0
+}
+
+# ---- repositories --------------------------------------------------------------
+# norm_repo <text> -> the repository file URL on stdout (1 = refused). owner/name and github.com
+# repo URLs become raw.githubusercontent.com/<owner>/<name>/HEAD/azmods-repo.json.
+norm_repo(){
+    r=$1
+    [ ${#r} -le 256 ] || return 1
+    case "$r" in *[!A-Za-z0-9._~/:%+-]*) return 1 ;; esac
+    case "$r" in
+        https://github.com/*|http://github.com/*|github.com/*) r=${r#*github.com/} ;;
+        https://*azmods-repo.json) printf '%s\n' "$r"; return 0 ;;
+        *://*) return 1 ;;
+    esac
+    r=${r%/}; r=${r%.git}
+    o=${r%%/*}; n=${r#*/}
+    [ "$o" != "$r" ] || return 1
+    printf '%s\n' "$o/$n" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$' || return 1
+    printf 'https://raw.githubusercontent.com/%s/%s/HEAD/azmods-repo.json\n' "$o" "$n"
+}
+# rkey <url>: the form two repository URLs are compared in. GitHub ignores case in owner/name
+# (Owner/Mods and owner/mods are one repository), so a raw.githubusercontent.com URL compares in
+# lowercase; any other https URL compares exactly.
+# shellcheck disable=SC2018,SC2019 # owner and repository names are ASCII
+rkey(){ case "$1" in https://raw.githubusercontent.com/*) printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' ;; *) printf '%s\n' "$1" ;; esac; }
+# the same rule for awk (build_catalog compares a .origin against each repository)
+RKEYAWK='function rkey(u){ return (substr(u,1,34)=="https://raw.githubusercontent.com/") ? tolower(u) : u }'
+repo_key(){   # the short name the UI shows
+    case "$1" in
+        https://raw.githubusercontent.com/*/*/HEAD/azmods-repo.json)
+            k=${1#https://raw.githubusercontent.com/}; printf '%s\n' "${k%/HEAD/azmods-repo.json}" ;;
+        *) k=${1#https://}; printf '%s\n' "${k%/azmods-repo.json}" ;;
+    esac
+}
+# the repo set: the Mod Index (cached at the last refresh) then the DJ's repos.txt.
+# Lines "url TAB listed TAB user TAB hash16(url) TAB text", deduplicated on the normalized
+# url compared as rkey does (Owner/x and owner/x are one repository), community first. "text"
+# is the repo as typed or listed (it passed norm_repo, so it is in a safe character set): the
+# catalog shows it and install/delrepo accept it back.
+compose_repos(){
+    { [ -f "$CACHE/community.txt" ] && tr -d '\r' < "$CACHE/community.txt" \
+        | while IFS= read -r l; do u=$(norm_repo "$l") && printf '%s\t1\t0\t%s\n' "$u" "$l"; done
+      [ -n "$COMM" ] && [ -f "$COMM/repos.txt" ] && tr -d '\r' < "$COMM/repos.txt" | head -n "$MAX_USER_REPOS" \
+        | while IFS= read -r l; do u=$(norm_repo "$l") && printf '%s\t0\t1\t%s\n' "$u" "$l"; done
+    } | awk -F "$TAB" "$RKEYAWK"'{ k=rkey($1); if(!(k in s)){ o[++n]=k; s[k]=1; u[k]=$1; t[k]=$4 } if($2==1) L[k]=1; if($3==1) U[k]=1 }
+        END{ for(i=1;i<=n;i++) printf "%s\t%d\t%d\t%s\n", u[o[i]], (L[o[i]]?1:0), (U[o[i]]?1:0), t[o[i]] }' \
+      | while IFS="$TAB" read -r cu cl cs ct; do printf '%s\t%s\t%s\t%s\t%s\n' "$cu" "$cl" "$cs" "$(hash16 "$cu")" "$ct"; done > "$CACHE/repos.cur"
+}
+
+# index flat -> the repo's valid mods, one TSV line each:
+# id name version author summary category icon_url package sha256 size firmware hooks source updated
+# min_core description assets_kb (parse_index then inserts icon_hash after updated)
+# An entry that fails a rule is skipped (counted), never half-listed.
+# v3: MAJOR.MINOR.PATCH, each 0-9999 (the core's cm_ver3; azcm_ver_newer compares nothing else)
+V3AWK='function v3(s, a,n,i){ n=split(s,a,"."); if(n!=3) return 0; for(i=1;i<=3;i++) if(a[i] !~ /^[0-9]+$/ || length(a[i])>4) return 0; return 1 }'
+IDXAWK=$V3AWK'
+function ok_url(u){ return substr(u,1,8)=="https://" && length(u)<=512 && u !~ /[^A-Za-z0-9._~:\/?#@!$&()*+,;=%-]/ }
+function cut_(s,n){ return length(s)>n ? substr(s,1,n) : s }
+{ split($0,f,"\t"); p=f[1]; t=f[2]; v=f[3]
+  if(p=="name"&&t=="s") rn=v; else if(p=="maintainer"&&t=="s") rm=v; else if(p=="homepage"&&t=="s") rh=v
+  else if(p=="azmods_repo") rv=(t=="n")?v:""
+  if(substr(p,1,5)!="mods.") next
+  split(p,q,"."); i=q[2]; if(i !~ /^[0-9]+$/) next; if(i+1>nm) nm=i+1
+  k=q[3]; if(k=="") next
+  if(k=="firmware"){ if(q[4]==""){ fwa[i]=(t=="a") } else { if(t!="s"){ fwbad[i]=1 } else { fwn[i]++; if(fw[i]!="") fw[i]=fw[i] " "; fw[i]=fw[i] v; if(v=="any") fwany[i]=1; else if(v !~ /^ep147-[0-9a-f]+$/ || length(v)!=22) fwbad[i]=1 } } next }
+  if(q[4]!="") next
+  T[i,k]=t; V[i,k]=v }
+END{
+  printf "META\t%s\t%s\t%s\t%s\n", cut_(rn,64), cut_(rm,64), (ok_url(rh)?rh:""), rv
+  for(i=0;i<nm;i++){
+    why=""
+    id=V[i,"id"]; if(T[i,"id"]!="s"||id !~ /^[a-z0-9-]+$/||length(id)<3||length(id)>32||index(" " RSV " "," " id " ")) why="id"
+    else if(seen[id]) why="duplicate id"
+    else if(T[i,"name"]!="s"||V[i,"name"]=="") why="name"
+    else if(T[i,"version"]!="s"||!v3(V[i,"version"])) why="version (not MAJOR.MINOR.PATCH)"
+    else if(T[i,"package"]!="s"||!ok_url(V[i,"package"])) why="package"
+    else if(T[i,"sha256"]!="s"||length(V[i,"sha256"])!=64||tolower(V[i,"sha256"]) ~ /[^0-9a-f]/) why="sha256"
+    else if(T[i,"size"]!="n"||V[i,"size"] !~ /^[0-9]+$/||V[i,"size"]+0<1||V[i,"size"]+0>CAPPKG) why="size"
+    else if(!fwa[i]||fwn[i]<1||fwbad[i]||(fwany[i]&&fwn[i]!=1)) why="firmware"
+    else if(T[i,"source"]!="s"||!ok_url(V[i,"source"])) why="source"
+    else if(T[i,"hooks"]!=""&&T[i,"hooks"]!="b") why="hooks"
+    else if(fwany[i]&&V[i,"hooks"]=="true") why="firmware any cannot claim hooks"
+    else if(T[i,"min_core"]!=""&&(T[i,"min_core"]!="s"||!v3(V[i,"min_core"]))) why="min_core (not MAJOR.MINOR.PATCH)"
+    else if(nok>=MAXM) why="too many mods"
+    if(why!=""){ nbad++; print "SKIP\t" i "\t" why; continue }
+    seen[id]=1; nok++
+    icon=(T[i,"icon"]=="s"&&ok_url(V[i,"icon"]))?V[i,"icon"]:""
+    cat_=(T[i,"category"]=="s"&&V[i,"category"] ~ /^(visual|controls|audio|tools)$/)?V[i,"category"]:""
+    upd=(T[i,"updated"]=="s"&&V[i,"updated"] ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)?V[i,"updated"]:""
+    mc=(T[i,"min_core"]=="s")?V[i,"min_core"]:""
+    ds=(T[i,"description"]=="s")?cut_(V[i,"description"],800):""
+    ak=(T[i,"assets_kb"]=="n"&&V[i,"assets_kb"] ~ /^[0-9]+$/)?V[i,"assets_kb"]+0:0
+    printf "MOD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%d\n", id, cut_(V[i,"name"],64), V[i,"version"], \
+      cut_(V[i,"author"],64), cut_(V[i,"summary"],200), cat_, icon, V[i,"package"], tolower(V[i,"sha256"]), \
+      V[i,"size"]+0, fw[i], (V[i,"hooks"]=="true")?1:0, V[i,"source"], upd, mc, ds, ak
+  }
+  printf "COUNT\t%d\t%d\n", nok, nbad
+}'
+# parse_index <flat> <h>: writes $CACHE/<h>.mods (MOD lines) + .meta; 1 = not a repository file
+parse_index(){
+    awk -v CAPPKG="$CAP_PKG" -v MAXM="$MAX_MODS" -v RSV="$RESERVED_IDS" "$IDXAWK" "$1" > "$CACHE/$2.parsed.new" 2>>"$LOG" || return 1
+    grep -q "^META${TAB}.*${TAB}1\$" "$CACHE/$2.parsed.new" || { rm -f "$CACHE/$2.parsed.new"; return 1; }
+    grep "^SKIP" "$CACHE/$2.parsed.new" | while IFS= read -r l; do log "repository file $2: skipped entry: $l"; done
+    # .mods fields: 1-14 as parsed, 15 the icon's hash, 16 min_core, 17 description, 18 assets_kb
+    # (each appended last: nothing moves)
+    grep "^MOD${TAB}" "$CACHE/$2.parsed.new" | cut -f2- | while IFS= read -r ml; do
+        iu=$(printf '%s\n' "$ml" | cut -f7); ih=""; [ -n "$iu" ] && ih=$(hash16 "$iu")
+        printf '%s\t%s\t%s\n' "$(printf '%s\n' "$ml" | cut -f1-14)" "$ih" "$(printf '%s\n' "$ml" | cut -f15-17)"
+    done > "$CACHE/$2.mods.new"
+    grep "^META${TAB}" "$CACHE/$2.parsed.new" | cut -f2-4 > "$CACHE/$2.meta.new"
+    grep "^COUNT${TAB}" "$CACHE/$2.parsed.new" | cut -f2- > "$CACHE/$2.count.new"
+    for x in mods meta count; do mv -f "$CACHE/$2.$x.new" "$CACHE/$2.$x"; done
+    rm -f "$CACHE/$2.parsed.new"; return 0
+}
+
+# ---- the installed set (the stick) ----------------------------------------------
+# lines: id TAB version TAB origin-url TAB enabled(0|1). A mod folder copied by hand (an
+# azmod.json, no .origin) is listed with origin "-": it still holds its id.
+installed_list(){
+    [ -n "$COMM" ] && [ -d "$COMM" ] || return 0
+    for d in "$COMM"/*/; do
+        [ -d "$d" ] || continue
+        i=${d%/}; i=${i##*/}
+        valid_id "$i" || continue
+        if [ ! -f "$d/.origin" ]; then
+            [ -f "$d/azmod.json" ] && printf '%s\t\t-\t0\n' "$i"
+            continue
+        fi
+        v=$(sed -n 's/^version=//p' "$d/.origin" | head -1 | tr -d '\r\t')
+        o=$(sed -n 's/^repo=//p' "$d/.origin" | head -1 | tr -d '\r\t')
+        e=0; is_enabled "$i" && e=1
+        printf '%s\t%s\t%s\t%s\n' "$i" "$v" "$o" "$e"
+    done
+}
+is_enabled(){ case "$(cfg_get "$CFG" "community-mods.$1")" in [Oo][Nn]|1|[Tt][Rr][Uu][Ee]) return 0 ;; esac; return 1; }
+is_off(){ case "$(cfg_get "$CFG" "community-mods.$1")" in [Oo][Ff][Ff]|0|[Ff][Aa][Ll][Ss][Ee]) return 0 ;; esac; return 1; }
+
+# ---- the catalog (no network: built from the caches + the stick) ---------------
+# Caps: repo name 47, error 111; mod name 47, version 23, author 47,
+# summary 119. firmware is comma-separated (or "any").
+# One mod line per id. An id is one folder on the stick, one settings file and one data folder,
+# so two repositories offering the same id cannot both be installed: the catalog shows the one
+# this deck would install and counts the rest. It is, in order: the repository the installed
+# copy came from (its updates, Turn off and Remove stay reachable), a repository on the
+# Mod Index over one the DJ added, the earlier one in the repository order. The chosen
+# repository per id is written to $CACHE/winners (id TAB url), and install refuses any other.
+# installed: the installed version, only on the line from the repository it came from.
+# held (17): the id is installed from a repository other than this line's (its short name),
+#   or "-" for a folder copied by hand: install refuses until that one is removed.
+# also (18) / nalso (19): the first other repository offering the same id, and how many do.
+build_catalog(){
+    compose_repos
+    installed_list > "$CACHE/installed.cur" 2>/dev/null
+    SERIAL=$((SERIAL + 1)); echo "$SERIAL" > "$ST/serial"
+    : > "$CACHE/winners.new"
+    awk -F "$TAB" -v C="$CACHE" -v I="$ICONS" -v INS="$CACHE/installed.cur" -v MAXC="$CAT_MODS" -v WIN="$CACHE/winners.new" "$CAPAWK$RKEYAWK"'
+    BEGIN{ while((getline l < INS)>0){ split(l,a,"\t"); iv[a[1]]=a[2]; io[a[1]]=a[3] } }
+    { url[NR]=$1; li[NR]=$2; hs[NR]=$4; tx[NR]=$5 }
+    function rk(u,  k){ k=u; if(k ~ /^https:\/\/raw\.githubusercontent\.com\/[^\/]+\/[^\/]+\/HEAD\/azmods-repo\.json$/){ sub(/^https:\/\/raw\.githubusercontent\.com\//,"",k); sub(/\/HEAD\/azmods-repo\.json$/,"",k) } else { sub(/^https:\/\//,"",k); sub(/\/azmods-repo\.json$/,"",k) } return k }
+    # rank of repository r for id: 3 the installed copy came from it, 2 Mod Index, 1 added
+    function rank(r,id){ if((id in io) && io[id]!="-" && rkey(io[id])==rkey(url[r])) return 3; return li[r]?2:1 }
+    # pass 0: every chosen line; 1: only the installed ones; 2: only the others.
+    # Over the cap the installed ones go first, so their updates stay visible.
+    function emit(pass,  r,f,l,a,id,ic,fw,inst,held,z){
+      for(r=1;r<=NR;r++){
+        f=C "/" hs[r] ".mods"
+        while((getline l < f)>0){ split(l,a,"\t"); id=a[1]
+          if(W[id]!=r) continue
+          inst=""; held=""
+          if(id in io){ if(rank(r,id)==3) inst=iv[id]; else held=(io[id]=="-")?"-":rk(io[id]) }
+          if(pass==1 && inst=="") continue
+          if(pass==2 && inst!="") continue
+          if(out>=MAXC){ more++; continue }
+          ic=""; if(a[15]!=""){ if((getline z < (I "/" a[15] ".png"))>=0) ic=I "/" a[15] ".png"; close(I "/" a[15] ".png") }
+          fw=a[11]; gsub(/ /,",",fw)
+          printf "mod|%s|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%s|%s|%s|%d|%s|%s|%d\n", cap(tx[r],256), id, cap(a[2],47), cap(a[3],23), cap(a[4],47), \
+            cap(a[5],119), a[6], a[12], fw, a[10], ic, cap(inst,23), a[16], cap(a[17],599), a[18]+0, cap(held,256), cap(AL[id],256), NA[id]+0
+          out++
+        } close(f)
+      }
+    }
+    END{
+      print "v1"
+      for(r=1;r<=NR;r++){
+        h=hs[r]; nm=""; st=""; ms=""
+        if((getline l < (C "/" h ".meta"))>0){ split(l,a,"\t"); nm=a[1] } close(C "/" h ".meta")
+        if((getline l < (C "/" h ".state"))>0){ st=l; sub(/\t.*/,"",st); ms=l; sub(/^[^\t]*\t?/,"",ms); sub(/\t.*/,"",ms) } close(C "/" h ".state")
+        if(nm=="") nm=rk(url[r])
+        if(st==""){ st="error"; ms="not read yet" }
+        printf "repo|%s|%s|%d|%d|%s\n", cap(tx[r],256), cap(nm,47), (st=="ok")?1:0, li[r], cap((st=="ok")?"":ms,111)
+      }
+      # choose one repository per id (a higher rank wins; on a tie the earlier repository)
+      total=0
+      for(r=1;r<=NR;r++){ f=C "/" hs[r] ".mods"
+        while((getline l < f)>0){ split(l,a,"\t"); id=a[1]
+          if(!(id in W)){ W[id]=r; total++; continue }
+          if(rank(r,id)>rank(W[id],id)) W[id]=r
+        } close(f) }
+      # the others offering each id: how many, and the first of them
+      for(r=1;r<=NR;r++){ f=C "/" hs[r] ".mods"
+        while((getline l < f)>0){ split(l,a,"\t"); id=a[1]
+          if(W[id]==r) continue
+          if(!(id in AL)) AL[id]=tx[r]; NA[id]++
+        } close(f) }
+      for(id in W) printf "%s\t%s\n", id, url[W[id]] > WIN
+      close(WIN)
+      out=0; more=0
+      if(total<=MAXC) emit(0); else { emit(1); emit(2) }
+      if(more>0) printf "more|%d\n", more
+    }' "$CACHE/repos.cur" > "$CAT.new" 2>>"$LOG" && mv -f "$CAT.new" "$CAT"
+    [ -f "$CACHE/winners.new" ] && mv -f "$CACHE/winners.new" "$CACHE/winners"
+    return 0
+}
+
+# ---- refresh -------------------------------------------------------------------
+fetch_list(){   # the Mod Index -> $CACHE/community.txt (kept from the last good fetch on failure)
+    if ! get "$LIST_URL" "$CACHE/list.json" "$CAP_LIST"; then
+        # not published (yet, or any more): no curated repos, an answer, not a failure
+        if [ "$GET_CODE" = 404 ]; then log "Mod Index: 404 -> no curated repos"; : > "$CACHE/community.txt"; return 0; fi
+        log "Mod Index: download failed (HTTP ${GET_CODE:-none})"; return 1
+    fi
+    jflat "$CACHE/list.json" "$CACHE/list.flat"; rc=$?; rm -f "$CACHE/list.json"
+    [ "$rc" = 0 ] || { log "Mod Index: $JERR"; return 1; }
+    grep -q "^azmods_repos${TAB}n${TAB}1\$" "$CACHE/list.flat" || { rm -f "$CACHE/list.flat"; log "Mod Index: not azmods_repos 1"; return 1; }
+    grep "^repos\.[0-9]*${TAB}s${TAB}" "$CACHE/list.flat" | cut -f3 | head -n "$MAX_LIST_REPOS" \
+        | while IFS= read -r l; do if norm_repo "$l" >/dev/null; then printf '%s\n' "$l"; else log "Mod Index: refused entry [$(oneline "$l")]"; fi; done > "$CACHE/community.txt.new"
+    rm -f "$CACHE/list.flat"
+    mv -f "$CACHE/community.txt.new" "$CACHE/community.txt"
+}
+fetch_repo(){   # $1 url -> $CACHE/<h>.{mods,meta,count,state}; the old cache survives a failure
+    h=$(hash16 "$1")
+    get "$1" "$CACHE/$h.json" "$CAP_INDEX"; rc=$?
+    if [ "$rc" = 2 ]; then printf 'error\tthe repository file is larger than 256 KB\n' > "$CACHE/$h.state"; return 1; fi
+    if [ "$rc" != 0 ]; then
+        case "${GET_CODE:-000}" in
+            404) printf 'error\tnot found (check the address)\t404\n' > "$CACHE/$h.state" ;;
+            000) printf 'error\tcould not be reached (check the address, or try again later)\t000\n' > "$CACHE/$h.state" ;;
+            *)   printf 'error\tdownload failed (HTTP %s)\t%s\n' "$GET_CODE" "$GET_CODE" > "$CACHE/$h.state" ;;
+        esac; return 1
+    fi
+    # the raw index and its flat form are needed only until parsed: never kept (RAM)
+    jflat "$CACHE/$h.json" "$CACHE/$h.flat"; rc=$?; rm -f "$CACHE/$h.json"
+    if [ "$rc" != 0 ]; then printf 'error\tindex is %s\n' "$JERR" > "$CACHE/$h.state"; return 1; fi
+    parse_index "$CACHE/$h.flat" "$h"; rc=$?; rm -f "$CACHE/$h.flat"
+    if [ "$rc" != 0 ]; then printf 'error\tnot an azmods-repo.json (azmods_repo 1)\n' > "$CACHE/$h.state"; return 1; fi
+    sk=$(cut -f2 "$CACHE/$h.count")
+    if [ "${sk:-0}" -gt 0 ]; then printf 'ok\t%s entries skipped (invalid)\n' "$sk" > "$CACHE/$h.state"
+    else printf 'ok\t\n' > "$CACHE/$h.state"; fi
+    return 0
+}
+is_png(){ [ "$(head -c 8 "$1" 2>/dev/null | hexdump -v -e '/1 "%02x"')" = 89504e470d0a1a0a ]; }
+fetch_icons(){
+    dl=$(( $(upt) + ICON_BUDGET ))
+    cut -f4 "$CACHE/repos.cur" | while IFS= read -r uh; do
+        f="$CACHE/$uh.mods"; [ -f "$f" ] && cut -f7,15 "$f"
+    done | grep -v "^${TAB}*\$" | sort -u > "$CACHE/icons.want"
+    # /tmp is RAM: keep only the icons the catalog can show (this drops stale .part files too)
+    cut -f2 "$CACHE/icons.want" | grep . | sed 's/$/.png/' > "$CACHE/icons.keep"
+    for f in "$ICONS"/* "$ICONS"/.[!.]*; do
+        [ -e "$f" ] || continue; grep -qxF "${f##*/}" "$CACHE/icons.keep" || rm -rf "$f"
+    done
+    TOTAL=$(wc -l < "$CACHE/icons.want" | tr -cd 0-9); DONE=0
+    while IFS="$TAB" read -r iu ih; do
+        DONE=$((DONE + 1))
+        [ -n "$ih" ] || continue; [ -f "$ICONS/$ih.png" ] && continue
+        [ "$(upt)" -lt "$dl" ] || { log "icons: time budget spent, the rest next refresh"; break; }
+        [ $(($(icons_bytes) + CAP_ICON)) -le "$ICON_CAP" ] || { log "icons: $ICON_CAP bytes kept, the rest not fetched"; break; }
+        status refreshing "icons $DONE/$TOTAL"
+        if get "$iu" "$ICONS/$ih.part" "$CAP_ICON" && is_png "$ICONS/$ih.part"; then mv -f "$ICONS/$ih.part" "$ICONS/$ih.png"
+        else rm -f "$ICONS/$ih.part"; log "icon refused or failed: $iu"; fi
+    done < "$CACHE/icons.want"
+    # the cap holds whatever happened above: oldest first (the names are <hash>.png, written here)
+    # shellcheck disable=SC2012
+    ls -1tr "$ICONS" 2>/dev/null | while IFS= read -r f; do
+        [ "$(icons_bytes)" -le "$ICON_CAP" ] && break
+        rm -f "$ICONS/$f"; log "icons: over $ICON_CAP bytes, dropped $f"
+    done
+    rm -f "$CACHE/icons.keep"
+    return 0
+}
+icons_bytes(){ n=$(cat "$ICONS"/* 2>/dev/null | wc -c | tr -cd 0-9); echo "${n:-0}"; }
+refresh(){
+    OP=${OP:-refresh}
+    status refreshing "checking the network..."
+    if ! online; then
+        build_catalog; status error "No internet: showing mods from the last refresh. Connect the deck to WiFi, then press Refresh."; return 0
+    fi
+    LISTFAIL=0; fetch_list || { LISTFAIL=1; log "Mod Index unavailable -> using the last copy"; }
+    compose_repos
+    # caches of repositories no longer in the set are never read again (RAM)
+    cut -f4 "$CACHE/repos.cur" > "$CACHE/repos.keep"
+    for f in "$CACHE"/????????????????.*; do
+        [ -e "$f" ] || continue; x=${f##*/}; grep -qxF "${x%%.*}" "$CACHE/repos.keep" || rm -f "$f"
+    done
+    rm -f "$CACHE/repos.keep"
+    TOTAL=$(wc -l < "$CACHE/repos.cur" | tr -cd 0-9); DONE=0; nfail=0
+    while IFS="$TAB" read -r u _li _us uh _ut; do
+        DONE=$((DONE + 1)); status refreshing "repository $DONE/$TOTAL"
+        fetch_repo "$u" || { nfail=$((nfail + 1)); log "repo $u: $(cut -f2 "$CACHE/$uh.state")"; }
+    done < "$CACHE/repos.cur"
+    build_catalog
+    fetch_icons
+    build_catalog
+    n=$(grep -c '^mod|' "$CAT" 2>/dev/null); DONE=0; TOTAL=0
+    m="Found ${n:-0} mods."; [ "${n:-0}" = 1 ] && m="Found 1 mod."
+    more=$(sed -n 's/^more|\([0-9]*\)$/\1/p' "$CAT" 2>/dev/null)
+    [ -n "$more" ] && m="Found $(( ${n:-0} + more )) mods; showing the first ${n:-0}."
+    [ "$nfail" -gt 0 ] && m="$m $nfail of $(wc -l < "$CACHE/repos.cur" | tr -cd 0-9) repositories could not be read."
+    [ "$LISTFAIL" = 1 ] && m="$m The Mod Index did not load: press Refresh."
+    status "done" "$m"
+}
+
+# ---- install -------------------------------------------------------------------
+# list_pkg <zip> <id>: validates every member name -> $WORK/files ("size TAB name"), dirs
+# -> $WORK/dirs. Refuses (returns 1, reason in $WHY) on anything the deck cannot vouch for.
+list_pkg(){
+    WHY=""
+    unzip -l "$1" > "$WORK/list" 2> "$WORK/list.err" < /dev/null || { WHY="the package is not a readable zip"; return 1; }
+    if [ -s "$WORK/list.err" ]; then
+        if grep -q 'removing leading' "$WORK/list.err"; then WHY="the package has an absolute or .. path"
+        else WHY="the package is not a readable zip ($(head -1 "$WORK/list.err"))"; fi
+        return 1
+    fi
+    # busybox 1.27: "Archive:", a header, a dashed line, one line per member
+    # (length date time name), a dashed line, the totals. A name with a space is
+    # a 5th field and is refused like any other unsafe name.
+    awk -v T="$TAB" -v W="$WORK" '
+        /^-+ +-+ +-+ +-+$/ && !inb { inb=1; next }
+        /^ *-+ +-+$/ && inb { inb=2; next }
+        inb==1 { if(NF!=4 || $1 !~ /^[0-9]+$/){ print "bad line" > (W "/list.bad"); next } print $1 T $4 }
+        inb==2 && /files?$/ { print $(NF-1) > (W "/list.count") }
+    ' "$WORK/list" > "$WORK/members"
+    [ -s "$WORK/list.bad" ] && { WHY="the package has a file name with spaces or an unreadable entry"; return 1; }
+    n=$(wc -l < "$WORK/members" | tr -cd 0-9)
+    [ "$n" -ge 1 ] || { WHY="the package is empty"; return 1; }
+    [ "$n" = "$(tr -cd 0-9 < "$WORK/list.count" 2>/dev/null)" ] || { WHY="the package listing does not add up"; return 1; }
+    [ "$n" -le "$MAX_FILES" ] || { WHY="the package has more than $MAX_FILES entries"; return 1; }
+    : > "$WORK/files"; : > "$WORK/dirs"; tot=0
+    while IFS="$TAB" read -r sz nm; do
+        case "$nm" in
+            /*) WHY="absolute path in the package: $nm"; return 1 ;;
+            [Dd][Aa][Tt][Aa]|[Dd][Aa][Tt][Aa]/*) WHY="the package has a data/ folder: a mod's data is made on the USB, never shipped"; return 1 ;;
+            *[!A-Za-z0-9._/-]*) WHY="unsafe file name in the package: $(oneline "$nm")"; return 1 ;;
+            .*|*/.*) WHY="hidden or .. path in the package: $nm"; return 1 ;;
+            *//*) WHY="empty path component in the package: $nm"; return 1 ;;
+        esac
+        [ ${#nm} -le 128 ] || { WHY="file name too long in the package"; return 1; }
+        dep=$(printf '%s' "${nm%/}" | tr -cd / | wc -c | tr -cd 0-9)
+        [ "$dep" -le 3 ] || { WHY="the package nests too deep: $nm"; return 1; }
+        case "$nm" in
+            */) [ "$sz" = 0 ] || { WHY="bad directory entry: $nm"; return 1; }; printf '%s\n' "${nm%/}" >> "$WORK/dirs" ;;
+            *)  [ "$sz" -le "$CAP_UNPACK" ] || { WHY="$nm is too large (or a streamed zip: rebuild with azmod-pack)"; return 1; }
+                tot=$((tot + sz)); [ "$tot" -le "$CAP_UNPACK" ] || { WHY="the package unpacks to more than 16 MB"; return 1; }
+                printf '%s\t%s\n' "$sz" "$nm" >> "$WORK/files" ;;
+        esac
+    done < "$WORK/members"
+    [ -z "$(cut -f2 "$WORK/files" | sort | uniq -d)" ] || { WHY="the package lists a file twice"; return 1; }
+    # FAT32 ignores case: Kick.wav and kick.wav are one file on the stick (the second would replace the first).
+    # Names are already limited to ASCII above, so an ASCII-only fold is exact.
+    # shellcheck disable=SC2018,SC2019
+    [ -z "$(cut -f2 "$WORK/files" | tr '[:upper:]' '[:lower:]' | sort | uniq -d)" ] || { WHY="the package has two files whose names differ only in case"; return 1; }
+    grep -qx "[0-9]*${TAB}azmod.json" "$WORK/files" || { WHY="the package has no azmod.json at its root"; return 1; }
+    grep -qx "[0-9]*${TAB}$2.so" "$WORK/files" || { WHY="the package has no $2.so at its root"; return 1; }
+    grep -qx "[0-9]*${TAB}$2.off" "$WORK/files" && { WHY="the package carries its own $2.off"; return 1; }
+    return 0
+}
+# unpack_pkg <zip> -> $WORK/pkg, each file written by this script at a validated path, size-capped
+unpack_pkg(){
+    rm -rf "$WORK/pkg"; mkdir -p "$WORK/pkg" || return 1
+    while IFS= read -r dn; do mkdir -p "$WORK/pkg/$dn" || return 1; done < "$WORK/dirs"
+    DONE=0; TOTAL=$(wc -l < "$WORK/files" | tr -cd 0-9)
+    while IFS="$TAB" read -r sz nm; do
+        DONE=$((DONE + 1))
+        case "$nm" in */*) mkdir -p "$WORK/pkg/${nm%/*}" || return 1 ;; esac
+        unzip -p "$1" "$nm" 2> "$WORK/x.err" < /dev/null | head -c $((sz + 1)) > "$WORK/pkg/$nm"
+        [ -s "$WORK/x.err" ] && { WHY="the package does not unpack ($(head -1 "$WORK/x.err"))"; return 1; }
+        [ "$(fsize "$WORK/pkg/$nm")" = "$sz" ] || { WHY="$nm does not unpack to its listed size"; return 1; }
+    done < "$WORK/files"
+    # nothing but what was listed: regular files and directories only
+    [ -z "$(find "$WORK/pkg" ! -type f ! -type d)" ] || { WHY="the package unpacked something that is not a file"; return 1; }
+    return 0
+}
+# the manifest rules -> 0 ok, else the reason in $WHY
+MANAWK=$V3AWK'
+function ok_url(u){ return substr(u,1,8)=="https://" && length(u)<=512 && u !~ /[^A-Za-z0-9._~:\/?#@!$&()*+,;=%-]/ }
+{ split($0,f,"\t"); p=f[1]; T[p]=f[2]; V[p]=f[3]
+  if(p ~ /^firmware\.[0-9]+$/){ fn++; if(f[2]!="s") fb=1; else if(f[3]=="any") fa=1; else if(f[3] !~ /^ep147-[0-9a-f]+$/ || length(f[3])!=22) fb=1 } }
+function no(m){ print m; exit 0 }
+END{
+  if(T["azmod"]!="n"||V["azmod"]!="1") no("azmod.json: \"azmod\" must be 1")
+  if(T["id"]!="s"||V["id"]!=ID) no("azmod.json: id is not " ID)
+  if(T["name"]!="s"||V["name"]==""||length(V["name"])>64) no("azmod.json: name missing or longer than 64")
+  if(T["version"]!="s"||!v3(V["version"])) no("azmod.json: version must be MAJOR.MINOR.PATCH (for example 1.0.0)")
+  if(V["version"]!=IVER) no("azmod.json: version " V["version"] " but the repository file says " IVER)
+  if(T["author"]!="s"||V["author"]=="") no("azmod.json: author missing")
+  if(T["source"]!="s"||!ok_url(V["source"])) no("azmod.json: source must be a public https:// URL")
+  if(T["api"]!="n"||V["api"]!="1") no("azmod.json: api " V["api"] " is not supported (this deck: 1)")
+  if(T["firmware"]!="a"||fn<1||fb) no("azmod.json: firmware must list ep147-<16 hex> tags or [\"any\"]")
+  if(fa&&fn!=1) no("azmod.json: firmware \"any\" must be alone")
+  if(T["hooks"]!=""&&T["hooks"]!="b") no("azmod.json: hooks must be true or false")
+  if(fa&&V["hooks"]=="true") no("azmod.json: a firmware \"any\" mod cannot claim hooks")
+  if(T["min_core"]!=""&&(T["min_core"]!="s"||!v3(V["min_core"]))) no("azmod.json: min_core must be MAJOR.MINOR.PATCH (for example 1.2.3)")
+  print "ok"
+}'
+check_manifest(){   # $1 id, $2 the repository file version
+    m=$WORK/pkg/azmod.json
+    [ "$(fsize "$m")" -le "$CAP_MANIFEST" ] || { WHY="azmod.json is larger than 16383 bytes (the most the deck reads)"; return 1; }
+    jflat "$m" "$WORK/manifest.flat" || { WHY="azmod.json is $JERR"; return 1; }
+    r=$(awk -v ID="$1" -v IVER="$2" "$MANAWK" "$WORK/manifest.flat")
+    [ "$r" = ok ] || { WHY=${r:-"azmod.json could not be checked"}; return 1; }
+    return 0
+}
+tsum(){ [ -d "$1" ] && (cd "$1" && find . -type f ! -name .origin ! -name '*.off' | sort | while IFS= read -r f; do md5sum "$f"; done) | md5sum | cut -d' ' -f1; }
+kb_free(){ df -k "$1" 2>/dev/null | awk 'NR==2{print $4}' | tr -cd 0-9; }
+kb_used(){ [ -d "$1" ] && du -sk "$1" 2>/dev/null | cut -f1 | tr -cd 0-9 || echo 0; }
+
+install_mod(){   # $1 repo, $2 id
+    valid_id "$2" || fail "bad mod id"
+    u=$(norm_repo "$1") || fail "bad repository"
+    need_stick
+    h=$(hash16 "$u")
+    [ -f "$CACHE/$h.mods" ] || fail "refresh the catalog first"
+    e=$(awk -F "$TAB" -v i="$2" '$1==i{print; exit}' "$CACHE/$h.mods")
+    [ -n "$e" ] || fail "$2 is no longer listed by its repository. Press Refresh."
+    name=$(printf '%s' "$e" | cut -f2); ver=$(printf '%s' "$e" | cut -f3); pkg=$(printf '%s' "$e" | cut -f8)
+    sha=$(printf '%s' "$e" | cut -f9); size=$(printf '%s' "$e" | cut -f10)
+    [ "$size" -ge 1 ] && [ "$size" -le "$CAP_PKG" ] || fail "package size out of range"
+    # One id, one owner: the installed copy's repository is the only one that may replace it (an
+    # update). Another author's mod with the same id would inherit its folder, its settings and its
+    # files, so it is refused until the installed one is removed.
+    if [ -f "$COMM/$2/.origin" ]; then
+        o=$(sed -n 's/^repo=//p' "$COMM/$2/.origin" | head -1 | tr -d '\r')
+        if [ "$(rkey "$o")" != "$(rkey "$u")" ]; then
+            iname=$(mod_name "$COMM/$2/azmod.json" | cut -c1-40); iauth=$(mod_author "$COMM/$2/azmod.json" | cut -c1-28)
+            [ -n "$iauth" ] && fail "${iname:-$2} by $iauth already uses this ID. Remove it first."
+            fail "${iname:-$2} from $(repo_key "$o") already uses this ID. Remove it first."
+        fi
+    elif [ -e "$COMM/$2" ]; then fail "MODS/community-mods/$2 exists but was not installed here; remove it first"
+    else
+        # not installed: only the repository the catalog offers for this id (build_catalog)
+        w=$(awk -F "$TAB" -v i="$2" '$1==i{print $2; exit}' "$CACHE/winners" 2>/dev/null)
+        [ -n "$w" ] || fail "refresh the catalog first"
+        [ "$(rkey "$w")" = "$(rkey "$u")" ] || fail "Not installed: $(repo_key "$w") offers a mod with the same ID, and that one is listed here."
+    fi
+    rm -rf "$WORK"; mkdir -p "$WORK" || fail "cannot write /tmp"
+    status downloading "$name $ver"
+    # in the background so the status can report bytes (done/total while downloading)
+    ( get "$pkg" "$WORK/pkg.azmod" "$size" 300; echo $? > "$WORK/get.rc" ) &
+    gp=$!; TOTAL=$size
+    while kill -0 "$gp" 2>/dev/null; do DONE=$(fsize "$WORK/pkg.azmod"); status downloading "$name $ver"; sleep 1; done
+    wait "$gp" 2>/dev/null; rc=$(cat "$WORK/get.rc" 2>/dev/null); rc=${rc:-1}; DONE=$(fsize "$WORK/pkg.azmod")
+    [ "$rc" = 2 ] && fail "Not installed: the package is larger than the repository file says"
+    if [ "$rc" != 0 ]; then
+        online || fail "Could not download $name: no internet connection."
+        fail "Could not download $name (HTTP ${GET_CODE:-error}). Try again later."
+    fi
+    status verifying "$name $ver"
+    [ "$(fsize "$WORK/pkg.azmod")" = "$size" ] || fail "Not installed: the package size does not match the repository file"
+    [ "$(sha256sum "$WORK/pkg.azmod" | cut -d' ' -f1)" = "$sha" ] || fail "Not installed: sha256 mismatch (the package is not the one the repository file lists)"
+    list_pkg "$WORK/pkg.azmod" "$2" || fail "Not installed: $WHY"
+    unpack_pkg "$WORK/pkg.azmod" || fail "Not installed: $WHY"
+    check_manifest "$2" "$ver" || fail "Not installed: $WHY"
+    # the bytes core will hash before it loads the mod (the stage is a verified mirror of the stick)
+    sosha=$(sha256sum "$WORK/pkg/$2.so" 2>/dev/null | cut -d' ' -f1)
+    case "$sosha" in *[!0-9a-f]*|"") fail "Not installed: could not read $2.so" ;; esac
+    # room: the stick holds the new copy beside the old during the swap; the loader
+    # will mirror it to p7, which must keep its reserve (p7 is 61 MB, and a full p7
+    # breaks the deck's BPM display)
+    newkb=$(kb_used "$WORK/pkg"); oldst=$(kb_used "$P7/community/$2")
+    sf=$(kb_free "$MODS"); [ -n "$sf" ] && [ "$sf" -ge $((newkb + 1024)) ] || fail "Not enough free space on the USB stick for $name."
+    if [ -d "$P7" ]; then
+        pf=$(kb_free "$P7")
+        [ -n "$pf" ] && [ $((pf - newkb + oldst)) -ge "$P7_RESERVE_KB" ] || fail "Not enough free space on the deck for $name."
+    fi
+    status installing "$name $ver"
+    stick_rw || fail "the USB is read-only"
+    mkdir -p "$COMM" 2>>"$LOG" || fail "cannot write MODS/community-mods"
+    NEW=$COMM/.$2.new; OLD=$COMM/.$2.old
+    rm -rf "$NEW" "$OLD" 2>/dev/null
+    cp -R "$WORK/pkg" "$NEW" 2>>"$LOG" || { rm -rf "$NEW"; fail "could not write the USB"; }
+    [ "$(tsum "$NEW")" = "$(tsum "$WORK/pkg")" ] || { rm -rf "$NEW"; fail "the copy on the USB does not verify"; }
+    printf 'repo=%s\nversion=%s\nsha256=%s\nsize=%s\ninstalled=%s\n' "$u" "$ver" "$sha" "$size" "$(date '+%Y-%m-%d %H:%M' 2>/dev/null)" > "$NEW/.origin" \
+        || { rm -rf "$NEW"; fail "could not write the USB"; }
+    was_off=0; is_off "$2" && was_off=1
+    sync
+    if [ -d "$COMM/$2" ]; then mv "$COMM/$2" "$OLD" 2>>"$LOG" || { rm -rf "$NEW"; fail "could not replace the old version"; }; fi
+    if ! mv "$NEW" "$COMM/$2" 2>>"$LOG"; then
+        [ -d "$OLD" ] && mv "$OLD" "$COMM/$2" 2>>"$LOG"
+        rm -rf "$NEW"; fail "could not write the USB"
+    fi
+    # the mod's own files (data/, its owner stamp, another owner's set aside) stay with the USB:
+    # an update replaces everything else. A move that fails keeps the old folder, never deletes it.
+    _keep=1
+    for _x in "$OLD"/data "$OLD"/.data.owner "$OLD"/.data@*; do
+        [ -e "$_x" ] || continue
+        mv "$_x" "$COMM/$2/" 2>>"$LOG" || { _keep=0; log "install $2: could not carry ${_x##*/} over: $OLD kept"; }
+    done
+    [ "$_keep" = 1 ] && rm -rf "$OLD" 2>/dev/null
+    [ "$was_off" = 1 ] || enabled_set "$2" on || log "azmods.cfg: could not turn $2 on"
+    stick_restore; rm -rf "$WORK"
+    DONE=0; TOTAL=0
+    # installed from the deck: the DJ's approval of exactly this .so (an update replaces the line)
+    APPR=1; approval "$2" "$sosha" || { APPR=0; log "approved list: could not record $2 $sosha"; }
+    [ "$APPR" = 1 ] && log "approved $2 $sosha"
+    build_catalog
+    if [ "$APPR" = 0 ]; then status "done" "$name $ver installed. After Reload, open it under Installed and press Allow."
+    elif [ "$was_off" = 1 ]; then status "done" "$name $ver installed. It stays turned off, as before."
+    else status "done" "$name $ver installed. Press Reload now to start it."; fi
+}
+# the approved list on p7 (see Safety, at the top): $1 id, $2 the sha256 of its .so, or "" to drop the id.
+# Valid lines only, one per id, the newest last, at most APPROVED_MAX. The lock is the file
+# core flocks (busybox flock has no wait: a few tries; core holds it for milliseconds).
+approval(){
+    mkdir -p "$CSTATE" 2>>"$LOG" || return 1
+    ( n=0; until flock -n 8; do n=$((n+1)); [ "$n" -ge 5 ] && exit 1; sleep 1; done
+      { [ -f "$APPROVED" ] && tr -d '\r' < "$APPROVED" | awk -v id="$1" 'NF==2 && $1!=id && $1 ~ /^[a-z0-9-]+$/ && length($1)>=3 && length($1)<=32 && length($2)==64 && $2 !~ /[^0-9a-f]/'
+        [ -n "$2" ] && printf '%s %s\n' "$1" "$2"; } | tail -n "$APPROVED_MAX" > "$APPROVED.new" \
+        && sync && mv -f "$APPROVED.new" "$APPROVED" ) 8> "$CSTATE/.approved.lock"
+}
+# a mod's switch in MODS/azmods.cfg: $1 id (validated before this point), $2 on|off|"" (removed).
+# Edited in RAM, then written to the stick tmp + rename (cfg_stick_put). The loader then hands
+# the stick's file to azmod. A stick file that is not a settings file is never overwritten.
+enabled_set(){
+    command -v cfg_set >/dev/null 2>&1 || return 1
+    _t=/tmp/az-community/cfg.edit
+    if [ -f "$CFG" ]; then cfg_valid "$CFG" && cp -f "$CFG" "$_t" || return 1; else cfg_new "$_t" || return 1; fi
+    [ "$(cfg_get "$_t" "community-mods.$1")" = "$2" ] && return 0
+    cfg_set "$_t" "community-mods.$1" "$2" && cfg_stick_put "$_t" "$MNT"
+}
+
+# a mod's display name from its azmod.json (one line, printable, 47 bytes), or nothing
+mod_name(){ mod_field name "$1"; }
+mod_author(){ mod_field author "$1"; }
+mod_field(){ jflat "$2" "$ST/name.flat" 2>/dev/null && grep "^$1${TAB}s${TAB}" "$ST/name.flat" | head -1 | cut -f3 | tr -cd ' -~' | cut -c1-47; rm -f "$ST/name.flat"; }
+remove_mod(){
+    valid_id "$1" || fail "bad mod id"
+    need_stick
+    RMNAME=$(mod_name "$COMM/$1/azmod.json")
+    [ -d "$COMM/$1" ] || [ -n "$(cfg_get "$CFG" "community-mods.$1")" ] || fail "$1 is not installed"
+    status installing "removing $1"
+    stick_rw || fail "the USB is read-only"
+    rm -rf "$COMM/.$1.old" 2>/dev/null
+    if [ -d "$COMM/$1" ]; then mv "$COMM/$1" "$COMM/.$1.old" 2>>"$LOG" || fail "could not remove $1"; fi
+    stick_restore; enabled_set "$1" "" || fail "could not update MODS/azmods.cfg"; stick_rw || fail "the USB is read-only"
+    # renamed first: a half-deleted copy must never be put back by the leftover recovery
+    [ -d "$COMM/.$1.old" ] && mv "$COMM/.$1.old" "$COMM/.$1.del" 2>>"$LOG"; rm -rf "$COMM/.$1.del" "$COMM/.$1.old" 2>>"$LOG"
+    stick_restore
+    # removed: the deck no longer trusts that id (a copy put back later asks again)
+    if [ -f "$APPROVED" ] && grep -q "^$1 " "$APPROVED" 2>/dev/null; then approval "$1" "" || log "approved list: could not drop $1"; fi
+    build_catalog; status "done" "${RMNAME:-$1} removed from the USB."
+}
+toggle_mod(){   # $1 enable|disable, $2 id
+    valid_id "$2" || fail "bad mod id"
+    need_stick
+    [ -f "$COMM/$2/azmod.json" ] || fail "$2 is not installed"
+    if [ "$1" = enable ]; then enabled_set "$2" on || fail "could not update MODS/azmods.cfg"
+    else enabled_set "$2" off || fail "could not update MODS/azmods.cfg"; fi
+    TGNAME=$(mod_name "$COMM/$2/azmod.json")
+    if [ "$1" = enable ]; then w=on; else w=off; fi
+    build_catalog; status "done" "${TGNAME:-$2} turns $w after Reload."
+}
+# drop one repository (normalized URL $1) from repos.txt again
+repos_drop(){
+    stick_rw || return 1
+    k=$(rkey "$1")
+    tr -d '\r' < "$COMM/repos.txt" | grep . | while IFS= read -r l; do [ "$(rkey "$(norm_repo "$l")")" = "$k" ] || printf '%s\n' "$l"; done > "$COMM/.repos.new"
+    mv -f "$COMM/.repos.new" "$COMM/repos.txt"; stick_restore; build_catalog
+}
+repos_edit(){   # $1 add|del, $2 repo
+    [ "$1" = add ] && case "$2" in http://*) fail "Repository addresses must start with https://." ;; esac
+    RU=$(norm_repo "$2") || fail "Not a repository address: type owner/name, a github.com address, or https://.../azmods-repo.json"
+    need_stick
+    stick_rw || fail "the USB is read-only"
+    mkdir -p "$COMM" 2>>"$LOG" || fail "cannot write MODS/community-mods"
+    # repos.txt keeps each repo as the DJ typed it (the catalog shows that text);
+    # matching is on the normalized URL, so owner/name and its github.com URL are one repo
+    raw=$( [ -f "$COMM/repos.txt" ] && tr -d '\r' < "$COMM/repos.txt" | grep . )
+    # compared as rkey does: Owner/Mods and owner/mods are one GitHub repository
+    cur=$(printf '%s\n' "$raw" | while IFS= read -r l; do [ -n "$l" ] && u=$(norm_repo "$l") && rkey "$u"; done)
+    RK=$(rkey "$RU")
+    if [ "$1" = add ]; then
+        if printf '%s\n' "$cur" | grep -qxF "$RK"; then stick_restore; build_catalog; status "done" "$(repo_key "$RU") is already in your repositories."; return 0; fi
+        [ "$(printf '%s\n' "$cur" | grep -c .)" -lt "$MAX_USER_REPOS" ] || fail "at most $MAX_USER_REPOS repositories"
+        { printf '%s\n' "$raw" | grep .; printf '%s\n' "$2"; } > "$COMM/.repos.new" && mv -f "$COMM/.repos.new" "$COMM/repos.txt" || fail "could not write repos.txt"
+        stick_restore
+        OP=addrepo; refresh
+        # say what happened to this repo, as well as the whole refresh. Its cache is named after the
+        # spelling the repo set kept (the Mod Index's, when it lists the same repository).
+        RH=$(awk -F "$TAB" -v k="$RK" "$RKEYAWK"'rkey($1)==k{ print $4; exit }' "$CACHE/repos.cur" 2>/dev/null); RH=${RH:-$(hash16 "$RU")}
+        hs=$(cut -f1 "$CACHE/$RH.state" 2>/dev/null)
+        if [ "$hs" = ok ]; then n=$(cut -f1 "$CACHE/$RH.count"); m="$n mods"; [ "$n" = 1 ] && m="1 mod"
+            status "done" "Added $(repo_key "$RU"): $m."
+        elif grep -q '^msg=No internet' "$STATUS"; then status error "Added $(repo_key "$RU"). No internet to read it yet: press Refresh on WiFi."
+        elif [ "$(cut -f3 "$CACHE/$RH.state" 2>/dev/null)" = 404 ]; then
+            # nothing at that address: a typo is far likelier than a repository that comes back, so it is not kept
+            repos_drop "$RU"; status error "Not found at $(repo_key "$RU"). Check the spelling."
+        else status error "Added $(repo_key "$RU"), but it could not be read: $(cut -f2 "$CACHE/$RH.state" 2>/dev/null)"; fi
+    else
+        printf '%s\n' "$cur" | grep -qxF "$RK" || { stick_restore; fail "$(repo_key "$RU") is not in your repositories"; }
+        printf '%s\n' "$raw" | grep . | while IFS= read -r l; do [ "$(rkey "$(norm_repo "$l")")" = "$RK" ] || printf '%s\n' "$l"; done > "$COMM/.repos.new"
+        mv -f "$COMM/.repos.new" "$COMM/repos.txt" || fail "could not write repos.txt"
+        stick_restore; build_catalog; status "done" "Removed $(repo_key "$RU")."
+    fi
+}
+
+# ---- dispatch ------------------------------------------------------------------
+# one request at a time (the watcher is serial; this guards a hand-run next to it)
+exec 9> "$ST/lock"
+flock -n 9 2>/dev/null || { log "busy: another az-community is running"; exit 0; }
+# the watcher passes the request line as one argument: split it here, never globbing
+# shellcheck disable=SC2086
+if [ $# -eq 1 ]; then set -f; set -- $1; set +f; fi
+OP=${1:-}; ID=""
+# Leftovers from an interrupted swap are never loaded (ids cannot start with a dot). If power
+# was lost between install_mod's two mv's, <id> is gone: finish the install when .<id>.new is
+# complete (its .origin is written last, after the verified copy), else put .<id>.old back.
+# Only then clean up, and never delete the copy a failed recovery still needs.
+if [ -n "$COMM" ] && [ -d "$COMM" ] && for x in "$COMM"/.[!.]*; do printf '%s\n' "${x##*/}"; done | grep -qE '^\.[a-z0-9-]+\.(new|old|del)$|^\.(enabled|repos)\.new$'; then
+    if stick_rw; then
+        for x in "$COMM"/.*.new "$COMM"/.*.old; do
+            [ -d "$x" ] || continue
+            i=${x##*/}; i=${i#.}; i=${i%.*}
+            valid_id "$i" && [ ! -e "$COMM/$i" ] || continue
+            if [ -d "$COMM/.$i.new" ] && grep -q '^installed=' "$COMM/.$i.new/.origin" 2>/dev/null; then
+                mv "$COMM/.$i.new" "$COMM/$i" 2>>"$LOG" && log "recovered $i: finished the interrupted install"
+            elif [ -d "$COMM/.$i.old" ]; then
+                mv "$COMM/.$i.old" "$COMM/$i" 2>>"$LOG" && log "recovered $i: put the previous copy back"
+            fi
+        done
+        for x in "$COMM"/.*.new "$COMM"/.*.old "$COMM"/.*.del; do
+            [ -e "$x" ] || continue
+            i=${x##*/}; i=${i#.}; i=${i%.*}
+            if [ -d "$x" ] && valid_id "$i" && [ ! -e "$COMM/$i" ] && case "$x" in *.old) true ;; *.new) grep -q '^installed=' "$x/.origin" 2>/dev/null ;; *) false ;; esac; then
+                log "kept $x: $i could not be recovered"; continue
+            fi
+            rm -rf "$x" 2>>"$LOG" && log "cleaned $x"
+        done
+        stick_restore
+    fi
+fi
+case "$OP" in
+    refresh) [ $# -eq 1 ] || fail "usage: refresh"; refresh ;;
+    install) [ $# -eq 3 ] || fail "usage: install <repo> <id>"; ID=$3; install_mod "$2" "$3" ;;
+    remove)  [ $# -eq 2 ] || fail "usage: remove <id>"; ID=$2; remove_mod "$2" ;;
+    enable|disable) [ $# -eq 2 ] || fail "usage: $OP <id>"; ID=$2; toggle_mod "$OP" "$2" ;;
+    addrepo) [ $# -eq 2 ] || fail "usage: addrepo <repo>"; repos_edit add "$2" ;;
+    delrepo) [ $# -eq 2 ] || fail "usage: delrepo <repo>"; repos_edit del "$2" ;;
+    catalog) build_catalog; status "done" "catalog rebuilt" ;;
+    apply)
+        [ -n "$MNT" ] && [ -d "$MODS" ] || fail "no mods stick"
+        # the loader mirrors MODS/community-mods/ only for a stick that carries the core: without one
+        # it stages nothing, and "applied" would be a claim with nothing behind it
+        [ -f "$MODS/azmod-core.so" ] || [ -f "$MODS/azmod.so" ] || fail "this USB has no AZ-MODS (MODS/azmod.so): nothing to apply"
+        status reloading "Reloading the deck software..." ;;
+    settle)
+        if grep -q '^state=reloading' "$STATUS" 2>/dev/null; then
+            OP=apply; build_catalog
+            # say "applied" only when the stage now holds what the stick asks for
+            if [ -d "$COMM" ] && [ "$OFF" = 0 ] && [ -n "${AZ_STAGE:-}" ] && [ ! -d "$AZ_STAGE/community" ]; then
+                status error "not applied: the deck could not copy MODS/community-mods (see /tmp/az-usbload.log)"
+            else status "done" ""; fi   # the Installed list shows the result
+        fi ;;
+    *) OP=""; fail "unknown request" ;;
+esac
+exit 0

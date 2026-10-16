@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# LeakSanitizer suppressions for the unit suites' sanitizer pass (run.sh SAN=asan).
+#
+# Every entry here is a test harness's FAKE of an object EP147 owns (a LoadState, a grid, a
+# BpmState, a TaglistEditor...). The code under test never allocates or frees these: in production
+# the memory belongs to EP147. The harnesses keep them mapped on purpose ("never freed: the memory
+# stays mapped, as EP147's does", meowgrid_test.c), so a late read by the code under test lands on
+# poisoned content the suite can detect, instead of on memory the allocator has handed to someone
+# else. A leak report for them says nothing about azmod or azstem.
+#
+# Each pattern is anchored (^...$) to one harness function, so an allocation made by the code under
+# test is still reported unless that harness function itself is on its stack.
+
+# bpmstate_test.c / ltisnap_test.c: mk (a fake BpmState + control block; LoadState, LoadedTrackInfo)
+leak:^mk$
+# lifetime_test.c: mk_ls / mk_lti / fake_obj (LoadState, LoadedTrackInfo, DjPlayerUnit fakes)
+leak:^mk_ls$
+leak:^mk_lti$
+leak:^fake_obj$
+# meowgrid_test.c: mk_obj / mk_grid / mk_loadstate (meow-protocol grid objects, never freed by design)
+leak:^mk_obj$
+leak:^mk_grid$
+leak:^mk_loadstate$
+# readers_test.c: new_obj (TaglistEditor / mixer Channel / VinylSpeedAdjustor fakes)
+leak:^new_obj$
+# f4ident_test.c: mk_state (a fake gui::PlayerInfoState)
+leak:^mk_state$

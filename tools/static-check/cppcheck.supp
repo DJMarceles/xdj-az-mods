@@ -1,0 +1,48 @@
+// cppcheck suppressions for tools/static-check.sh (cppcheck 1.82, --enable=warning,portability,performance).
+// One suppression per line, each under the reason for it. Only whole-line // comments are allowed.
+// A file-scoped entry names a path relative to guest/ (src/ in the published layout), as cppcheck
+// reports it.
+//
+// readdir() "is not reentrant, use readdir_r": readdir_r is deprecated by glibc and POSIX.1-2008;
+// readdir is thread-safe for distinct DIR streams, and every stream here is local to one call.
+readdirCalled
+//
+// "Casting between integer* and float*/double*": the casts read fields of EP147's own objects at
+// reverse-engineered offsets, through a char* + offset; the bytes there are of the cast-to type.
+invalidPointerCast
+//
+// "void pointers in calculations": GNU C's void* arithmetic (byte steps), deliberate; the code is
+// only built by GCC.
+arithOperationsOnVoidPointer
+//
+// azmod/crash_guards.c az_segv_handler: "Resource leak: fd" on the paths after close(fd); the
+// handler closes fd before handing the signal on, and cppcheck 1.82 loses it across the nested
+// /proc/self/maps loop.
+resourceLeak:azmod/crash_guards.c
+//
+// azmod/menu_popup.c (the native button builder): "Memory leak: p" on the failure returns after
+// EP147's button constructor has run on p. Leaving the half-built object is deliberate: EP147
+// may already hold references to it (timer, name string), and freeing it would turn a rare
+// out-of-memory path into a use-after-free inside EP147.
+memleak:azmod/menu_popup.c
+//
+// azmod/sdk_audio.c sdk_audio_tap: "Memory leak: acc": acc is stored in g_sdk_tap[] through a
+// compound literal on success and freed on every refusal; cppcheck 1.82 does not follow the store.
+memleak:azmod/sdk_audio.c
+//
+// azmod/stems_display.c stem_tiles_status: "the condition 'deck>=4' is redundant or the array is
+// accessed at index 4": the function returns at its top for an out-of-range deck; the later
+// range check cppcheck pairs the accesses with is the redundant one.
+arrayIndexOutOfBoundsCond:azmod/stems_display.c
+//
+// azmod/library_edits.c ls_pdb_sync_root: "Possible null pointer dereference: pl" in the cleanup
+// loop over npl entries; npl > 0 only after pl was allocated.
+nullPointer:azmod/library_edits.c
+//
+// azmod/screen_community.c cm_req: "format string requires 0 parameters but 2 are given": the
+// format is the caller's (cm_req("install %s %s", ...)); unused trailing arguments are defined.
+wrongPrintfScanfArgNum:azmod/screen_community.c
+//
+// azstem/azstem.c logln: "Repositioning ... in append mode has no effect": the fseek is there to
+// make ftell report the size (the cap check), not to move the write position.
+seekOnAppendedFile:azstem/azstem.c

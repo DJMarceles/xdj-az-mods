@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Unit]
+Description=AZ opt-in boot snapshot (only with MODS/diag.on; one capture, then exits)
+DefaultDependencies=no
+After=EP147.service
+[Service]
+# simple: a ~60s oneshot would hold the boot transaction open and so delay
+# az-usbload's restart gate (`systemctl is-system-running`).
+Type=simple
+ExecStart=/usr/sbin/az-bootlog
+TimeoutStartSec=150
+[Install]
+WantedBy=multi-user.target

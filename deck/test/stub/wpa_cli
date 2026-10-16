@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# fake: `wpa_cli -i mlan0 status` -> wpa_state from /tmp/stub.wpa_state (absent = fail).
+# Test stub, found first on PATH (/stub) by the suites.
+[ -f /tmp/stub.wpa_state ] || exit 1
+echo "bssid=aa:bb:cc:dd:ee:ff"; echo "ssid=TEST"; echo "wpa_state=$(cat /tmp/stub.wpa_state)"

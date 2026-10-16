@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# devflag, sourced by the suites that test the loader on UNSIGNED test sticks: they run
+# it with the developer override (az-usbload TRUST: /home/root/settings/azmods-unsigned.on).
+# Called before every loader run, because several suites wipe /home/root between cases.
+# trust.sh does not source this: it tests the rule itself.
+devflag() { mkdir -p /home/root/settings && : > /home/root/settings/azmods-unsigned.on; }

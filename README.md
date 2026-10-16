@@ -5,13 +5,13 @@
 
 **Root Access & Mods for the XDJ-AZ**
 
-[![Version](https://img.shields.io/badge/version-1.2-8A2BE2)](../../releases)
+[![Version](https://img.shields.io/badge/version-1.2.3-8A2BE2)](../../releases)
 [![Firmware](https://img.shields.io/badge/XDJ--AZ%20firmware-2.00-blue)](#install)
 [![Platform](https://img.shields.io/badge/desktop%20app-macOS%20%7C%20Windows-lightgrey)](../../releases)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/SGBxQPK24J)
 
-[**Download**](../../releases) · [Install](#install) · [Features](#features) · [How it works](#how-it-works) · [Safety](#safety) · [FAQ](#faq) · [Developers](#developers) · [**Discord**](https://discord.gg/SGBxQPK24J)
+[**Download**](../../releases) · [Install](#install) · [Features](#features) · [How it works](#how-it-works) · [Safety](#safety) · [FAQ](#faq) · [Community Mods](#community-mods) · [Source code](#source-code) · [Developers](#developers) · [**Discord**](https://discord.gg/SGBxQPK24J)
 
 </div>
 
@@ -30,7 +30,7 @@
 
 > [!NOTE]
 > Before you start, download the stock **XDJAZv200.UPD** (firmware 2.00) from
-> AlphaTheta's support site.
+> the official support site.
 > ALSO, make sure the USB you're using to flash the modded firmware is
 > formatted to <b>FAT32</b>.
 
@@ -38,32 +38,34 @@
 
 2. **Patch the firmware (once).** In the desktop app, open the *Install* tab,
    drop in your stock `.UPD`, select your USB stick and click
-   **Build & write to USB**. This builds AZ-MODS firmware **2.01**. On the deck: power off, put the stick in
+   **Build & write to USB**. This builds AZ-MODS firmware **2.01**. On the deck: power off, put the USB in
    **USB 1**, hold **deck 2's BEAT SYNC + MASTER** while powering on, and run
    the update.
 
-3. **Choose your mods.** Select your music stick in the desktop app, tick the
-   mods you want and click **Install to stick**. Boot the deck with that stick
-   in and the mods load. Boot with a stick that has no mods, or no stick at
+3. **Choose your mods.** Select your music USB in the desktop app, tick the
+   mods you want and click **Install to USB**. Boot the deck with that USB
+   in and the mods load. Boot with a USB that has no mods, or no USB at
    all, and the deck is stock.
 
 4. **Make stems, add samples.** Right-click tracks or playlists in the desktop
    app to render stems, and add your drum samples to a bank. Eject and play.
 
-Future mod updates only need to update the files in the `MODS` folder on your
-USB, and are supplied through the desktop app/in the Updates section of the mod menu itself. After the first firmware flash,
-you shouldn't ever have to flash again.
+Mod updates only change the files in the `MODS` folder on your USB. Get them from
+the desktop app or from **Updates** in the Mod Menu; an update installed on the deck
+applies at the next reload (the deck never restarts by itself while a track is
+loaded). After the first firmware flash you shouldn't ever have to flash again.
 
 > [!NOTE]
-> When the mod loader is loading mods(for the first time, or after an update), you will see a  **black screen** after the
-> device boots, **this is normal**, just wait a few seconds while it loads the mods.
+> When the mod loader loads mods for the first time, or after an update, you will see a
+> **black screen** after the deck boots. **This is normal**: wait a few seconds while it
+> loads the mods.
 
 <br>
 
 ## Uninstall
 
-**Just want the deck stock for a gig?** Boot without the stick, or flip
-*Disable mods* for your stick in the desktop app and power-cycle. Nothing else
+**Just want the deck stock for a gig?** Boot without the USB, or flip
+*Disable mods* for your USB in the desktop app and power-cycle. Nothing else
 is needed.
 
 **Removing AZ-MODS completely:**
@@ -73,16 +75,16 @@ is needed.
    **Uninstall** tick **Uninstall AZ-MODS from the deck on the next
    power-cycle**.
 
-2. **Power-cycle the deck with that stick in USB 1.** On this boot the deck
+2. **Power-cycle the deck with that USB in USB 1.** On this boot the deck
    removes every AZ-MODS file it stored.
 
-3. **Check the result.** Put the stick back in your computer. The app shows
+3. **Check the result.** Put the USB back in your computer. The app shows
    **No AZ-MODS files remain on the deck. You can now flash the stock
    firmware.** If it lists anything still on the deck, leave the box ticked
    and power-cycle once more.
 
 4. **Flash the stock firmware.** Put the stock `XDJAZv200.UPD` on a USB stick
-   and flash it the same way you installed: power off, stick in **USB 1**,
+   and flash it the same way you installed: power off, USB in **USB 1**,
    hold **deck 2's BEAT SYNC + MASTER** while powering on, and run the update.
 
 Your deck is now exactly as it started before modding.
@@ -100,10 +102,11 @@ Your deck is now exactly as it started before modding.
 | [**Drum Roll**](#drum-roll) | A sample roll instrument on the X-PAD, locked to the deck's BPM |
 | [**60 FPS Waveforms**](#60-fps-waveforms) | Lifts the stock ~30 FPS waveform cap to 60 |
 | [**Themes**](#themes) | A light Day theme for bright rooms, plus four dark color themes |
+| [**Community Mods**](#community-mods) | Browse, install and manage mods made by other DJs from the Mod Menu |
 
 ### Mod Menu
 
-The home for every mod, right in the deck's SOURCE list: switch features on
+The home for every mod, in the deck's SOURCE list: switch features on
 and off and change their settings, with a short description of each. Your
 settings are remembered, and future mods show up here too.
 
@@ -215,9 +218,14 @@ I have tons of other ideas for more mods. This is only the beginning!
 ## How it works
 
 - **The firmware patch installs a mod loader, not the mods.** On every boot,
-  the loader checks the stick's `MODS` folder and makes sure exactly what's
+  the loader checks the USB's `MODS` folder and makes sure exactly what's
   there is what's running. The deck keeps a copy of the last set only so the
-  usual boot with the same stick is instant.
+  usual boot with the same USB is instant.
+- **Official mods are signed.** Every mods release is signed. The loader runs a
+  script from the USB only when its hash is listed in the release's signed
+  `deck/trust.pins`, and the updater refuses a set that is not signed or is older than
+  the one installed. Community mods are not signed by AZ-MODS: the deck loads one only
+  after you approve it (see [Community Mods](#community-mods)).
 - **No firmware is redistributed.** The desktop app ships a small patch plus the
   hashes of the input and output. You supply the stock file. Anything
   unrecognized is refused.
@@ -225,8 +233,8 @@ I have tons of other ideas for more mods. This is only the beginning!
 ## Safety
 
 - **Off switch without reflashing.** If a mod misbehaves or the deck won't
-  boot cleanly, flip *Disable mods* for your stick in the desktop app and
-  power-cycle, or just boot without the stick. The deck boots stock either way.
+  boot cleanly, flip *Disable mods* for your USB in the desktop app and
+  power-cycle, or just boot without the USB. The deck boots stock either way.
 - **Stock recovery always works.** Update mode is untouched. Flash the stock
   `XDJAZv200.UPD` the same way and the deck is stock again.
 - **Crash protection.** If the mods ever keep crashing the deck right after it
@@ -238,7 +246,7 @@ I have tons of other ideas for more mods. This is only the beginning!
 ## FAQ
 
 <details>
-<summary><b>I'm on AZ-MODS 1.32. How do I get 2.01?</b></summary>
+<summary><b>I'm on AZ-MODS firmware 1.32. How do I get 2.01?</b></summary>
 <br>
 Build 2.01 from the stock <code>XDJAZv200.UPD</code> in the desktop app and flash
 it the same way as before. The app also updates the mods on your USB if they are
@@ -246,7 +254,7 @@ too old for 2.01.
 </details>
 
 <details>
-<summary><b>Other AlphaTheta decks?</b></summary>
+<summary><b>Other decks?</b></summary>
 <br>
 No, XDJ-AZ only. The patcher refuses anything else.
 </details>
@@ -270,11 +278,11 @@ stored on the deck, run the [Uninstall](#uninstall) steps before you flash.
 <details>
 <summary><b>Do I need the mods on the USB stick every time?</b></summary>
 <br>
-Yes. The mods load from the stick that's in when the deck boots.
+Yes. The mods load from the USB that's in when the deck boots.
 </details>
 
 <details>
-<summary><b>Two sticks with mods?</b></summary>
+<summary><b>Two USBs with mods?</b></summary>
 <br>
 The one in USB 1 takes priority.
 </details>
@@ -289,24 +297,92 @@ Playlist Editing, and those edits are written the way rekordbox expects.
 
 <br>
 
+## Community Mods
+
+Mods made by other DJs, installed from the deck: open **Mod Menu > Community
+Mods**, browse the Mod Index or add a repository by its address, and install.
+The AZ-MODS desktop app has a Community Mods tab that does the same from your computer.
+
+- **Make one:** the [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) has a
+  working template mod, the developer guide and the rules every mod must follow.
+- **Get listed:** host your mod in your own GitHub repository, then open a pull request
+  on [az-mods-index](https://github.com/Kyle-Hosman/az-mods-index) to add it to the
+  Mod Index.
+- **Safety:** community mods are made by other people and are not checked by AZ-MODS.
+  The deck runs only the mod files you approved: a mod installed from the deck is
+  approved by that install, and any other mod it finds on the USB waits on a
+  **New mod found: allow?** page. A mod whose code crashes the deck is switched off on
+  the next start, and only that mod; if the deck keeps restarting right after starting
+  community mods, none are loaded until you turn them back on in the Mod Menu.
+
+<br>
+
+## Source code
+
+The source of the mods is in this repository (GPL-3.0-only), so you can read exactly
+what runs on your deck and rebuild it byte for byte.
+
+| Path | What |
+|:--|:--|
+| [`src/azmod/`](src/azmod) | `azmod.so`: the Mod Menu, every on-screen mod and the Community Mods host |
+| [`src/azstem/`](src/azstem) | `azstem.so`: stems and drum rolls through the deck's own audio engine |
+| [`src/common/`](src/common), [`src/azhandoff/`](src/azhandoff) | code shared by both libraries; the guard that hands the deck back after a mod's program |
+| [`deck/`](deck) | the loader and the scripts that start the mods from the USB stick, with their tests |
+| [`tests/`](tests), [`tools/`](tools) | the unit tests and their runners; asset extraction, formatting, static checks, fuzzing |
+
+| Read | For |
+|:--|:--|
+| [`BUILDING.md`](BUILDING.md) | the toolchain, the build, and checking an official release against this source (`verify.sh`) |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | how the two libraries work inside the deck, module by module |
+| [`docs/`](docs/README.md) | the USB's file formats and the systems around the mods: updates and signing, Community Mods, Playlist Editing, Remote Stems, firmware support, testing |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | bug reports and pull requests |
+
+Build on macOS or Linux with Docker (`BUILDING.md` has the Windows commands and each step):
+
+```sh
+python3 tools/extract-assets.py path/to/official/azmod.so   # fills in the firmware-derived headers
+./build.sh                                                  # builds the image if missing, then src/out/*.so
+```
+
+Nothing from the deck's firmware is in here: the few images AZ-MODS reuses from the
+deck, and the key for the deck's library database, are filled in from an official
+`azmod.so` when you build.
+
+<br>
+
 ## Developers
 
-SSH for root shell access can be enabled from the stick with key-pair
-authentication: the AZ-MODS desktop app has a box to tick for this, it
-essentially adds `MODS/ssh.enable` and an `authorized_keys` file containing
-your **ECDSA** public key.
-The SSH service comes up after the deck's UI is loaded, and is gone when the
-stick isn't present/doesn't have the enable and keys files at boot.
+Root SSH access can be enabled from the USB, with key-pair authentication only.
+The AZ-MODS desktop app has a box to tick for this: it adds `MODS/ssh.enable` and a
+`MODS/authorized_keys` file with your **ECDSA** public key. The SSH service starts
+after the deck's UI has loaded, and only when the USB in the deck at boot has those
+files.
 
-Mod sources, the emulator they're developed on and the research notes will be
-published soon*
+AZ-MODS is open source (GPL-3.0). Everything for building, testing and sharing mods:
 
-I plan on making the mod menu a centralized manager for downloading
-community-made mods as well (think like iOS jailbreak scene's Cydia app). Where
-users will eventually be able to add repos hosted by other mod creators to
-download and install their mods, all directly on the deck!
+| Repository | What it holds |
+|---|---|
+| This repository | The source of the official mods, the deck scripts, and the build and verify tools |
+| [xdj-az-emu](https://github.com/Kyle-Hosman/xdj-az-emu) | The XDJ-AZ emulator, for running and testing mods on a Mac or PC |
+| [az-mods-sdk](https://github.com/Kyle-Hosman/az-mods-sdk) | The SDK: headers, documentation and a template for writing your own mod |
+| [az-mods-examples](https://github.com/Kyle-Hosman/az-mods-examples) | Complete example mods to read and start from |
+| [az-mods-index](https://github.com/Kyle-Hosman/az-mods-index) | The Mod Index: the list of community mods the deck and the app show |
+
+See also [Community Mods](#community-mods).
 
 Have fun!
+
+<br>
+
+## License
+
+The source in this repository (the mods, the deck scripts, the build and verify tools)
+is free software under the GNU General Public License, version 3 (GPL-3.0-only). The full
+text is in [`LICENSE`](LICENSE); the few third-party parts and their licenses are listed
+in [`NOTICE`](NOTICE).
+
+Community mods run inside the AZ-MODS core, so they are GPL-3.0 as well; the
+[AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) has the details.
 
 <br>
 
@@ -317,7 +393,7 @@ been chasing for years: that <ins>DJ software can be more capable, more fun, and
 less restricted than what we currently settle for.</ins>
 
 That idea became **MixRack**, a DJ app I have been building for a long time. If
-this project resonates with you, take a look: [mixrack.net](https://mixrack.net)
+you like this project, take a look: [mixrack.net](https://mixrack.net)
 
 <br>
 
@@ -339,6 +415,6 @@ If you enjoy the benefits that AZ-MODS gives you and would like to say thanks, y
 <p align="center">
   <sub>
   Not affiliated with AlphaTheta, Pioneer DJ or rekordbox; trademarks belong to their owners.<br>
-  MIT license, see <a href="LICENSE">LICENSE</a>. Built by <a href="https://github.com/Kyle-Hosman">Kyle Hosman</a>.
+  GPL-3.0-only, see <a href="LICENSE">LICENSE</a>. Built by <a href="https://github.com/Kyle-Hosman">Kyle Hosman</a>.
   </sub>
 </p>

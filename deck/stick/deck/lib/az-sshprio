@@ -1,0 +1,104 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# az-sshprio: dropbear's scheduling around an EP147 (re)start. Run by az-sshwindow.service,
+# which 10-sshgate.sh writes when SSH is on; never by hand.
+#
+#   az-sshprio window [SECS]   raise the dropbear listener to real-time for SECS seconds
+#                              (default 120), keeping every session at normal priority
+#   az-sshprio normal          every dropbear task back to normal priority (SCHED_OTHER)
+#
+# Why: EP147's apl_start.sh turns real-time throttling off (sched_rt_runtime_us=-1) and runs the
+# subucom bus at RR 99 and EP147's audio at RR 1 on every core. While EP147 starts, those threads
+# can leave no CPU time at all to normal tasks, and a normal-priority dropbear stops accepting:
+# SSH looks dead until the burst is over. A permanent RR 50 for dropbear would prevent that, but
+# every SSH session, and every command typed in one, would then outrank X and all of EP147's
+# normal threads. So dropbear runs at normal priority, and only for the start window does the
+# listener get RR 50, so it keeps accepting.
+#
+# Sessions never keep real-time. A connection accepted during the window forks a session that
+# inherits RR 50 (busybox chrt cannot set SCHED_RESET_ON_FORK). Once a second, every task in
+# az-dropbear.service's cgroup other than the listener is set back to SCHED_OTHER; at the end of
+# the window the listener is too. This service runs at RR 51 (its unit), above any session it
+# demotes, so it is not starved by the burst it is there for. ExecStopPost runs `normal`, so a
+# stopped or killed window still leaves nothing real-time behind.
+#
+# Test hooks: AZ_SSHPRIO_MAIN (listener pid), AZ_SSHPRIO_TASKS (a file listing the cgroup's
+# task ids), AZ_SSHPRIO_TICK (seconds between sweeps).
+set -u
+LOG=/tmp/az-sshgate.log
+azlog_cap() { return 0; }   # replaced below by deck/lib/az-logcap.sh, the shared cap
+for _azl_f in "${0%/*}/az-logcap.sh" /tmp/az-deck/lib/az-logcap.sh; do
+    # shellcheck source=az-logcap.sh
+    [ -f "$_azl_f" ] && { . "$_azl_f"; break; }
+done
+log() { azlog_cap "$LOG"; echo "[sshprio $(date '+%H:%M:%S' 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+TICK=${AZ_SSHPRIO_TICK:-1}
+
+main_pid() {
+    if [ -n "${AZ_SSHPRIO_MAIN:-}" ]; then echo "$AZ_SSHPRIO_MAIN"; return; fi
+    systemctl show az-dropbear.service -p MainPID --value 2>/dev/null
+}
+# The file listing every task (thread) id in az-dropbear.service's cgroup: cgroup v1 (systemd
+# hierarchy) or v2. Empty when not found (dropbear not running).
+tasks_file() {
+    if [ -n "${AZ_SSHPRIO_TASKS:-}" ]; then echo "$AZ_SSHPRIO_TASKS"; return; fi
+    cg=$(systemctl show az-dropbear.service -p ControlGroup --value 2>/dev/null)
+    [ -n "$cg" ] || return 0
+    for f in "/sys/fs/cgroup/systemd$cg/tasks" "/sys/fs/cgroup$cg/cgroup.threads" \
+             "/sys/fs/cgroup/unified$cg/cgroup.threads"; do
+        [ -r "$f" ] && { echo "$f"; return; }
+    done
+}
+# 1 when task $1 runs SCHED_FIFO or SCHED_RR (field 41 of /proc/PID/stat, read past the comm,
+# which may contain spaces; the SCHED_RESET_ON_FORK bit masked off).
+is_rt() {
+    st=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    # shellcheck disable=SC2086  # the fields must split
+    set -- ${st##*) }
+    [ $# -ge 39 ] || return 1
+    shift 38
+    pol=$(( $1 % 1073741824 ))
+    [ "$pol" = 1 ] || [ "$pol" = 2 ]
+}
+# every task in the cgroup except $1 (0 = all of them) to SCHED_OTHER, if it is real-time
+demote_all_but() {
+    tf=$(tasks_file)
+    [ -n "$tf" ] || return 0
+    while IFS= read -r t; do
+        [ "$t" = "$1" ] && continue
+        if is_rt "$t"; then
+            chrt -o -p 0 "$t" >/dev/null 2>&1 && log "session task $t back to SCHED_OTHER"
+        fi
+    done < "$tf" 2>/dev/null
+}
+
+case "${1:-}" in
+    window)
+        secs=${2:-120}
+        mp=$(main_pid)
+        if [ -z "$mp" ] || [ "$mp" = 0 ]; then log "window: dropbear not running"; exit 0; fi
+        trap 'demote_all_but 0; chrt -o -p 0 "$mp" >/dev/null 2>&1; exit 0' TERM INT HUP
+        if chrt -r -p 50 "$mp" >/dev/null 2>&1; then
+            log "window: listener $mp at RR 50 for ${secs}s (EP147 starting)"
+        else
+            log "window: chrt failed on $mp; dropbear stays at normal priority"
+        fi
+        end=$(( $(cut -d. -f1 /proc/uptime) + secs ))
+        while [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do
+            demote_all_but "$mp"
+            sleep "$TICK"
+        done
+        demote_all_but 0
+        chrt -o -p 0 "$mp" >/dev/null 2>&1
+        log "window: over, dropbear at normal priority"
+        ;;
+    normal)
+        demote_all_but 0
+        mp=$(main_pid)
+        [ -n "$mp" ] && [ "$mp" != 0 ] && chrt -o -p 0 "$mp" >/dev/null 2>&1
+        ;;
+    *)
+        echo "usage: az-sshprio window [SECS] | normal" >&2; exit 2 ;;
+esac
+exit 0

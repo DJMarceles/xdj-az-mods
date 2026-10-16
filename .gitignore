@@ -1,0 +1,14 @@
+src/out/
+# filled in from an official azmod.so by tools/extract-assets.py (firmware-derived art and the library key: never commit)
+src/azmod/caption_strips.h
+src/azmod/fxart.h
+src/azmod/fxbars.h
+src/azmod/fxhdr.h
+src/azmod/menulabels.h
+src/azmod/onelibkey.h
+src/azmod/onelibkey_sm.h
+src/azmod/srcref.h
+src/azmod/stems4art.h
+src/azmod/wavref.h
+__pycache__/
+tests/.work/

@@ -1,0 +1,51 @@
+---
+# clang-format config for the mods sources. Format with clang-format 21.1.8 exactly
+# (pip install clang-format==21.1.8): other versions format differently.
+#
+# Tuned to the code as it already reads: each setting below was picked by counting how many
+# lines a reformat would change, and keeping the value that changes the fewest. Generated
+# tables and image arrays, the OneLibrary key headers and the vendored stb_vorbis.c are not
+# formatted.
+BasedOnStyle: Google
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+# No column limit: the line breaks already in the source are kept, nothing is re-wrapped.
+ColumnLimit: 0
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+PointerAlignment: Right
+DerivePointerAlignment: false
+SpaceAfterCStyleCast: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeCpp11BracedList: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+# true would, with no column limit, break a one-line enum after its first value
+AllowShortEnumsOnASingleLine: false
+AlwaysBreakBeforeMultilineStrings: false
+BreakAfterReturnType: Automatic
+AlignConsecutiveMacros: None
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignEscapedNewlines: Left
+# trailing comments stay where they were written
+AlignTrailingComments:
+  Kind: Leave
+SpacesBeforeTrailingComments: 1
+ReflowComments: Never
+BracedInitializerIndentWidth: 4
+EmptyLineBeforeAccessModifier: Leave
+MaxEmptyLinesToKeep: 6
+KeepEmptyLines:
+  AtEndOfFile: true
+  AtStartOfBlock: true
+# macros that expand to a whole definition (a hook thunk, a trampoline): one per line, never
+# read as part of the declaration that follows them
+StatementMacros: [TAGEDIT_THUNK, MLREPLY_THUNK, PROBE_TRAMP, PST_HOOK, MP_SHIM, DELEG_TRAMP]
+SortIncludes: Never
+IncludeBlocks: Preserve

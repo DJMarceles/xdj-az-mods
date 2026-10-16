@@ -1,0 +1,155 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# az-savelogs -- System Info > Save Logs to USB: copy the deck's logs to <stick>/MODS/logs/.
+#   az-savelogs "save <id>"    <id>: the Mod Menu's request id, echoed in the status
+# Runs under az-usbload's request watcher (modupdate_watch), never inside EP147. The watcher
+# passes the pick (AZ_MNT = stock mount, AZ_MODS) and AZ_DECKS_STATE, its decks_state() answer
+# (empty | loaded | unknown).
+#
+# REFUSES, writing nothing, when: there is no mods stick; a mods update or a community change is
+# running; the stick has under AZ_SAVELOGS_MIN_KB free (8 MB). A save is something the user asks
+# for, so it runs with tracks loaded or playing; the copy runs at the lowest CPU priority.
+#
+# WRITES <stick>/MODS/logs/<yyyymmdd-HHMMSS>/ (deck clock, UTC): summary.txt (versions, md5 of
+# the staged libraries, EP147's restarts, uptime, the last 200 lines of EP147's journal) and
+# files/<the deck path of each log>. Each file is cut to its newest FILE_MAX bytes and the
+# copy stops adding files at TOTAL_MAX; summary.txt lists every cut and skip. The set is put
+# together in RAM, copied to <name>.tmp on the stick, then renamed and synced, so a folder
+# without .tmp is always complete. A failed copy removes its .tmp; a .tmp left by a power-off
+# is removed by the next save.
+#
+# STATUS: /tmp/az-savelogs/status, key=value, rewritten whole:
+#   state   working|saved|refused|error
+#   req     the request id this status answers
+#   msg     one line for the System Info screen (ALWAYS LAST)
+set -u
+ST=/tmp/az-savelogs; STATUS=$ST/status; LOG=$ST/log; BUILD=$ST/build
+MNT=${AZ_MNT:-}; MODS=${AZ_MODS:-}
+MIN_KB=${AZ_SAVELOGS_MIN_KB:-8192}
+FILE_MAX=1048576
+TOTAL_MAX=4194304
+mkdir -p "$ST"
+azlog_cap() { return 0; }   # replaced below by deck/lib/az-logcap.sh, the shared cap
+for _azl_f in "${0%/*}/az-logcap.sh" "${0%/*}/../lib/az-logcap.sh" "${0%/*}/lib/az-logcap.sh" \
+    /tmp/az-deck/lib/az-logcap.sh; do
+    # shellcheck source=az-logcap.sh
+    [ -f "$_azl_f" ] && { . "$_azl_f"; break; }
+done
+log(){ azlog_cap "$LOG"; echo "[savelogs $(date '+%H:%M:%S' 2>/dev/null || echo -n)] $*" >> "$LOG" 2>/dev/null; return 0; }
+REQ=""
+status(){   # $1 state, $2 msg
+    { printf 'state=%s\nreq=%s\nmsg=%s\n' "$1" "$REQ" "$2"; } > "$STATUS.new" 2>/dev/null
+    mv -f "$STATUS.new" "$STATUS" 2>/dev/null; log "$1: $2"; return 0
+}
+# never a non-zero exit: the watcher must not die
+refuse(){ status refused "$1"; exit 0; }
+
+case "${1:-}" in
+    "save "*) REQ=${1#save } ;;
+    *) status error "unknown request [${1:-}]"; exit 0 ;;
+esac
+case "$REQ" in ""|*[!0-9]*) REQ=""; status error "unknown request [$1]"; exit 0 ;; esac
+[ "${#REQ}" -le 20 ] || { REQ=""; status error "unknown request [$1]"; exit 0; }
+
+# ---- may we write the stick now? -------------------------------------------------------
+[ -n "$MNT" ] && [ -d "$MODS" ] || refuse "No mods USB in the deck."
+# The watcher serves one request at a time, so this finds a run started by hand (SSH) or by an
+# older watcher: never write the stick while another script writes it.
+for _c in /proc/[0-9]*/cmdline; do
+    _p=${_c#/proc/}; _p=${_p%/cmdline}
+    [ "$_p" = "$$" ] && continue
+    case "$(tr '\0' ' ' < "$_c" 2>/dev/null)" in
+        *lib/az-modupdate\ *|*lib/az-community\ *)
+            refuse "An update or a community change is running. Try again after it." ;;
+    esac
+done
+free_kb=$(df -k "$MNT" 2>/dev/null | awk 'END { print $(NF - 2) }')
+case "$free_kb" in ""|*[!0-9]*) refuse "Could not read the free space on the USB." ;; esac
+[ "$free_kb" -ge "$MIN_KB" ] || refuse "Not enough space on the USB ($((MIN_KB / 1024)) MB needed)."
+status working "Saving logs..."
+
+# ---- put the set together in RAM -------------------------------------------------------
+rm -rf "$BUILD"; mkdir -p "$BUILD/files"
+SEEN=$ST/seen; : > "$SEEN"; NOTES=$ST/notes; : > "$NOTES"; total=0
+add(){   # $1 = a deck path; copied once, cut to FILE_MAX, until TOTAL_MAX
+    [ -f "$1" ] || return 0
+    grep -qxF "$1" "$SEEN" && return 0
+    echo "$1" >> "$SEEN"
+    n=$(wc -c < "$1" 2>/dev/null | tr -cd 0-9); n=${n:-0}
+    k=$n; [ "$k" -gt "$FILE_MAX" ] && k=$FILE_MAX
+    if [ $((total + k)) -gt "$TOTAL_MAX" ]; then
+        echo "skipped (total limit $TOTAL_MAX bytes reached): $1 ($n bytes)" >> "$NOTES"; return 0
+    fi
+    mkdir -p "$BUILD/files${1%/*}" && tail -c "$FILE_MAX" "$1" > "$BUILD/files$1" 2>/dev/null \
+        || { echo "could not read: $1" >> "$NOTES"; rm -f "$BUILD/files$1"; return 0; }
+    [ "$n" -gt "$FILE_MAX" ] && echo "cut to its newest $FILE_MAX bytes: $1 ($n bytes)" >> "$NOTES"
+    total=$((total + k))
+    return 0
+}
+P7=/home/root/settings
+# in the order of docs/LOGS.md's bug-report table, so a cut total keeps the most useful first
+for f in /tmp/azmod-crash.log /tmp/azmod-crash.log.1 /tmp/azmod-crash.txt /tmp/azmod-crash.txt.1 \
+    /tmp/az-usbload.log /tmp/az-usbload.log.1 /tmp/az-usbload.log.hooks /tmp/az-usbload-poststart.log \
+    "$P7/az-usbload/usbload.log" /tmp/azmod-community/* /tmp/azstem-build.log /tmp/azstem-build.log.1 \
+    /tmp/azmod-hooktable /tmp/azmod-build.log /tmp/azstem.probestat /tmp/azstem.phprof /tmp/azstem.stall \
+    /tmp/az-decks /run/az-reload-pending "$P7/az-usbload/az-preload.env" \
+    "$P7/azmod-community/.blame" "$P7/azmod-community/.initing" "$P7/azmod-community/.starting" \
+    "$P7/azmod-community/.crashes" \
+    /tmp/az-modupdate/status /tmp/az-modupdate/log /tmp/az-modupdate/log.1 \
+    /tmp/az-community/status /tmp/az-community/log /tmp/az-community/log.1 /tmp/azrs/log /tmp/azrs/log.1 \
+    /tmp/az-sshgate.log /tmp/az-sshgate.log.1 /tmp/az-renotify.log /tmp/az-renotify.log.1 \
+    /tmp/az-uninstall.log "$P7/az-uninstall.log" /tmp/az-bootlogo.log "$P7/az-bootlogo.log" \
+    "$LOG" "$LOG.1" /tmp/azmod-*.log /tmp/azmod-*.log.1 /tmp/azstem.log /tmp/azstem.log.1; do
+    add "$f"
+done
+fwtag=$(sed -n 's/^fw=//p' /tmp/azmod-community/loaded 2>/dev/null | head -1 | tr -d '\r')
+{
+    echo "AZ-MODS deck logs"
+    echo "saved:     $(date -u '+%Y-%m-%d %H:%M:%S' 2>/dev/null) UTC (the deck's clock)"
+    echo "mods set:  $(tr -d '\r\n' < /tmp/az-deck/version 2>/dev/null)"
+    echo "firmware:  $(tr -d '\r\n' < /etc/az-mods-release 2>/dev/null)"
+    echo "EP147:     ${fwtag:-unknown}"
+    echo "uptime:    $(cut -d' ' -f1 /proc/uptime 2>/dev/null) s"
+    echo "decks:     ${AZ_DECKS_STATE:-unknown}"
+    systemctl show EP147.service -p NRestarts -p ActiveState -p MainPID 2>/dev/null
+    echo; echo "==== staged libraries (md5)"
+    md5sum "$P7"/az-usbload/*.so 2>/dev/null
+    echo; echo "==== space"
+    df -k "$MNT" "$P7" /tmp 2>/dev/null
+    echo; echo "==== memory"
+    head -n 3 /proc/meminfo 2>/dev/null
+    echo; echo "==== files ($total bytes copied)"
+    cat "$NOTES"
+    echo; echo "==== journalctl -u EP147 -n 200"
+    journalctl -u EP147 -n 200 --no-pager 2>&1 | tail -c 262144
+} > "$BUILD/summary.txt" 2>/dev/null
+
+# ---- onto the stick: <name>.tmp, then the final name ------------------------------------
+ro=$(awk -v m="$MNT" '$2==m{print ($4 ~ /(^|,)ro(,|$)/)?1:0; exit}' /proc/mounts 2>/dev/null)
+T=""
+finish(){   # $1 state, $2 msg: remove a partial copy, put the mount back, report
+    [ -n "$T" ] && rm -rf "$T" 2>/dev/null
+    rm -rf "$BUILD"
+    sync
+    [ "$ro" = 1 ] && mount -o remount,ro "$MNT" 2>/dev/null
+    status "$1" "$2"; exit 0
+}
+if [ "$ro" = 1 ]; then
+    mount -o remount,rw "$MNT" 2>>"$LOG" || { ro=0; finish error "The USB is read-only."; }
+fi
+L=$MODS/logs
+mkdir -p "$L" 2>>"$LOG" || finish error "Could not write the USB."
+for d in "$L"/*.tmp; do   # left by a save the power cut off
+    [ -d "$d" ] && { rm -rf "$d"; log "removed an unfinished $d"; }
+done
+name=$(date -u '+%Y%m%d-%H%M%S' 2>/dev/null)
+case "$name" in [0-9]*-[0-9]*) ;; *) name=deck ;; esac
+i=1; base=$name
+while [ -e "$L/$name" ] || [ -e "$L/$name.tmp" ]; do i=$((i + 1)); name=$base-$i; done
+T=$L/$name.tmp
+if ! nice -n 19 cp -r "$BUILD" "$T" 2>>"$LOG"; then finish error "Could not write the USB (full?)."; fi
+mv "$T" "$L/$name" 2>>"$LOG" || finish error "Could not write the USB."
+T=""
+log "saved $L/$name ($total bytes of logs)"
+finish saved "Saved to MODS/logs/$name"

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# clang-tidy profile for the mods sources (tools/static-check.sh runs it with clang-tidy 10, the
+# LLVM in docker/azmod-test.Dockerfile). Bug-finding families only: no style or readability checks.
+#
+# Enabled: bugprone-*, clang-analyzer-*, cert-* (the C rules; the -cpp ones never fire on C).
+# bugprone-signed-char-misuse is CERT STR34-C. Not in clang-tidy 10, so not run: cert-err33-c,
+# cert-str34-c (as named), cert-dcl37-c, bugprone-reserved-identifier,
+# bugprone-easily-swappable-parameters.
+#
+# Disabled, each with its reason:
+#   clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#       asks for C11 Annex K (memcpy_s, snprintf_s, ...), which glibc does not provide; it fires on
+#       every memcpy/memset/snprintf (126 sites), none a finding about the call's arguments.
+#   cert-err34-c
+#       atoi/sscanf/fscanf "do not report conversion errors": every flagged call either checks the
+#       conversion count, parses a value range-checked right after (the guard's hold time), or
+#       reads digits it validated first (/proc/<pid> names). 23 sites, each read.
+#   bugprone-suspicious-string-compare
+#       `if (strcmp(a, b))` meaning "differ" is this codebase's idiom; the 7 flagged sites were
+#       read and each means exactly that.
+Checks: >-
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cert-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -cert-err34-c,
+  -bugprone-suspicious-string-compare
+WarningsAsErrors: ''

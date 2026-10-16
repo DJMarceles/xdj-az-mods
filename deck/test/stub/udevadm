@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# fake: udevadm info --query=path --name=/dev/sdX1 -> sysfs path under the bus in /tmp/ports.
+# Test stub, found first on PATH (/stub) by the suites.
+n=""; for a in "$@"; do case "$a" in --name=*) n=${a#--name=} ;; esac; done
+k=${n#/dev/}; base=$(echo "$k" | cut -c1-3)
+bus=$(awk -v k="$base" '$1==k{print $2}' /tmp/ports)
+echo "/devices/platform/usb/xhci/usb1/$bus/$bus:1.0/host0/target0:0:0/0:0:0:0/block/$base/$k"

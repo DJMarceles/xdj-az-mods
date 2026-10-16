@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# fake: systemctl -> records every call in /tmp/systemctl.calls and answers from
+# /tmp/stub.* flags. Test stub, found first on PATH (/stub) by the suites.
+echo "systemctl $*" >> /tmp/systemctl.calls
+case "$1" in
+    is-active) [ -e /tmp/stub.inactive ] && echo failed || echo active ;;
+    restart)   # record whether the RELOADING banner flag was up when we were called
+        [ -e /run/az-reloading ] && echo "banner-flag-present" >> /tmp/systemctl.calls
+        # a successful EP147 restart = a new EP147 pid with a HuiProcessor task
+        # (other units, e.g. az-dropbear.service from the sshgate hook, just get recorded)
+        [ "$2" = EP147.service ] || exit 0
+        [ -e /tmp/stub.inactive ] || { sh -c 'echo -n HuiProcessor > /proc/self/comm; while :; do sleep 1; done' >/dev/null 2>&1 &
+                                       echo $! > /tmp/stub.ep147pid; } ;;
+    is-failed) [ -e /tmp/stub.failed ] && exit 0 || exit 1 ;;
+    is-system-running) cat /tmp/stub.sysstate 2>/dev/null || echo running ;;
+esac
+exit 0

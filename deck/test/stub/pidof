@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# fake: pidof EP147 -> the pid in /tmp/stub.ep147pid (a process whose comm is HuiProcessor).
+# Test stub, found first on PATH (/stub) by the suites.
+[ "$1" = EP147 ] && [ -s /tmp/stub.ep147pid ] && cat /tmp/stub.ep147pid && exit 0
+exit 1

@@ -1,0 +1,1258 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# az-usbload: the USB mod loader. Mirrors
+# the chosen stick's MODS/ set into the p7 cache, writes the env EP147 reads at
+# start, runs the stick's deck hooks and, where the RESTART POLICY allows, applies a
+# change with one gated EP147 restart. Started late in boot by az-usbload.service; EP147.service's
+# ExecStartPost (10-azmod.conf) also runs it as `az-usbload --post-start`.
+#
+# The stick is the source of truth; EP147 starts with what it loaded last time.
+#   - 10-azmod.conf points EP147 at $ENVF on p7, so the first start of every boot
+#     preloads the last-applied set with no USB access (an early mount wedges the subucom
+#     MCU) and no restart.
+#   - This runs late (After=EP147, ordering only; Type=simple) and works out the set the
+#     chosen stick asks for (az-usbpick: USB1 first, else USB2):
+#       no stick / no MODS/ / mods.off / no usable .so / no core  -> none (stock)
+#       otherwise -> core (azmod-core.so, else azmod.so) + azstem.so, mirrored into
+#                    the p7 cache (plugins azmod-<name>.so sit beside core, never listed)
+#   - Same as what EP147 loaded (line and bytes) -> nothing at all: no write, no restart.
+#     Same-stick boots never restart.
+#   - Different -> write $ENVF for the next boot; apply now with one gated restart
+#     (section 4) only where the RESTART POLICY below allows it: early in boot, never on a
+#     deck already running mods, never over a loaded track.
+#   - Pulling the stick mid-set changes nothing until the next boot.
+# What may run from a stick is decided by the signed pins (TRUST, below).
+#
+# MODS/deck (firmware >= 1.32): a deck-side fix ships on the stick, with no reflash.
+# The stick may carry a `deck/` folder of deck-side scripts; the firmware's job is to
+# bootstrap it:
+#   deck/az-usbload      a newer copy of this script. If present and `sh -n` clean, the
+#                        firmware copy hands over to it (chain-load) and the rest of
+#                        this boot runs the stick's loader. If it fails, or the stick
+#                        carries mods.off / deck.off, the firmware copy carries on itself.
+#   deck/lib/*           newer copies of the loader's helpers (az-usbpick, usb-renotify.sh);
+#                        used in preference to the firmware copies where noted below.
+#   deck/boot.d/NN-*.sh  hooks, run in name order, one at a time, each with a watchdog,
+#                        after the mod set is staged and the env written and before the
+#                        gated restart. sshgate, bootlogo and uninstall are hooks; they
+#                        get the pick in AZ_MNT/AZ_PORT/AZ_MODS (see run_hooks).
+# deck/ is copied to /tmp/az-deck (RAM) before anything in it runs (nothing ever
+# executes off the stick) and mirrored into the p7 cache so a stickless boot still
+# runs the last set's hooks. Escape hatches: MODS/mods.off skips the chain (the
+# firmware loader takes the boot to stock on its own), MODS/deck.off skips the hooks.
+set -u
+STAGE=/home/root/settings/az-usbload      # p7: the cache + the env EP147 reads at start
+DECK=/tmp/az-deck                          # this boot's private copy of MODS/deck (RAM)
+BOOTED=/run/az-usbload.booted              # the loader has run this boot (RAM, so a boot clears it)
+RESTARTING=/run/az-usbload.restarting      # the loader's own restart is in flight (it renotifies itself)
+PENDING=/run/az-reload-pending             # a staged set the running EP147 has not loaded (line 1: update|stick)
+DECKS=/tmp/az-decks                        # azstem's per-deck "track loaded" publication (decks_state)
+upt() { cut -d' ' -f1 /proc/uptime 2>/dev/null; }
+elapsed_ge() { awk -v a="$1" -v b="$(upt)" -v m="$2" 'BEGIN{exit !(b-a>=m)}'; }
+ep_pid() { pidof EP147 2>/dev/null | awk '{print $1}'; }
+# ---- RESTART POLICY: the loader never restarts EP147 while a track is loaded ----
+# The mods load by LD_PRELOAD, so a changed set needs an EP147 restart, and a restart
+# drops every loaded track: mid-set it is the worst thing a mod can do.
+#   - A deck already running mods is never restarted by the loader: a changed set is
+#     staged and the Mod Menu says "Reload to apply." (the DJ's Reload or the next boot).
+#   - A deck not running mods (a fresh install: stock EP147 has no Mod Menu) may be
+#     restarted once by the boot's first pass, early in boot (uptime <= AZ_BOOT_WINDOW s),
+#     unless a track is known to be loaded.
+#   - Anything later restarts only on proof that every deck is empty, held for
+#     AZ_DECKS_SETTLE s. Until then the change waits (rechecked every AZ_DEFER_POLL s by
+#     the watcher), or the DJ presses Reload in the Mod Menu, or the next boot loads it:
+#     the env is already written.
+#   - A mods update never restarts: it stages the set and the Update Mods screen says
+#     "Update installed. Reload to apply."
+#   - A community apply is the DJ's own "Reload now" (behind the Mod Menu's confirm).
+# $PENDING says a staged set is waiting; the Mod Menu shows "Reload to apply." while it
+# exists, and any EP147 start clears it (EP147 reads the env at every start).
+#
+# PROOF: azstem reads each deck's LoadedTrackInfo (gui::LoadState, ctor-given deck;
+# all-zero TrackID = empty, the vtable checked at every read) and rewrites $DECKS:
+#     azdecks 1 / pid <EP147 pid> / up <uptime s> / decks <a char per deck: E L U>
+# E empty (zero on two samples ~1 s apart: a song change passes through zero), L loaded,
+# U unknown. It counts only for the running EP147 (pid) and while fresh (written within
+# AZ_DECKS_FRESH s). No file (stock EP147, an older azstem), another pid, stale, or any U
+# = unknown, and unknown is never "empty". EP147 keeps no fd open on a loaded track, so
+# its fds cannot prove a deck empty; an audio file it holds open under /media still
+# counts as loaded (it can only stop a restart).
+# decks_state -> empty | loaded | unknown
+decks_state() {
+    _p=$(ep_pid); [ -n "$_p" ] || { echo unknown; return 0; }
+    for _l in /proc/"$_p"/fd/*; do
+        _t=$(readlink "$_l" 2>/dev/null) || continue
+        case "$_t" in /media/*.[Mm][Pp]3|/media/*.[Ww][Aa][Vv]|/media/*.[Aa][Ii][Ff]|/media/*.[Aa][Ii][Ff][Ff]|/media/*.[Ff][Ll][Aa][Cc]|/media/*.[Mm]4[Aa]|/media/*.[Aa][Aa][Cc]|/media/*.[Oo][Gg][Gg]|/media/*.[Mm][Pp]4|/media/*.[Aa][Ll][Aa][Cc])
+            echo loaded; return 0 ;; esac
+    done
+    _m=$(head -c 256 "$DECKS" 2>/dev/null)
+    [ "$(printf '%s\n' "$_m" | sed -n 1p)" = "azdecks 1" ] || { echo unknown; return 0; }
+    [ "$(printf '%s\n' "$_m" | sed -n 's/^pid //p')" = "$_p" ] || { echo unknown; return 0; }
+    _u=$(printf '%s\n' "$_m" | sed -n 's/^up //p')
+    awk -v a="$_u" -v b="$(upt)" -v m="${AZ_DECKS_FRESH:-10}" 'BEGIN{exit !(a ~ /^[0-9]+(\.[0-9]+)?$/ && b-a <= m && a-b <= 1)}' \
+        || { echo unknown; return 0; }
+    case "$(printf '%s\n' "$_m" | sed -n 's/^decks //p')" in
+        ""|*[!ELU]*) echo unknown ;;
+        *L*) echo loaded ;;
+        *U*) echo unknown ;;
+        *) echo empty ;;
+    esac
+}
+# may_restart boot|later -> 0 = restart now; 1 = wait. RWHY says why, for the log.
+RWHY=""
+may_restart() {
+    _s=$(decks_state)
+    [ "$_s" = loaded ] && { RWHY="a track is loaded"; return 1; }
+    if [ "$1" = boot ] && awk -v u="$(upt)" -v m="${AZ_BOOT_WINDOW:-240}" 'BEGIN{exit !(u <= m)}'; then
+        RWHY="early in boot (uptime $(upt)s), decks $_s"; return 0
+    fi
+    [ "$_s" = empty ] || { RWHY="decks $_s: no proof every deck is empty"; return 1; }
+    sleep "${AZ_DECKS_SETTLE:-3}"
+    [ "$(decks_state)" = empty ] || { RWHY="the decks were empty only briefly"; return 1; }
+    RWHY="every deck is empty"; return 0
+}
+pending_set() { printf '%s\n%s\n' "$1" "$2" > "$PENDING.new" 2>/dev/null && mv -f "$PENDING.new" "$PENDING" 2>/dev/null; return 0; }
+# ---- TRUST: what from a stick may run as root ---------------------------------
+# A stick is not trusted because it is plugged in. Root code from it (the deck/
+# scripts this loader runs or sources, the deck/lib helpers azmod and the hooks
+# start, and the .so files EP147 preloads) runs only when its sha256 is pinned
+# by MODS/deck/trust.pins and trust.pins carries a genuine minisign signature by
+# the AZ-MODS release key below (the same key the app and az-modupdate verify).
+# trust.pins and its .minisig are ordinary files of the signed set: the release
+# signs trust.pins, then manifest.json pins both, then manifest.json is signed,
+# so every installer that copies a set's files (the app, az-modupdate) delivers
+# them without knowing about them.
+#   trust.pins: "azmods-pins 1", then one "<path under MODS/> <sha256>" per line.
+# Anything not pinned is removed from this boot's deck/ copy before anything in
+# it runs, and never reaches the p7 cache; an unpinned .so is not staged. No
+# genuine pins at all -> no deck script runs and no .so loads: the deck comes up
+# stock (fail closed, never bricked: EP147 itself is untouched).
+# Assets (azmod-pngpatch/) and community mods are not covered here: assets are
+# data azmod bounds to EP147's .rodata, community mods have their own consent.
+# Developer override: /home/root/settings/azmods-unsigned.on (p7: creating it
+# takes root on this deck; a file on a stick cannot do it) makes everything run
+# unverified, logged on every boot.
+# AZ_TRUST_PUB replaces the key for the test suites; nothing on a deck sets it
+# (the loader's environment is the systemd unit's).
+TRUST_PUB=${AZ_TRUST_PUB:-RWT+JDwvmhAHW7mlYdLaNSuBFujiADXEbi9OYnvdJbjRTPYFCTgaio+D}
+UNSIGNED_OK=/home/root/settings/azmods-unsigned.on
+TW=/tmp/az-trust
+TRUSTED=0                                  # this boot's deck/: 1 verified, dev override, 0 none
+trust_dev() { [ -e "$UNSIGNED_OK" ]; }
+hex() { xxd -p | tr -d ' \t\r\n'; }   # busybox od has no -A; busybox xxd -p pads with spaces
+# minisign signature check with openssl only. $1 file, $2 its .minisig -> 0 genuine.
+# Prehashed ("ED": Ed25519 over BLAKE2b-512, minisign's default), signed by this
+# key id, and the global signature over sig || trusted comment checked too.
+minisig_ok() {
+    [ -s "$1" ] && [ -s "$2" ] || return 1
+    rm -rf "$TW/v"; mkdir -p "$TW/v" 2>/dev/null || return 1
+    printf '%s' "$TRUST_PUB" | openssl base64 -d -A > "$TW/v/pub.blob" 2>/dev/null || return 1
+    pk=$(hex < "$TW/v/pub.blob")
+    [ ${#pk} = 84 ] && [ "${pk:0:4}" = 4564 ] || return 1
+    { printf '\060\052\060\005\006\003\053\145\160\003\041\000'; tail -c 32 "$TW/v/pub.blob"; } > "$TW/v/pub.der"
+    openssl pkey -pubin -inform DER -in "$TW/v/pub.der" -out "$TW/v/pub.pem" 2>/dev/null || return 1
+    sg=$(sed -n 2p "$2" | tr -d '\r'); cm=$(sed -n 3p "$2" | tr -d '\r'); gs=$(sed -n 4p "$2" | tr -d '\r')
+    printf '%s' "$sg" | openssl base64 -d -A > "$TW/v/sig.blob" 2>/dev/null || return 1
+    [ "$(wc -c < "$TW/v/sig.blob")" -eq 74 ] || return 1
+    sb=$(head -c 10 "$TW/v/sig.blob" | hex)
+    [ "${sb:0:4}" = 4544 ] && [ "${sb:4:16}" = "${pk:4:16}" ] || return 1
+    tail -c 64 "$TW/v/sig.blob" > "$TW/v/sig.bin"
+    openssl dgst -blake2b512 -binary "$1" > "$TW/v/msg.bin" 2>/dev/null || return 1
+    openssl pkeyutl -verify -pubin -inkey "$TW/v/pub.pem" -rawin -in "$TW/v/msg.bin" -sigfile "$TW/v/sig.bin" >/dev/null 2>&1 || return 1
+    case "$cm" in "trusted comment: "*) ;; *) return 1 ;; esac
+    { cat "$TW/v/sig.bin"; printf '%s' "${cm#trusted comment: }"; } > "$TW/v/gmsg.bin"
+    printf '%s' "$gs" | openssl base64 -d -A > "$TW/v/gsig.bin" 2>/dev/null || return 1
+    [ "$(wc -c < "$TW/v/gsig.bin")" -eq 64 ] || return 1
+    openssl pkeyutl -verify -pubin -inkey "$TW/v/pub.pem" -rawin -in "$TW/v/gmsg.bin" -sigfile "$TW/v/gsig.bin" >/dev/null 2>&1
+}
+# $1 = a deck dir. 0 when its trust.pins is genuine; the well-formed pins -> $TW/pins.
+pins_load() {
+    rm -f "$TW/pins"
+    minisig_ok "$1/trust.pins" "$1/trust.pins.minisig" || return 1
+    [ "$(head -n 1 "$1/trust.pins" | tr -d '\r')" = "azmods-pins 1" ] || return 1
+    tail -n +2 "$1/trust.pins" | tr -d '\r' \
+        | grep -E '^[A-Za-z0-9_+-][A-Za-z0-9._+-]*(/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)* [0-9a-f]{64}$' > "$TW/pins"
+    [ -s "$TW/pins" ]
+}
+# $1 path under MODS/, $2 the file to check -> 0 when that exact content is pinned
+pinned() {
+    [ -f "$2" ] && [ -s "$TW/pins" ] || return 1
+    grep -qxF "$1 $(sha256sum "$2" 2>/dev/null | cut -d' ' -f1)" "$TW/pins"
+}
+# $1 = the deck dir this run is about to use. Removes every file the signed pins do
+# not cover, so nothing below (chain, hooks, helpers, the watcher, the cache) can
+# reach one. No genuine pins -> the whole dir goes.
+trust_deck() {
+    [ -d "$1" ] || return 0
+    if trust_dev; then TRUSTED=dev; log "trust: DEVELOPER OVERRIDE ($UNSIGNED_OK present): deck scripts and .so run UNVERIFIED"; return 0; fi
+    if ! pins_load "$1"; then
+        TRUSTED=0; rm -rf "$1" 2>/dev/null
+        log "trust: deck/ has no genuinely signed trust.pins -> no deck script runs and no .so loads this boot"
+        return 0
+    fi
+    TRUSTED=1; _drop=0
+    find "$1" -type f > "$TW/files" 2>/dev/null
+    while IFS= read -r _f; do
+        _r=${_f#"$1"/}
+        case "$_r" in trust.pins|trust.pins.minisig) continue ;; esac
+        pinned "deck/$_r" "$_f" && continue
+        rm -f "$_f" 2>/dev/null; _drop=$((_drop + 1))
+        log "trust: deck/$_r is not pinned by the signed set -> removed, it will not run"
+    done < "$TW/files"
+    log "trust: deck/ verified against the signed pins (set $(cat "$1/version" 2>/dev/null || echo unversioned); $_drop file(s) dropped)"
+}
+# a file in the p7 cache may run: $1 cache dir, $2 path under deck/
+cached_ok() { trust_dev && return 0; pins_load "$1" && pinned "deck/$2" "$1/$2"; }
+# every log this loader appends to is capped by deck/lib/az-logcap.sh, the shared cap. It is
+# sourced (it runs as root) only from a deck dir whose signed trust.pins pins it (cached_ok:
+# the chained loader's own dir, this boot's deck/ copy, the p7 cache), or under the developer
+# override; a loader running before any set was staged has no helper, and no cap.
+azlog_cap() { return 0; }
+for _azl_d in "${0%/*}" "$DECK" "$STAGE/deck"; do
+    # shellcheck source=../../../stick/deck/lib/az-logcap.sh
+    [ -f "$_azl_d/lib/az-logcap.sh" ] && cached_ok "$_azl_d" lib/az-logcap.sh && { . "$_azl_d/lib/az-logcap.sh"; break; }
+done
+# the stick's copy of usb-renotify.sh wins over the firmware's (this boot's /tmp copy,
+# else the p7 cache: --post-start runs without a /tmp copy after a mod-menu reload)
+renotify_path() {
+    if [ -f "$DECK/lib/usb-renotify.sh" ]; then echo "$DECK/lib/usb-renotify.sh"
+    elif [ -f "$STAGE/deck/lib/usb-renotify.sh" ] && cached_ok "$STAGE/deck" lib/usb-renotify.sh; then echo "$STAGE/deck/lib/usb-renotify.sh"
+    else echo /home/root/scripts/usb-renotify.sh; fi
+}
+# The PC link (SOFTWARE CONTROL) needs a re-announce after an EP147 restart, like the
+# sticks do; without one the link is lost until the USB-C cable is replugged. The helper
+# is absent from older mod sets, hence the -f guard at every call site: never fail a
+# boot over a re-announce.
+gadget_renotify_path() {
+    if [ -f "$DECK/lib/gadget-renotify.sh" ]; then echo "$DECK/lib/gadget-renotify.sh"
+    elif [ -f "$STAGE/deck/lib/gadget-renotify.sh" ] && cached_ok "$STAGE/deck" lib/gadget-renotify.sh; then echo "$STAGE/deck/lib/gadget-renotify.sh"
+    else echo ""; fi
+}
+# --post-start: ExecStartPost of EP147.service (10-azmod.conf), backgrounded, after
+# every EP147 start. EP147 drops the still-mounted USB from Source on a restart and
+# only learns media from the /proc/udev_usb mailbox, so a restart that is not the
+# loader's own (the mod menu's RELOAD row, a Restart=on-failure after a crash) would
+# leave the deck with no USB until a replug. Does nothing on the
+# boot's first start (no $BOOTED: stock announced the media at plug time and the
+# loader has not run) and nothing while the loader's own restart is in flight
+# (it re-announces itself, in-line, and this would double it).
+if [ "${1:-}" = --post-start ]; then
+    LOG=/tmp/az-usbload-poststart.log; [ -n "${AZ_CHAINED:-}" ] || : > "$LOG" 2>/dev/null
+    log() { azlog_cap "$LOG"; echo "[poststart $(date '+%H:%M:%S' 2>/dev/null || echo -n)] $*" >> "$LOG" 2>/dev/null; return 0; }
+    [ -e "$BOOTED" ] || { log "first start of this boot -> nothing to re-announce"; exit 0; }
+    # this start read the env: whatever was staged and waiting is loaded now
+    [ -e "$PENDING" ] && { rm -f "$PENDING" 2>/dev/null; log "a staged set was waiting for a restart -> loaded by this start"; }
+    # a marker older than 2 min is a loader that died mid-restart, not a restart in flight
+    if [ -e "$RESTARTING" ] && [ -z "$(find "$RESTARTING" -mmin +2 2>/dev/null)" ]; then
+        log "the loader's own restart -> it re-announces itself"; exit 0
+    fi
+    if [ -z "${AZ_CHAINED:-}" ] && [ -f "$STAGE/deck/az-usbload" ] && sh -n "$STAGE/deck/az-usbload" 2>/dev/null; then
+        if cached_ok "$STAGE/deck" az-usbload; then
+            log "chain: handing over to the cached deck/az-usbload"
+            AZ_CHAINED=1 exec sh "$STAGE/deck/az-usbload" --post-start
+        fi
+        log "chain: the cached deck/az-usbload is not pinned by a signed set -> not run"
+    fi
+    T1=$(upt); BACK=""
+    while :; do
+        P=$(pidof EP147 2>/dev/null | awk '{print $1}')
+        [ -n "$P" ] && grep -qx HuiProcessor /proc/"$P"/task/*/comm 2>/dev/null && { BACK=$P; break; }
+        awk -v a="$T1" -v b="$(upt)" -v m="${AZ_ACTIVE_WAIT:-45}" 'BEGIN{exit !(b-a>=m)}' && break
+        sleep 0.2
+    done
+    [ -n "$BACK" ] || { log "EP147 (HuiProcessor) not up within ${AZ_ACTIVE_WAIT:-45}s -> not re-announcing"; exit 0; }
+    R=$(renotify_path); log "EP147 pid $BACK up after a restart that was not the loader's; re-announcing USB via $R"
+    sleep "${AZ_RENOTIFY_DELAY1:-6}"; sh "$R" 2>>"$LOG"
+    sleep "${AZ_RENOTIFY_DELAY2:-10}"; sh "$R" 2>>"$LOG"
+    G=$(gadget_renotify_path); [ -n "$G" ] && { log "re-announcing SOFTWARE CONTROL via $G"; sh "$G" 2>>"$LOG"; }
+    log "done"; exit 0
+fi
+LOG=/tmp/az-usbload.log
+# chained: the firmware copy already opened this boot's log; append to it. A
+# re-run after a mods update (the watcher) appends too, or the evidence of why
+# it re-ran would be truncated away one line after it was written.
+[ -n "${AZ_CHAINED:-}" ] || [ -n "${AZ_RERUN:-}" ] || : > "$LOG" 2>/dev/null
+# A copy on p7 as well, so the last boot's gate/settle/passPhrase lines survive a
+# power-off without MODS/diag.on (/tmp is RAM). Hard-capped at ~2 boots / 32 KB:
+# p7 is 61 MB, and a full p7 breaks the deck's BPM display.
+PLOG=/home/root/settings/az-usbload/usbload.log
+PLOG_ON=0                                  # set by plog_start(); until then p7 is untouched
+if [ -f "$PLOG" ]; then
+    # keep only the previous boot's block, and only if the file is small enough
+    if [ "$(wc -c < "$PLOG" 2>/dev/null || echo 0)" -gt 32768 ]; then
+        awk '/^==== boot /{n++} n>=2' "$PLOG" 2>/dev/null | tail -c 16384 > "$PLOG.new" 2>/dev/null \
+            && mv -f "$PLOG.new" "$PLOG" 2>/dev/null || rm -f "$PLOG" "$PLOG.new" 2>/dev/null
+    fi
+fi
+log() {
+    line="[usbload $(date '+%H:%M:%S' 2>/dev/null || echo -n)] $*"
+    azlog_cap "$LOG"
+    echo "$line" >> "$LOG" 2>/dev/null
+    # per-line flush (>> is one write per call), and never let p7 run away
+    [ "$PLOG_ON" = 1 ] && [ "$(wc -c < "$PLOG" 2>/dev/null || echo 0)" -lt 32768 ] \
+        && echo "$line" >> "$PLOG" 2>/dev/null
+    return 0
+}
+# Started only once this boot is actually doing work (so a do-nothing boot writes
+# nothing to p7 at all); it replays what has been logged so far, then log() appends.
+plog_start() {
+    [ "$PLOG_ON" = 1 ] && return 0
+    PLOG_ON=1
+    { echo "==== boot $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) (uptime $(cut -d' ' -f1 /proc/uptime 2>/dev/null)s)"
+      cat "$LOG" 2>/dev/null; } >> "$PLOG" 2>/dev/null
+}
+pp_len() {   # length in bytes of wifi.json's passPhrase, digits only (never the value)
+    sed -n 's/.*"passPhrase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        /home/root/settings/wifi.json 2>/dev/null | head -1 | tr -d '\n' | wc -c | tr -cd '0-9'
+}
+touch "$BOOTED" 2>/dev/null
+if [ -n "${AZ_CHAINED:-}" ]; then log "start: CHAINED loader from MODS/deck (set $(cat "$DECK/version" 2>/dev/null || echo unversioned))"
+elif [ -n "${AZ_RERUN:-}" ]; then log "start (firmware loader, RE-RUN after a mods update; EP147 has [$(cat /home/root/settings/az-usbload/az-preload.env 2>/dev/null)])"
+else log "start (firmware loader; cached first start: EP147 loaded [$(cat /home/root/settings/az-usbload/az-preload.env 2>/dev/null)])"; fi
+# the stored WiFi password's length only, never the value (a 0 or absent file after a restart means it was wiped)
+log "wifi.json passPhrase length=[$(pp_len)] file=[$([ -f /home/root/settings/wifi.json ] && echo present || echo absent)]"
+
+ENVF="$STAGE/az-preload.env"
+MNT=""; MODS=""; PORT=""; CHANGED=0; MODS_OFF=0; DECK_OFF=0; CM_OFF=0
+# sorted per-file sha256 listing of a tree, so an unchanged tree is not re-copied
+treesum() { [ -d "$1" ] && (cd "$1" && find . -type f | sort | while read -r f; do sha256sum "$f"; done) | sha256sum | cut -d' ' -f1; }
+wifi_up() {
+    [ "$(cat /var/net_mlan0_state.dat 2>/dev/null)" = up ] && { WIFI="net_mlan0_state=up"; return 0; }
+    # the match needs the command line with its arguments
+    # shellcheck disable=SC2009
+    ps w 2>/dev/null | grep -q '[w]pa_supplicant -i mlan0' \
+        && wpa_cli -i mlan0 status 2>/dev/null | grep -q '^wpa_state=COMPLETED' \
+        && { WIFI="wpa_supplicant running + wpa_state=COMPLETED"; return 0; }
+    return 1
+}
+# ---- mods update watcher: the loader does not exit, it waits for requests ----
+# azmod's "Update Mods" screen writes /run/az-modupdate.req ("check" | "update");
+# deck/lib/az-modupdate does the network work (curl + openssl verification) and
+# writes /tmp/az-modupdate/status, which that screen renders. After a successful
+# install this re-runs the loader from the top: it picks the stick, chain-loads
+# the new deck/az-usbload and stages the new bytes, and does not restart EP147
+# (RESTART POLICY): the screen says "Update installed. Reload to apply.", and the
+# Mod Menu's Reload or the next boot loads the staged set. A community "apply" is
+# the DJ's own Reload: its re-run restarts, with the RELOADING banner and the USB
+# re-announce. The watcher also applies a restart the policy held back (defer).
+# Why the loader itself: az-usbload.service is Type=simple, so a background
+# child would be killed the moment the main script exited; and no systemd-run.
+# ~45 s after boot, with WiFi up, it runs one "check" so the menu can say
+# "vX available" before anyone asks. AZ_NOWATCH=1 (the test suites) or neither
+# deck/lib/az-modupdate, az-community nor az-savelogs on the stick -> the loader exits
+# (unless a deferred restart keeps it up).
+#
+# Community mods ride the same watcher:
+# azmod's Community screens write /run/az-community.req (one line: "refresh",
+# "install <repo> <id>", "remove|enable|disable <id>", "addrepo|delrepo <repo>",
+# "apply"); deck/lib/az-community does the work and writes /tmp/az-community/status.
+# Requests are served one at a time. "apply" ends in state=reloading and takes the
+# same re-run as a mods update: the re-run mirrors MODS/community-mods into the stage
+# (desired -> community_mirror) and the gated restart applies it. A request left
+# over from before this watcher started is dropped, never run.
+#
+# SAVE LOGS TO USB rides it too: System Info writes /run/az-savelogs.req ("save <id>");
+# deck/lib/az-savelogs copies the logs to MODS/logs/ and writes /tmp/az-savelogs/status. It gets
+# this loader's decks_state answer (AZ_DECKS_STATE) and refuses unless every deck is empty.
+rerun_loader() {   # $1 = why. Never returns.
+    # Re-run from the top as a non-chained loader: pick, refresh deck/,
+    # chain to the (new) stick loader, stage, gated reload. Run the
+    # stick's copy, not the firmware's: a 1.32 firmware loader has no
+    # watcher, so re-running it would stage + reload and then exit,
+    # leaving no watcher until the next boot.
+    # AZ_CHAINED is cleared by assignment, not `env -u`: the deck's
+    # env has no -u. The copy runs from /tmp so stage_deck's rm -rf
+    # of /tmp/az-deck cannot pull it from under the running copy.
+    log "$1 -> re-running the loader (stage; restart only as the restart policy allows)"
+    RERUN=/usr/sbin/az-usbload
+    if [ -f "$DECK/az-usbload" ] && cp -f "$DECK/az-usbload" /tmp/az-usbload.rerun 2>/dev/null; then RERUN=/tmp/az-usbload.rerun; fi
+    AZ_CHAINED='' AZ_RERUN=1 exec sh "$RERUN"
+}
+# Each request re-picks the stick (az-usbpick, as at boot): after a swap the sdX name and
+# mount can change, and a request must never act on a stick that is no longer the pick.
+# No stick -> AZ_MNT/AZ_MODS empty, and az-community/az-modupdate refuse ("no mods stick").
+repick() {
+    _o=$MNT; pick_stick || { MNT=""; PORT=""; }
+    MODS=""; [ -n "$MNT" ] && MODS="$MNT/MODS"
+    [ "$MNT" = "$_o" ] || log "watcher: the pick changed [${_o:-none}] -> [${MNT:-none}]"
+    export AZ_MNT="$MNT" AZ_PORT="$PORT" AZ_MODS="$MODS"
+}
+# A restart the RESTART POLICY held back: the env is written; the watcher applies it once
+# every deck is proven empty. EP147 restarting by any other way (the Mod Menu's Reload,
+# a crash restart) loads the env, which ends the wait.
+DEFER=0; DEFER_PID=""; DEFER_T0=""; DEFER_LAST=""
+defer() {   # $1 = why
+    DEFER=1; DEFER_PID=$(ep_pid); DEFER_T0=$(upt); DEFER_LAST=""
+    pending_set stick "$1"
+    log "restart wanted but NOT now: $1. [${WANT:-stock}] waits until every deck is empty (checked every ${AZ_DEFER_POLL:-5}s), the Mod Menu's Reload, or the next boot (the env is written)"
+}
+defer_tick() {
+    _dp=$(ep_pid)
+    if [ -n "$_dp" ] && [ "$_dp" != "$DEFER_PID" ]; then
+        DEFER=0; rm -f "$PENDING" 2>/dev/null
+        log "deferred restart: EP147 restarted without us (pid ${DEFER_PID:-none} -> $_dp: Reload or a crash restart) and loaded the env -> nothing left to apply"
+        return 0
+    fi
+    if [ -n "${AZ_DEFER_MAX:-}" ] && elapsed_ge "$DEFER_T0" "$AZ_DEFER_MAX"; then
+        DEFER=0; log "deferred restart: stopped waiting after ${AZ_DEFER_MAX}s -> the Mod Menu's Reload or the next boot"; return 0
+    fi
+    [ -n "$_dp" ] && ep_hui || return 0
+    if ! may_restart later; then
+        [ "$RWHY" = "$DEFER_LAST" ] || { DEFER_LAST=$RWHY; log "deferred restart: still waiting ($RWHY)"; }
+        return 0
+    fi
+    DEFER=0; log "deferred restart: $RWHY -> applying [${WANT:-stock}] now"
+    apply_restart
+    return 0
+}
+modupdate_watch() {
+    WATCH=1
+    [ -z "${AZ_NOWATCH:-}" ] || WATCH=0
+    [ -f "$DECK/lib/az-modupdate" ] || [ -f "$DECK/lib/az-community" ] || [ -f "$DECK/lib/az-savelogs" ] || [ -n "$CFG_LIB" ] || WATCH=0
+    [ "$WATCH" = 1 ] || [ "$DEFER" = 1 ] || return 0
+    defer_next=0
+    if [ "$WATCH" = 0 ]; then   # nothing to serve: only the deferred restart keeps the loader up
+        log "no request watcher; staying up only for the deferred restart"
+        while [ "$DEFER" = 1 ]; do defer_tick; sleep "${AZ_DEFER_POLL:-5}"; done
+        return 0
+    fi
+    export AZ_MNT="$MNT" AZ_PORT="$PORT" AZ_MODS="$MODS" AZ_STAGE="$STAGE"
+    REQ=/run/az-modupdate.req; rm -f "$REQ" 2>/dev/null; mkdir -p /tmp/az-modupdate 2>/dev/null
+    CREQ=/run/az-community.req; rm -f "$CREQ" 2>/dev/null; mkdir -p /tmp/az-community 2>/dev/null
+    LREQ=/run/az-savelogs.req; rm -f "$LREQ" 2>/dev/null
+    log "modupdate: watching $REQ (deck set $(cat "$DECK/version" 2>/dev/null || echo unversioned))"
+    log "community: watching $CREQ"
+    # After a re-run the status still says "installed" (or "reloading"). A set staged and waiting for a Reload -> "staged" (the screen says
+    # "Update installed. Reload to apply."); otherwise one check turns it into "up to date".
+    if [ -f "$DECK/lib/az-modupdate" ] && { [ -n "${AZ_RERUN:-}" ] || grep -qE '^state=(reloading|installed)' /tmp/az-modupdate/status 2>/dev/null; }; then
+        if [ "$(head -n 1 "$PENDING" 2>/dev/null)" = update ]; then sh "$DECK/lib/az-modupdate" staged
+        elif [ -n "$MNT" ]; then sh "$DECK/lib/az-modupdate" check; fi
+    fi
+    # the same for a community "apply": the re-run has staged + reloaded, so say so
+    if [ -f "$DECK/lib/az-community" ] && grep -q '^state=reloading' /tmp/az-community/status 2>/dev/null; then
+        sh "$DECK/lib/az-community" settle
+    fi
+    # crash-loop guard (early): a non-stock set that just applied -> watch EP147 for a
+    # short window. If it restarts >=CLGUARD_N times without reaching HuiProcessor, trip
+    # before systemd's 20-restart start limit (and its 20 crash cores) is hit. A healthy
+    # EP147 (no new restarts) ends the watch at once, so a good boot is not delayed.
+    if [ -n "${WANT:-}" ]; then
+        _base=$(ep_nrestarts); _dl=$(( $(upt | cut -d. -f1) + CLGUARD_T ))
+        while [ "$(upt | cut -d. -f1)" -lt "$_dl" ]; do
+            _n=$(ep_nrestarts)
+            if [ "$((_n - _base))" -ge "$CLGUARD_N" ] && ! ep_hui; then
+                clguard_trip "EP147 restarted $((_n - _base))x in <=${CLGUARD_T}s without reaching HuiProcessor"; break
+            fi
+            [ "$_n" = "$_base" ] && ep_hui && break
+            sleep 2
+        done
+    fi
+    # .deck-info fwtag=: stock (no core) never writes the loaded file, so settle it now;
+    # with core, follow the file on the 5 s tick below (written only when it changes)
+    fw_last=$(fwtag_now)
+    if [ -z "${WANT:-}" ] || [ -n "$fw_last" ]; then deck_info final; fi
+    auto=$(( $(upt | cut -d. -f1) + ${AZ_MODUPDATE_AUTOCHECK:-45} ))
+    # A check after every EP147 (re)start too, not only after boot, so "Update now" is
+    # ready without tapping Check: a new EP147 MainPID schedules one ~45 s later.
+    # Polled every 5 s (one systemctl call), so the watcher stays cheap.
+    ep_pid=$(systemctl show EP147.service -p MainPID 2>/dev/null | cut -d= -f2); pid_tick=0
+    while :; do
+        if [ "$DEFER" = 1 ] && [ "$(upt | cut -d. -f1)" -ge "$defer_next" ]; then
+            defer_tick; defer_next=$(( $(upt | cut -d. -f1) + ${AZ_DEFER_POLL:-5} ))
+        fi
+        pid_tick=$((pid_tick + 1))
+        if [ "$pid_tick" -ge 5 ]; then
+            pid_tick=0
+            p=$(systemctl show EP147.service -p MainPID 2>/dev/null | cut -d= -f2)
+            if [ -n "$p" ] && [ "$p" != 0 ] && [ "$p" != "$ep_pid" ]; then
+                ep_pid=$p; auto=$(( $(upt | cut -d. -f1) + ${AZ_MODUPDATE_AUTOCHECK:-45} ))
+                log "modupdate: EP147 restarted (pid $p) -> check in ${AZ_MODUPDATE_AUTOCHECK:-45} s"
+            fi
+            fw=$(fwtag_now)
+            if [ -n "$fw" ] && [ "$fw" != "$fw_last" ]; then fw_last=$fw; repick; deck_info final; fi
+        fi
+        if [ -f "$REQ" ] && [ -f "$DECK/lib/az-modupdate" ]; then
+            r=$(tr -d '\r\n' < "$REQ"); rm -f "$REQ"
+            log "modupdate: request [$r]"
+            repick
+            sh "$DECK/lib/az-modupdate" "$r"
+            if [ "$r" = update ] && grep -qE '^state=(installed|reloading)' /tmp/az-modupdate/status 2>/dev/null; then
+                rerun_loader "modupdate: new set on the stick (staged, no restart)"
+            fi
+        elif [ -f "$CREQ" ] && [ -f "$DECK/lib/az-community" ]; then
+            # one line, bounded, printable; passed as one argument (az-community splits it)
+            r=$(head -c 512 "$CREQ" | head -n 1 | tr -d '\r\n' | tr -cd ' -~'); rm -f "$CREQ"
+            log "community: request [$r]"
+            cfg_tick now   # the Mod Menu's changes reach the stick before az-community edits it
+            repick
+            sh "$DECK/lib/az-community" "$r"
+            [ -n "$CFG_LIB" ] && [ -n "$MODS" ] && cfg_valid "$MODS/$CFG_NAME" && cfg_check "$MODS/$CFG_NAME"
+            if [ "$r" = apply ] && grep -q '^state=reloading' /tmp/az-community/status 2>/dev/null; then
+                # Reload now means reload: a change only in settings/azmod-community (Resume,
+                # Try again, the master switch) leaves the stage the same, so force the restart
+                AZ_FORCE_RELOAD=1; export AZ_FORCE_RELOAD
+                rerun_loader "community: apply"
+            fi
+        elif [ -f "$LREQ" ] && [ -f "$DECK/lib/az-savelogs" ]; then
+            # System Info > Save Logs to USB: "save <id>", one bounded line of [a-z0-9 ]
+            r=$(head -c 64 "$LREQ" | head -n 1 | tr -cd 'a-z0-9 '); rm -f "$LREQ"
+            log "savelogs: request [$r]"
+            repick
+            AZ_DECKS_STATE=$(decks_state) sh "$DECK/lib/az-savelogs" "$r"
+        elif [ -n "$auto" ] && [ "$(upt | cut -d. -f1)" -ge "$auto" ]; then
+            # one check ~45 s after boot, then every AZ_MODUPDATE_INTERVAL s (30 min)
+            # while a stick is in and WiFi is up: the Mod Menu's red badge follows it.
+            # Unauthenticated GitHub API allows 60 requests/hour per IP; this is 2.
+            auto=$(( $(upt | cut -d. -f1) + ${AZ_MODUPDATE_INTERVAL:-1800} ))
+            if [ -f "$DECK/lib/az-modupdate" ] && wifi_up; then
+                repick; [ -n "$MNT" ] && { log "modupdate: periodic check"; sh "$DECK/lib/az-modupdate" check; }
+            fi
+        fi
+        cfg_tick
+        sleep 1
+    done
+}
+finish() { modupdate_watch; exit 0; }
+
+stick_write() {  # $1 = MODS/<file>, $2 = content ("" removes it). Best-effort, via the
+                 # stock mount; remount rw only if it was ro, and restore after.
+    [ -n "$MNT" ] || return 0
+    [ -z "$2" ] && [ ! -e "$MODS/$1" ] && return 0   # nothing to remove -> no write
+    ro=$(awk -v m="$MNT" '$2==m{print ($4 ~ /(^|,)ro(,|$)/)?1:0; exit}' /proc/mounts 2>/dev/null)
+    [ "$ro" = 1 ] && { mount -o remount,rw "$MNT" 2>/dev/null || return 0; }
+    if [ -n "$2" ]; then
+        { printf '%s\n' "$2" > "$MODS/$1.new" && mv -f "$MODS/$1.new" "$MODS/$1"; } 2>/dev/null \
+            || rm -f "$MODS/$1.new" 2>/dev/null
+    else rm -f "$MODS/$1" 2>/dev/null; fi
+    sync
+    [ "$ro" = 1 ] && mount -o remount,ro "$MNT" 2>/dev/null
+    return 0
+}
+
+# Tell the stick which firmware this is, once desired() has set MNT/MODS. The
+# desktop app cannot see the deck, so without this it cannot know whether
+# uninstall will do anything (firmware 1.31 has no az-uninstall). It is kept out of
+# desired(), which is the staging decision: a write inside it can stop staging.
+#
+# Change-only: "same stick next boot -> no write, no restart" is an invariant, so a
+# write happens only when the answer would differ (the first boot after a firmware
+# update).
+# fwtag=: the running EP147's tag (ep147-<16 hex>), from the fw= line core writes to
+# /tmp/azmod-community/loaded a few seconds after EP147 starts; the app shows "works on
+# your deck" from it. Unknown -> no fwtag line, never a blank or guessed one. The boot call
+# can run before core has written the file: then it leaves the stick's line as it is (no
+# write), and the watcher settles it ($1=final: exactly what the file says).
+CM_LOADED=/tmp/azmod-community/loaded
+fwtag_now() { sed -n 's/^fw=//p' "$CM_LOADED" 2>/dev/null | head -1 | tr -d '\r' | grep -xE 'ep147-[0-9a-f]{16}'; }
+deck_info() {
+    [ -n "${MODS:-}" ] && [ -d "$MODS" ] || return 0
+    dv=$(tr -d "\r\n" < /etc/az-mods-release 2>/dev/null)
+    want="firmware=${dv:-unknown}"
+    # second line: which deck set (MODS/deck) ran this boot, so support can tell a
+    # stale stick from a stale firmware. The app only parses firmware=.
+    [ -f "$DECK/version" ] && want="$want
+deck=$(tr -d "\r\n" < "$DECK/version")"
+    have=$(tr -d "\r" < "$MODS/.deck-info" 2>/dev/null)
+    ft=$(fwtag_now)
+    [ -z "$ft" ] && [ "${1:-}" != final ] && ft=$(printf '%s\n' "$have" | sed -n 's/^fwtag=//p' | head -1)
+    [ -n "$ft" ] && want="$want
+fwtag=$ft"
+    if [ "$have" = "$want" ]; then
+        log "deck-info: $MODS already says $want"
+    else
+        log "deck-info: writing $want to $MODS (was [${have:-none}])"
+        stick_write .deck-info "$want"
+    fi
+    return 0
+}
+
+# 1..3: the set the chosen stick asks for -> PRELOAD ("" = stock); CHANGED=1 when the
+# cache's bytes changed (same path, new content: the env line alone cannot see that).
+desired() {
+    PRELOAD=""
+    # 1. the stick was picked by pick() (by physical port; never our own mount)
+    [ -n "$MNT" ] || { log "no mods stick -> desired: none"; return; }
+    # 2. master switch. mods.off (or the old `disable`) wins; mods.on, or neither file,
+    # means enabled, so sticks written before mods.on existed still work.
+    if [ "$MODS_OFF" = 1 ]; then
+        log "mods = off -> desired: none (cache kept)"; return
+    fi
+    # revert-to-stock: load nothing, and do not re-stage the cache az-uninstall is
+    # about to delete. It is its own switch, not an alias of mods.off: mods.off
+    # deliberately keeps the cache (a DJ turning mods off wants them back
+    # later), and inheriting that behavior here would have az-usbload rewrite
+    # /home/root/settings/az-usbload on the very boot that is meant to empty it.
+    if [ -e "$MODS/uninstall" ]; then
+        log "MODS/uninstall present -> desired: none (az-uninstall purges the cache this boot)"; return
+    fi
+    # 3. the stick's .so set, core required
+    SOS=""
+    for src in "$MODS"/*.so; do
+        [ -f "$src" ] || continue
+        n=${src##*/}
+        case "$n" in .*) continue ;; esac       # macOS AppleDouble "._azmod.so" etc., not mods
+        case "$n" in *[!A-Za-z0-9._+-]*) log "skip $n (unsupported filename)"; continue ;; esac
+        SOS="$SOS $n"
+    done
+    [ -z "$SOS" ] && { log "MODS/ has no mods -> desired: none"; return; }
+    # trust: only a .so the signed pins name, byte for byte, is staged (see TRUST)
+    # the override is read here too: a stick without deck/ never reaches trust_deck
+    if trust_dev; then
+        [ "$TRUSTED" = dev ] || log "trust: DEVELOPER OVERRIDE ($UNSIGNED_OK present): .so staged UNVERIFIED"
+        TRUSTED=dev
+    else
+        _v=""
+        for n in $SOS; do
+            if [ "$TRUSTED" = 1 ] && pinned "$n" "$MODS/$n"; then _v="$_v $n"
+            else log "trust: $n is not pinned by a genuinely signed set -> not loaded"; fi
+        done
+        SOS=$_v
+        [ -z "$SOS" ] && { log "no verified mods in MODS/ -> desired: none (stock)"; return; }
+    fi
+    # split contract: core + azstem only; plugins are dlopened by core
+    case " $SOS " in
+        *" azmod-core.so "*) CORE=azmod-core.so ;;
+        *" azmod.so "*)      CORE=azmod.so ;;
+        *) log "no core (azmod-core.so / azmod.so) in MODS/ -> desired: none (stick has:$SOS)"; return ;;
+    esac
+    # 4. mirror MODS/ into the p7 cache: copy only what differs; drop what is gone.
+    for n in $SOS; do
+        a=$(sha256sum "$MODS/$n" 2>/dev/null | cut -d' ' -f1)
+        b=$(sha256sum "$STAGE/$n" 2>/dev/null | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then log "keep $n"; continue; fi
+        
+mkdir -p "$STAGE" 2>/dev/null; plog_start
+        # the copy is checked against the pins too: the stick can change between the check and the read
+        if cp -f "$MODS/$n" "$STAGE/$n.new" 2>>"$LOG" && { [ "$TRUSTED" = dev ] || pinned "$n" "$STAGE/$n.new"; } \
+           && chmod 755 "$STAGE/$n.new" && mv -f "$STAGE/$n.new" "$STAGE/$n"; then
+            if [ -n "$b" ]; then log "update $n"; else log "add $n"; fi
+            CHANGED=1
+        else
+            rm -f "$STAGE/$n.new" 2>/dev/null
+            log "FAILED copying $n -> keeping what EP147 loaded (no change this boot)"; exit 0
+        fi
+    done
+    for dst in "$STAGE"/*.so; do
+        [ -f "$dst" ] || continue
+        n=${dst##*/}
+        case " $SOS " in *" $n "*) continue ;; esac
+        rm -f "$dst" 2>>"$LOG" && { log "remove $n (not in MODS/)"; CHANGED=1; }
+    done
+    # art dir mirrors the same way (treesum: an unchanged tree is not re-copied)
+    PNG=azmod-pngpatch
+    if [ -d "$MODS/$PNG" ]; then
+        if [ -d "$STAGE/$PNG" ] && [ "$(treesum "$MODS/$PNG")" = "$(treesum "$STAGE/$PNG")" ]; then
+            log "keep $PNG/"
+        else
+            rm -rf "$STAGE/$PNG.new" 2>/dev/null
+            if cp -a "$MODS/$PNG" "$STAGE/$PNG.new" 2>>"$LOG"; then
+                rm -rf "${STAGE:?}/${PNG:?}" 2>/dev/null; mv -f "$STAGE/$PNG.new" "$STAGE/$PNG"
+                log "update $PNG/"; CHANGED=1
+            else rm -rf "$STAGE/$PNG.new" 2>/dev/null; log "FAILED copying $PNG/ (art skipped)"; fi
+        fi
+    elif [ -d "$STAGE/$PNG" ]; then
+        rm -rf "${STAGE:?}/${PNG:?}" 2>>"$LOG" && { log "remove $PNG/ (not in MODS/)"; CHANGED=1; }
+    fi
+    community_mirror
+    sync
+
+    PRELOAD="$STAGE/$CORE"
+    [ -f "$STAGE/azstem.so" ] && PRELOAD="$PRELOAD:$STAGE/azstem.so"
+}
+# community plugins: MODS/community-mods/ (without each mod's data/) mirrors into the
+# stage exactly like azmod-pngpatch/ (an unchanged tree is not re-copied), and core
+# dlopens from the stage copy only. Not copied: macOS AppleDouble "._*" files and the
+# fetcher's transient top-level dot entries (.<id>.new/.old, .enabled.new): none is
+# a mod, and copying them would make every compare differ.
+# MODS/community-mods.off: no community plugin loads -> the stage's community/ is removed
+# (structural: core finds nothing to load, whatever it checks) and $STAGE/community-mods.off
+# is written so the Mod Menu can say "turned off" rather than "none installed".
+# p7 is 61 MB and a full p7 breaks the deck's BPM display: a tree that would leave
+# less than AZ_COMMUNITY_P7_RESERVE_KB (12 MB) free is not mirrored (the previous stage
+# copy stays, logged), never half-copied.
+# A mod's assets/ (samples, images: possibly megabytes) stays on the stick and is read from there
+# (core's assets_dir): never copied to p7, and not part of the compare.
+# cfiles: the files the stage gets, one ./path per line. The compare, the space check and
+# the copy all use this one list, so nothing is copied that was not counted.
+cfiles() { (cd "$1" && find . -type f ! -name '._*' ! -path './.*' | grep -Ev '^\./[^/]*/(assets/|data/|\.data)' | cm_noswitch | sort); }
+# With azmods.cfg the on/off switches are its community-mods.<id> keys, and the stage's
+# community/enabled and <id>/<id>.off (what core reads) are written from them (cm_ctl): the
+# old switch files are neither mirrored nor compared. Without az-conf.sh: the files, as before.
+cm_noswitch() { if [ -n "$CFG_EFF" ]; then awk -F/ '!($0 == "./enabled" || (NF == 3 && $3 == $2 ".off"))'; else cat; fi; }
+cm_ctl() {
+    [ -n "$CFG_EFF" ] && [ -d "$CS" ] || return 0
+    _e=""; _x=""
+    for _d in "$CS"/*/; do
+        [ -d "$_d" ] || continue
+        _i=${_d%/}; _i=${_i##*/}
+        case "$(cfg_get "$CFG_EFF" "community-mods.$_i")" in
+            [Oo][Nn]|1|[Tt][Rr][Uu][Ee]) _e="$_e$_i
+" ;;
+            [Oo][Ff][Ff]|0|[Ff][Aa][Ll][Ss][Ee]) _x="$_x $_i" ;;
+        esac
+        _want=0; case " $_x " in *" $_i "*) _want=1 ;; esac
+        if [ "$_want" = 1 ] && [ ! -e "$_d$_i.off" ]; then : > "$_d$_i.off"; CHANGED=1
+        elif [ "$_want" = 0 ] && [ -e "$_d$_i.off" ]; then rm -f "$_d$_i.off"; CHANGED=1; fi
+    done
+    _e=$(printf '%s' "$_e" | sort)
+    if [ "$_e" != "$(cat "$CS/enabled" 2>/dev/null)" ]; then
+        printf '%s\n' "$_e" | grep . > "$CS/enabled.new"; mv -f "$CS/enabled.new" "$CS/enabled"; CHANGED=1
+        log "community: enabled [$(printf '%s' "$_e" | tr '\n' ' ')] (azmods.cfg)"
+    fi
+    return 0
+}
+csum() { [ -d "$1" ] && (cd "$1" && cfiles . | while IFS= read -r f; do md5sum "$f"; done) | md5sum | cut -d' ' -f1; }
+community_mirror() {
+    CS="${STAGE:?}/community"
+    [ -n "$CFG_EFF" ] && cfg_off "$CFG_EFF" community-mods && CM_OFF=1
+    if [ "$CM_OFF" = 1 ]; then
+        if [ -d "$CS" ]; then rm -rf "${STAGE:?}/community" 2>>"$LOG" && { log "community-mods = off -> remove community/ from the stage"; CHANGED=1; }; fi
+        [ -e "$STAGE/community-mods.off" ] || { : > "$STAGE/community-mods.off" 2>>"$LOG" && { log "community-mods = off -> no community plugins"; CHANGED=1; }; }
+        return 0
+    fi
+    [ -e "$STAGE/community-mods.off" ] && { rm -f "$STAGE/community-mods.off" 2>>"$LOG"; log "community-mods.off removed"; CHANGED=1; }
+    if [ ! -d "$MODS/community-mods" ]; then
+        [ -d "$CS" ] && rm -rf "${STAGE:?}/community" 2>>"$LOG" && { log "remove community/ (not in MODS/)"; CHANGED=1; }
+        return 0
+    fi
+    a=$(csum "$MODS/community-mods")
+    if [ -d "$CS" ] && [ "$a" = "$(csum "$CS")" ]; then log "keep community/"; cm_ctl; return 0; fi
+    # need: exactly what the copy below writes: each file rounded up to a 4 KB block, plus
+    # one block per directory. assets/, ._* and dot entries are never copied, so never counted.
+    need=$(cfiles "$MODS/community-mods" | (cd "$MODS/community-mods" && while IFS= read -r f; do echo "$(wc -c < "$f") $f"; done) 2>/dev/null \
+        | awk '{ k += int(($1 + 4095) / 4096) * 4; n = split(substr($0, index($0, " ") + 1), p, "/")
+                 d = p[1]; for(i = 2; i < n; i++){ d = d "/" p[i]; D[d] = 1 } }
+               END{ for(x in D) k += 4; print k + 4 }')
+    free=$(df -k "$STAGE" 2>/dev/null | awk 'NR==2{print $4}' | tr -cd 0-9)
+    if [ -z "$need" ] || [ -z "$free" ] || [ $((free - need)) -lt "${AZ_COMMUNITY_P7_RESERVE_KB:-12288}" ]; then
+        log "FAILED community/: needs ${need:-?} KB, p7 has ${free:-?} KB free (keeps ${AZ_COMMUNITY_P7_RESERVE_KB:-12288} KB) -> not mirrored"; return 0
+    fi
+    rm -rf "${STAGE:?}/community.new" 2>/dev/null
+    # per file, over the counted list (busybox has no rsync)
+    if mkdir -p "$STAGE/community.new" 2>>"$LOG" && cfiles "$MODS/community-mods" | while IFS= read -r f; do
+            mkdir -p "$STAGE/community.new/${f%/*}" && cp "$MODS/community-mods/$f" "$STAGE/community.new/$f" || exit 1
+        done 2>>"$LOG"; then
+        if [ "$(csum "$STAGE/community.new")" = "$a" ]; then
+            rm -rf "${STAGE:?}/community" 2>/dev/null; mv -f "$STAGE/community.new" "$CS"
+            log "update community/"; CHANGED=1; cm_ctl
+        else rm -rf "${STAGE:?}/community.new" 2>/dev/null; log "FAILED community/: the copy does not verify (community skipped)"; fi
+    else rm -rf "${STAGE:?}/community.new" 2>/dev/null; log "FAILED copying community/ (community skipped)"; fi
+    return 0
+}
+# ---- MODS/azmods.cfg: every setting, on the stick (deck/lib/az-conf.sh has the rules) ----
+# The stick's file is the source of truth; azmod keeps the deck copy (CFG_DECK) and never
+# writes the stick. At boot (and after a request that changed the stick) a stick file that
+# changed since the last sync is handed to azmod (CFG_IMPORT), which takes it over the deck
+# copy. The watcher writes the deck copy back to the stick AZ_CFG_DEBOUNCE s after the last
+# Mod Menu change, once every deck is empty. A stick file that is not a settings file is
+# refused: never imported, never overwritten. No stick: the deck copy is used, and it goes to
+# the stick the next time one is in.
+CFG_LIB=""; CFG_EFF=""; CFG_BAD=""; CFG_SYNC="$STAGE/cfg.sync"; CFG_SIG=""; CFG_T=0; CFG_SAID=""
+cfg_lib() {
+    [ -f "$DECK/lib/az-conf.sh" ] && cached_ok "$DECK" lib/az-conf.sh || return 0
+    # shellcheck source=../../../stick/deck/lib/az-conf.sh
+    . "$DECK/lib/az-conf.sh"; CFG_LIB=1
+}
+# the kill switches, read before anything is chained, staged or hooked
+cfg_kill() {
+    [ -n "$CFG_LIB" ] && [ -n "$MODS" ] && [ -f "$MODS/$CFG_NAME" ] || return 0
+    cfg_off "$MODS/$CFG_NAME" mods && { MODS_OFF=1; log "azmods.cfg: mods = off"; }
+    cfg_off "$MODS/$CFG_NAME" deck && { DECK_OFF=1; log "azmods.cfg: deck = off"; }
+    cfg_off "$MODS/$CFG_NAME" community-mods && CM_OFF=1
+    return 0
+}
+cfg_sync_set() { mkdir -p "$STAGE" 2>/dev/null; printf '%s\n%s\n' "$1" "$2" > "$CFG_SYNC.new" 2>/dev/null && mv -f "$CFG_SYNC.new" "$CFG_SYNC"; return 0; }
+# $1 = a valid stick file: changed since the sync point -> handed to azmod
+cfg_check() {
+    _s=$(cfg_md5 "$1"); _ls=$(sed -n 1p "$CFG_SYNC" 2>/dev/null); _ld=$(sed -n 2p "$CFG_SYNC" 2>/dev/null)
+    [ "$_s" = "$_ls" ] && [ "$_ld" != pending ] && return 0
+    # the deck copy already holds it: in sync, and an older hand-over azmod has not taken is void
+    [ "$(cfg_md5 "$CFG_DECK")" = "$_s" ] && { rm -f "$CFG_IMPORT" 2>/dev/null; cfg_sync_set "$_s" "$_s"; return 0; }
+    rm -f "$CFG_IMPORT.bad" 2>/dev/null
+    if cp -f "$1" "$CFG_IMPORT.new" 2>/dev/null && mv -f "$CFG_IMPORT.new" "$CFG_IMPORT"; then
+        cfg_sync_set "$_s" pending
+        log "azmods.cfg: the stick's settings differ from the deck copy -> handed to azmod (the stick wins)"
+    else rm -f "$CFG_IMPORT.new" 2>/dev/null; log "azmods.cfg: FAILED handing the stick's settings to azmod"; fi
+    return 0
+}
+# the community switch files of the 1.2.3 test builds -> community-mods.<id> keys of CFG_EFF; 0 = folded
+cfg_fold() {
+    _f=1; _c="$MODS/community-mods"
+    if [ -f "$_c/enabled" ]; then
+        _f=0
+        for _i in $(tr -d '\r' < "$_c/enabled" | grep -E '^[a-z0-9-]{3,32}$'); do
+            [ -n "$(cfg_get "$CFG_EFF" "community-mods.$_i")" ] || cfg_set "$CFG_EFF" "community-mods.$_i" on
+        done
+    fi
+    for _o in "$_c"/*/*.off; do
+        [ -f "$_o" ] || continue
+        _i=${_o%/*}; _i=${_i##*/}; [ "${_o##*/}" = "$_i.off" ] || continue
+        cfg_set "$CFG_EFF" "community-mods.$_i" off; _f=0
+    done
+    [ -e "$MODS/community-mods.off" ] && { cfg_set "$CFG_EFF" community-mods off; _f=0; }
+    return $_f
+}
+cfg_unfold() {
+    stick_write community-mods/enabled ""; stick_write community-mods.off ""
+    for _o in "$MODS"/community-mods/*/*.off; do
+        [ -f "$_o" ] || continue
+        _i=${_o%/*}; _i=${_i##*/}; [ "${_o##*/}" = "$_i.off" ] && stick_write "community-mods/$_i/$_i.off" ""
+    done
+    log "azmods.cfg: the old community switch files removed from the stick"
+}
+cfg_boot() {
+    [ -n "$CFG_LIB" ] && [ -n "$MODS" ] && [ -d "$MODS" ] || return 0
+    _sf="$MODS/$CFG_NAME"; mkdir -p /tmp/az-cfg 2>/dev/null; CFG_EFF=/tmp/az-cfg/stick.cfg; _w=""; _new=""
+    if [ -f "$_sf" ]; then
+        if ! cfg_valid "$_sf"; then
+            CFG_BAD=1; CFG_EFF=""
+            log "azmods.cfg: not a settings file (no version = 1 line, over 64 KB, or a newer version) -> refused: not imported, not overwritten; the deck copy is used"
+            return 0
+        fi
+        cp -f "$_sf" "$CFG_EFF"
+    elif cfg_valid "$CFG_DECK"; then cp -f "$CFG_DECK" "$CFG_EFF"; _new=deck; _w="created from the deck's settings"
+    else cfg_new "$CFG_EFF"; _new=empty; _w="created"; fi
+    _fold=""; cfg_fold && { _fold=1; _w="${_w:-updated}, the old community switch files folded in"; }
+    if [ -n "$_w" ]; then
+        if cfg_stick_put "$CFG_EFF" "$MNT"; then log "azmods.cfg: $_w -> written to the stick"; [ -n "$_fold" ] && cfg_unfold
+        else log "azmods.cfg: $_w, but the stick could not be written (this boot uses it from RAM)"; fi
+    fi
+    # a file made from the deck's own settings has nothing to hand over, unless keys were folded
+    # in; one made empty (no deck copy yet: azmod creates it at its next start) never does
+    if [ "$_new" = empty ] || { [ "$_new" = deck ] && [ -z "$_fold" ]; }; then
+        _d=$(cfg_md5 "$CFG_DECK"); cfg_sync_set "$(cfg_md5 "$CFG_EFF")" "${_d:-none}"
+    else cfg_check "$CFG_EFF"; fi
+    return 0
+}
+# watcher, every second. $1 = now: no debounce and no empty-decks wait (a request that writes
+# the stick anyway first takes the Mod Menu's changes along)
+cfg_tick() {
+    [ -n "$CFG_LIB" ] && [ -z "$CFG_BAD" ] || return 0
+    { [ -e "$CFG_IMPORT" ] || [ -e "$CFG_IMPORT.bad" ]; } && return 0   # azmod has not taken the stick's file
+    _sig=$(stat -c '%Y %s %i' "$CFG_DECK" 2>/dev/null); [ -n "$_sig" ] || return 0
+    _now=$(upt | cut -d. -f1)
+    if [ "$_sig" != "$CFG_SIG" ]; then CFG_SIG=$_sig; CFG_T=$_now; [ -n "${1:-}" ] || return 0; fi
+    [ -n "${1:-}" ] || [ $((_now - CFG_T)) -ge "${AZ_CFG_DEBOUNCE:-5}" ] || return 0
+    _d=$(cfg_md5 "$CFG_DECK"); _ls=$(sed -n 1p "$CFG_SYNC" 2>/dev/null)
+    [ "$_d" = "$(sed -n 2p "$CFG_SYNC" 2>/dev/null)" ] && return 0
+    [ "$_d" = "$_ls" ] && { cfg_sync_set "$_d" "$_d"; return 0; }
+    cfg_valid "$CFG_DECK" || return 0
+    if [ -z "${1:-}" ] && [ "$(decks_state)" != empty ]; then
+        [ "$CFG_SAID" = wait ] || { CFG_SAID="wait"; log "azmods.cfg: settings changed; written to the stick once every deck is empty"; }
+        return 0
+    fi
+    repick
+    [ -n "$MODS" ] && [ -d "$MODS" ] || return 0
+    _s=$(cfg_md5 "$MODS/$CFG_NAME")
+    if [ -n "$_s" ] && [ "$_s" != "$_ls" ]; then   # the stick's file changed since the sync: it wins
+        cfg_valid "$MODS/$CFG_NAME" && cfg_check "$MODS/$CFG_NAME"
+        return 0
+    fi
+    if cfg_stick_put "$CFG_DECK" "$MNT"; then
+        cfg_sync_set "$_d" "$_d"; CFG_SAID=""; log "azmods.cfg: the deck's settings written to the stick"
+    else
+        CFG_T=$((_now + ${AZ_CFG_RETRY:-30}))
+        [ "$CFG_SAID" = fail ] || { CFG_SAID="fail"; log "azmods.cfg: could not write the stick (read-only or full): the deck copy keeps the settings, retried"; }
+    fi
+    return 0
+}
+# 0. pick one stick by physical port. The loader never creates its own mount of a
+# user's stick: an extra mount makes device-mount.sh's own mount fail.
+# The chained loader prefers the stick's own az-usbpick (deck/lib), so a port-rule fix
+# ships over USB; the firmware loader's bootstrap pick uses the firmware copy. A re-run
+# after a mods update is a deck-set copy of this script, not the firmware loader, and
+# this boot's deck/ is already in $DECK: it uses the deck copy too, or every on-deck
+# update pays the firmware pick's 25s USB1 wait before the reload.
+pick() {
+    if { [ -n "${AZ_CHAINED:-}" ] || [ -n "${AZ_RERUN:-}" ]; } && [ -f "$DECK/lib/az-usbpick" ]; then
+        # shellcheck source=az-usbpick
+        . "$DECK/lib/az-usbpick"
+    else
+        # shellcheck source=az-usbpick
+        . /usr/sbin/az-usbpick
+    fi
+    pick_stick || return 0
+    MODS="$MNT/MODS"
+    log "using USB$PORT stock mount $MNT"
+    # the switch files before azmods.cfg, still honored (a firmware loader without az-conf.sh reads only these)
+    [ -e "$MODS/mods.off" ] || [ -e "$MODS/disable" ] && MODS_OFF=1
+    [ -e "$MODS/deck.off" ] && DECK_OFF=1
+    [ -e "$MODS/community-mods.off" ] && CM_OFF=1
+    return 0
+}
+# 0b. MODS/deck -> /tmp/az-deck (this boot's copy) and -> $STAGE/deck (the cache, so a
+# stickless boot still runs the last set's hooks). Stick present and no deck/ -> nothing
+# runs and the cache is dropped: the stick is the truth. An uninstall boot uses the
+# stick's copy and leaves the cache alone (30-uninstall.sh is about to delete it).
+stage_deck() {
+    rm -rf "$DECK" 2>/dev/null
+    if [ -n "$MODS" ] && [ -d "$MODS/deck" ]; then
+        if ! cp -a "$MODS/deck" "$DECK" 2>>"$LOG"; then
+            rm -rf "$DECK" 2>/dev/null; log "FAILED copying MODS/deck -> no deck scripts this boot"; return 0
+        fi
+        # AppleDouble sidecars are not scripts (a "._10-x.sh" would run as a hook)
+        find "$DECK" -name '._*' -exec rm -f {} + 2>/dev/null
+        log "deck: using the stick's MODS/deck (set $(cat "$DECK/version" 2>/dev/null || echo unversioned))"
+        trust_deck "$DECK"
+        cache_deck
+    elif [ -n "$MODS" ]; then
+        [ -d "$STAGE/deck" ] && { plog_start; rm -rf "$STAGE/deck" 2>>"$LOG" && log "deck: remove deck/ cache (not in MODS/)"; }
+        log "deck: stick has no MODS/deck -> no deck scripts this boot"
+    elif [ -d "$STAGE/deck" ]; then
+        cp -a "$STAGE/deck" "$DECK" 2>>"$LOG" && log "deck: no stick -> using the cached deck/ (set $(cat "$DECK/version" 2>/dev/null || echo unversioned))"
+        trust_deck "$DECK"
+        cache_deck
+    else
+        log "deck: no stick, no cache -> no deck scripts this boot"
+    fi
+    return 0
+}
+# the p7 cache follows this boot's deck/ after trust_deck: only what may run is
+# cached, so a stickless boot and --post-start never meet anything else. An
+# uninstall boot leaves the cache alone (30-uninstall.sh is about to delete it).
+cache_deck() {
+    if [ -n "$MODS" ] && [ -e "$MODS/uninstall" ]; then log "deck: uninstall boot -> cache not written"; return 0; fi
+    if [ ! -d "$DECK" ]; then
+        [ -d "$STAGE/deck" ] && { plog_start; rm -rf "$STAGE/deck" 2>>"$LOG" && log "deck: remove deck/ cache (nothing verified to cache)"; }
+        return 0
+    fi
+    if [ -d "$STAGE/deck" ] && [ "$(treesum "$DECK")" = "$(treesum "$STAGE/deck")" ]; then log "deck: keep deck/ (cache up to date)"; return 0; fi
+    mkdir -p "$STAGE" 2>/dev/null; plog_start
+    rm -rf "$STAGE/deck.new" 2>/dev/null
+    if cp -a "$DECK" "$STAGE/deck.new" 2>>"$LOG"; then
+        rm -rf "$STAGE/deck" 2>/dev/null; mv -f "$STAGE/deck.new" "$STAGE/deck"; sync
+        log "deck: update deck/ cache"
+    else rm -rf "$STAGE/deck.new" 2>/dev/null; log "FAILED caching MODS/deck (this boot still runs its verified copy)"; fi
+    return 0
+}
+# 0c. hand this boot over to the stick's loader. Its exit 0 is the whole boot; anything
+# else (it cannot even parse, or it died) and the firmware copy carries on itself.
+chain() {
+    [ -z "${AZ_CHAINED:-}" ] || return 0
+    [ -f "$DECK/az-usbload" ] || return 0
+    [ "$MODS_OFF" = 1 ] && { log "chain: mods = off -> firmware loader keeps this boot"; return 0; }
+    [ "$DECK_OFF" = 1 ] && { log "chain: deck = off -> firmware loader keeps this boot"; return 0; }
+    sh -n "$DECK/az-usbload" 2>>"$LOG" || { log "chain: deck/az-usbload does not parse -> firmware loader keeps this boot"; return 0; }
+    log "chain: handing over to deck/az-usbload"
+    AZ_CHAINED=1 sh "$DECK/az-usbload"; rc=$?
+    [ "$rc" = 0 ] && exit 0
+    log "chain: deck/az-usbload exited $rc -> firmware loader carries on"
+    return 0
+}
+# 3b. the hooks: deck/boot.d/NN-*.sh in name order, one at a time, `sh` (FAT has no
+# exec bit), stdin closed, output to $LOG.hooks, a watchdog per hook (AZ_HOOK_MAX s,
+# default 150). A hook that does not parse is skipped, one that times out is killed
+# and logged, and neither stops the next one or the loader. The pick is exported.
+run_hooks() {
+    [ -d "$DECK/boot.d" ] || { log "hooks: none"; return 0; }
+    [ "$DECK_OFF" = 1 ] && { log "hooks: deck = off -> skipped"; return 0; }
+    export AZ_MNT="$MNT" AZ_PORT="$PORT" AZ_MODS="$MODS" AZ_MODS_OFF="$MODS_OFF" AZ_STAGE="$STAGE" AZ_DECK="$DECK" AZ_LOG="$LOG"
+    for h in "$DECK"/boot.d/*.sh; do
+        [ -f "$h" ] || continue
+        n=${h##*/}
+        case "$n" in .*) continue ;; esac
+        sh -n "$h" 2>>"$LOG" || { log "hook $n: does not parse -> skipped"; continue; }
+        t0=$(upt)
+        azlog_cap "$LOG.hooks"
+        sh "$h" </dev/null >>"$LOG.hooks" 2>&1 & hp=$!
+        ( sleep "${AZ_HOOK_MAX:-150}"; kill "$hp" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+        wait "$hp"; rc=$?
+        kill "$wd" 2>/dev/null
+        el=$(awk -v a="$t0" -v b="$(upt)" 'BEGIN{printf "%.1f", b-a}')
+        if [ "$rc" = 143 ] || [ "$rc" = 137 ]; then log "hook $n: TIMED OUT after ${el}s (killed)"
+        else log "hook $n: exit $rc after ${el}s"; fi
+    done
+    return 0
+}
+# chained: the copy in $DECK was staged by the firmware loader, which may be one that
+# verifies nothing (1.32). Check it before pick() sources deck/lib/az-usbpick from it.
+[ -n "${AZ_CHAINED:-}" ] && trust_deck "$DECK"
+pick
+if [ -n "${AZ_CHAINED:-}" ]; then cache_deck; else stage_deck; fi
+cfg_lib
+cfg_kill
+chain
+# MODS/community/ and MODS/community-data/ of the 1.2.3 test builds -> MODS/community-mods/<id>/,
+# each mod's files in <id>/data/ (with .data.owner, and .data@<hash>/ set aside), once; then the old
+# folders are removed. A mod already in the new layout keeps its copy. Before cfg_boot, whose
+# fold reads the old switch files from their new place.
+cm_layout() {
+    [ -n "$MNT" ] && [ -n "$MODS" ] || return 0
+    [ -d "$MODS/community" ] || [ -d "$MODS/community-data" ] || return 0
+    if [ -L "$MODS/community" ] || [ -L "$MODS/community-data" ] || [ -L "$MODS/community-mods" ]; then
+        log "community layout: a link in MODS/, not migrated"; return 0
+    fi
+    _ro=$(awk -v m="$MNT" '$2==m{print ($4 ~ /(^|,)ro(,|$)/)?1:0; exit}' /proc/mounts 2>/dev/null)
+    [ "$_ro" = 1 ] && { mount -o remount,rw "$MNT" 2>/dev/null || return 0; }
+    _cm="$MODS/community-mods"; _cd="$MODS/community-data"
+    if mkdir -p "$_cm" 2>>"$LOG"; then
+        for _d in "$MODS/community"/*; do
+            [ -e "$_d" ] || continue
+            [ -e "$_cm/${_d##*/}" ] || mv "$_d" "$_cm/" 2>>"$LOG"
+        done
+        for _d in "$_cd"/*; do
+            [ -d "$_d" ] || continue
+            _i=${_d##*/}
+            [ -d "$_cm/$_i" ] && [ ! -e "$_cm/$_i/data" ] && mv "$_d" "$_cm/$_i/data" 2>>"$LOG"
+            [ -f "$_cd/.$_i.owner" ] && [ -d "$_cm/$_i" ] && [ ! -e "$_cm/$_i/.data.owner" ] && mv "$_cd/.$_i.owner" "$_cm/$_i/.data.owner" 2>>"$LOG"
+        done
+        for _d in "$_cd"/.*@*; do
+            [ -d "$_d" ] || continue
+            _n=${_d##*/}; _i=${_n#.}; _i=${_i%%@*}
+            [ -d "$_cm/$_i" ] && [ ! -e "$_cm/$_i/.data@${_n#*@}" ] && mv "$_d" "$_cm/$_i/.data@${_n#*@}" 2>>"$LOG"
+        done
+        rm -rf "${MODS:?}/community" "${MODS:?}/community-data" 2>>"$LOG"
+        log "community layout: MODS/community and MODS/community-data moved into MODS/community-mods"
+    fi
+    sync
+    [ "$_ro" = 1 ] && mount -o remount,ro "$MNT" 2>/dev/null
+    return 0
+}
+cm_layout
+cfg_boot
+desired
+deck_info        # after the staging decision, never inside it
+
+WANT=""; [ -n "$PRELOAD" ] && WANT="LD_PRELOAD=$PRELOAD"
+# ---- crash-loop guard ------------------------------------------------------------
+# A preload that SIGSEGVs EP147 crash-loops it from the first start of every boot
+# (EP147 reads az-preload.env before this loader runs). systemd restarts EP147
+# (Restart=on-failure ~2s, StartLimitBurst=20 / 5min) then marks it failed. This
+# guard trips early on repeated restarts, or on the failed state: it clears the
+# preload env (-> stock) and marks the stick's set md5, so the deck comes up stock
+# and stays stock for that set until the set changes (new .so -> new md5 -> retried).
+CLMARK=.mods-disabled-crashloop                  # breadcrumb on the stick (MODS/)
+CLGUARD_N=${AZ_CLGUARD_N:-3}                      # restarts in the window that count as a loop
+CLGUARD_T=${AZ_CLGUARD_T:-40}                     # seconds to watch after a non-stock apply
+mod_sig() { [ -n "$MODS" ] && (cd "$MODS" 2>/dev/null && for f in *.so; do [ -f "$f" ] && md5sum "$f"; done) 2>/dev/null | sort | md5sum | cut -d' ' -f1; }
+ep_nrestarts() { systemctl show EP147.service -p NRestarts --value 2>/dev/null || echo 0; }
+ep_hui() { _p=$(pidof EP147 2>/dev/null | awk '{print $1}'); [ -n "$_p" ] && grep -qx HuiProcessor /proc/"$_p"/task/*/comm 2>/dev/null; }
+clguard_trip() {   # $1 reason: clear the preload, mark the set, bring EP147 up stock
+    _sig=$(mod_sig)
+    log "crash-loop guard: $1 -> disabling mods (set ${_sig:-?}), coming up stock"
+    printf '' > "$ENVF" 2>>"$LOG"; sync
+    stick_write "$CLMARK" "${_sig:-unknown}"
+    systemctl reset-failed EP147.service 2>>"$LOG"; systemctl restart EP147.service 2>>"$LOG"
+}
+# Pre-emptive: if this exact set was already caught crash-looping, do not try it again.
+if [ -n "$WANT" ] && [ -f "$MODS/$CLMARK" ] && [ "$(cat "$MODS/$CLMARK" 2>/dev/null)" = "$(mod_sig)" ]; then
+    log "crash-loop guard: set $(mod_sig) is marked crash-looping -> staging STOCK (change the mods or delete MODS/$CLMARK to retry)"
+    WANT=""
+fi
+HAVE=$(cat "$ENVF" 2>/dev/null)           # what EP147 loaded at this boot's first start
+if [ "$WANT" = "$HAVE" ] && [ "$CHANGED" = 0 ] && [ -z "${AZ_FORCE_RELOAD:-}" ]; then
+    log "same as loaded [${HAVE:-stock}] -> no write, no restart"
+    run_hooks
+    stick_write .pending-powercycle ""   # EP147 is up with this set: a failure marker is stale
+    finish
+fi
+# an uninstall boot: WANT is "" and 30-uninstall.sh (a hook) deletes $STAGE, so the env
+# must be written before the hooks run or the purge would be undone by the write
+if [ -e "${MODS:-/nonexistent}/uninstall" ]; then
+    log "uninstall boot: not writing the env (the hooks purge the cache; EP147 restarts to stock)"
+else
+    mkdir -p "$STAGE" 2>/dev/null
+    plog_start
+    printf '%s\n' "$WANT" > "$ENVF.new" 2>>"$LOG" && mv -f "$ENVF.new" "$ENVF"; sync
+    if [ "$WANT" = "$HAVE" ]; then log "cached .so bytes changed under [$WANT]; env unchanged"
+    else log "desired [${WANT:-stock}] != loaded [${HAVE:-stock}]; env written for next boot"; fi
+fi
+run_hooks
+
+# 4. Restart gate. Restarting EP147 right at boot loses the stored WiFi password (EP147
+# is stopped before it has loaded its settings, and what it writes on the way out
+# replaces them), and a restart issued during the boot transaction can hang the deck on
+# a black screen (the NeedDaemonReload/sysinit.target job deadlock). So restart only when:
+#   a) systemd's boot transaction is finished: `systemctl is-system-running` is running
+#      or degraded (az-usbload.service is Type=simple, so it does not hold this up), and
+#   b) EP147 has initialized: its HuiProcessor thread exists, and either WiFi is
+#      associated (stock observables below) or EP147 has been up AZ_EP147_SETTLE s
+#      (a deck with no WiFi configured never associates).
+# Not ready within AZ_GATE_MAX s -> do not restart: the env is already written, so the
+# change applies at the next boot (or at EP147's own Restart=on-failure, if it is crashing).
+# WiFi observables: EP147 itself launches the mlan0 daemons (strings: `wpa_supplicant -i
+# mlan0 -D nl80211 -B -c`, `wpa_cli -i mlan0 -B -a`), so they sit in EP147.service's
+# cgroup and die with it; driver + DHCP are start-mlan0.service (wlan-monitor.sh), which
+# writes "down"/"up-pend"/"up" to /var/net_mlan0_state.dat.
+wifi_diag() {   # $1 = label. One line each; cheap enough to always log.
+    log "wifi[$1] net_mlan0_state=[$(cat /var/net_mlan0_state.dat 2>/dev/null)] has_ipv4=[$(ip -o -4 addr show mlan0 2>/dev/null | grep -qc . && echo yes || echo no)]"
+    # diagnostic: the matching process lines, arguments included
+    # shellcheck disable=SC2009
+    log "wifi[$1] procs=[$(ps w 2>/dev/null | grep -E '[w]pa_(supplicant|cli)' | tr -s ' ' | tr '\n' ';')]"
+    st=$(wpa_cli -i mlan0 status 2>/dev/null)
+    log "wifi[$1] wpa=[$(printf '%s\n' "$st" | grep -E '^(wpa_state|mode|wifi_generation)=' | tr '\n' ' ')ssid:$(printf '%s\n' "$st" | grep -qE '^ssid=.' && echo yes || echo no) bssid:$(printf '%s\n' "$st" | grep -qE '^bssid=.' && echo yes || echo no)]"
+    # diagnostic: the socket names, for the log only
+    # shellcheck disable=SC2012
+    log "wifi[$1] ctrl=[$(ls /var/run/wpa_supplicant 2>/dev/null | tr '\n' ' ')]"
+    # The stored WiFi password (EP147 writes wpa_supplicant.conf from this file). Its
+    # length only, never the value: 0 or absent after the restart means it was wiped.
+    log "wifi[$1] wifi.json passPhrase length=[$(pp_len)] file=[$([ -f /home/root/settings/wifi.json ] && echo present || echo absent)]"
+}
+# 5. Apply: one daemon-reload + restart. daemon-reload comes first: a NeedDaemonReload=yes
+# state makes a plain restart deadlock behind sysinit.target. Also how the watcher applies
+# a deferred restart (defer_tick), so it is defined before section 4 can reach finish.
+# Returns; the caller finishes.
+apply_restart() {
+    OLD=$(ep_pid)
+    # Let a running azmod paint its "RELOADING..." banner before EP147 goes down.
+    # tmpfs; a no-op when nothing is running to notice it (first install shows no banner).
+    touch /run/az-reloading 2>/dev/null
+    sleep 1.5
+    # a track loaded during the banner second stops it (the DJ's own apply excepted)
+    if [ -z "${AZ_FORCE_RELOAD:-}" ] && [ "$(decks_state)" = loaded ]; then
+        rm -f /run/az-reloading 2>/dev/null; defer "a track was loaded just before the restart"; return 1
+    fi
+    log "daemon-reload + restart EP147 (pid $OLD) to apply [${WANT:-stock}] now"
+    touch "$RESTARTING" 2>/dev/null      # tells --post-start this restart is ours
+    # crash-loop guard: cap EP147 core dumps before the mods are applied. On a deck whose
+    # `release` is non-plain, apl_start.sh sets `ulimit -S -c unlimited` + core_pattern=core
+    # with cwd in the RAM rootfs, so a crash-looping mod dumps a core per crash and OOM-hangs
+    # the box before the guard can act. LimitCORE=0 is a hard limit (apl_start's soft ulimit
+    # cannot raise above it), so no cores accumulate and the in-wait watch can trip cleanly.
+    # Runtime drop-in only (/run, RAM), never the firmware; rewritten each boot.
+    if [ -n "$WANT" ]; then
+        mkdir -p /run/systemd/system/EP147.service.d 2>/dev/null
+        printf '%s\n' '[Service]' 'LimitCORE=0' > /run/systemd/system/EP147.service.d/50-az-nocore.conf 2>>"$LOG"
+        log "crash-loop guard: wrote EP147.service.d/50-az-nocore.conf (LimitCORE=0) before applying mods"
+    fi
+    systemctl daemon-reload 2>>"$LOG"
+    T1=$(upt)
+    _crb=$(ep_nrestarts)        # crash-loop guard: baseline EP147 restart count at the loader's restart
+    # Core's community quarantine counts EP147 starts that did not last 90 s, and two suspend
+    # every community mod. This restart is deliberate, not a crash, so it must not count.
+    # Only here: the crash-loop guard's restarts are crash responses and keep the count.
+    rm -f /home/root/settings/azmod-community/.starting 2>/dev/null
+    systemctl restart EP147.service 2>>"$LOG"
+    rm -f /run/az-reloading 2>/dev/null
+    # "back" = a new EP147 pid with its HuiProcessor thread, not `is-active` (EP147.service
+    # is Type=simple: active the instant apl_start.sh forks, before ./EP147 even runs).
+    BACK=""; TRIPPED=""
+    while ! elapsed_ge "$T1" "${AZ_ACTIVE_WAIT:-45}"; do
+        NEW=$(pidof EP147 2>/dev/null | awk '{print $1}')
+        if [ -n "$NEW" ] && [ "$NEW" != "$OLD" ] && grep -qx HuiProcessor /proc/"$NEW"/task/*/comm 2>/dev/null; then
+            BACK=$NEW; break
+        fi
+        # crash-loop guard (in-wait): a non-stock set that crash-loops EP147 before it reaches
+        # HuiProcessor -> trip after ~CLGUARD_N crashes, during this wait, before systemd's 20-restart
+        # start limit (and its 20 crash cores -> RAM-rootfs OOM) is hit. This is the primary site; the
+        # is-failed branch and the modupdate_watch watch remain as the boot-2 / late nets.
+        if [ -n "$WANT" ]; then
+            _cn=$(ep_nrestarts)
+            if [ "$(( _cn - _crb ))" -ge "$CLGUARD_N" ] && ! ep_hui; then
+                clguard_trip "EP147 crash-looped $(( _cn - _crb ))x in the post-restart wait without reaching HuiProcessor"
+                TRIPPED=1; break
+            fi
+        fi
+        sleep 0.2
+    done
+    rm -f "$PENDING" 2>/dev/null            # this start reads the env: nothing waits any more
+    if [ -n "$TRIPPED" ]; then rm -f "$RESTARTING" 2>/dev/null; log "crash-loop guard tripped during the apply -> EP147 restarted stock"; return 0; fi
+    if [ -n "$BACK" ]; then
+        log "EP147 back after $(awk -v a="$T1" -v b="$(upt)" 'BEGIN{printf "%.1f", b-a}')s (pid $OLD -> $BACK, HuiProcessor up); re-announcing USB"
+        [ -n "$WANT" ] && stick_write "$CLMARK" ""   # this non-stock set came up healthy -> clear any crash-loop mark
+        # EP147 drops the still-mounted USB from Source after a restart; re-announce it.
+        # Only here (after the loader's own restart), never on a stock boot.
+        RENOTIFY=$(renotify_path)
+        sleep "${AZ_RENOTIFY_DELAY1:-6}"; sh "$RENOTIFY" 2>>"$LOG"
+        sleep "${AZ_RENOTIFY_DELAY2:-10}"; sh "$RENOTIFY" 2>>"$LOG"
+        GADGET=$(gadget_renotify_path)
+        [ -n "$GADGET" ] && { log "re-announcing SOFTWARE CONTROL via $GADGET"; sh "$GADGET" 2>>"$LOG"; }
+        rm -f "$RESTARTING" 2>/dev/null
+        # Uninstall: the hooks (30-uninstall) ran while EP147 was still up with the cached
+        # preload, so azstem re-creates its runtime files (azstem.avail*, azstem.curtrack*)
+        # right after the purge. EP147 is now back without the preload (the first pass
+        # deleted the cache + env), so nothing re-creates them: re-run the uninstall hook to
+        # purge the stragglers and write the real verdict. It is idempotent, the stick still
+        # carries MODS/uninstall, and AZ_MNT/AZ_MODS/... are still exported from run_hooks.
+        if [ -e "${MODS:-/nonexistent}/uninstall" ] && [ -f "$DECK/boot.d/30-uninstall.sh" ]; then
+            log "uninstall: EP147 back as stock -> re-running 30-uninstall (azstem no longer re-creates its files)"
+            azlog_cap "$LOG.hooks"
+            sh "$DECK/boot.d/30-uninstall.sh" </dev/null >>"$LOG.hooks" 2>&1
+            log "uninstall: post-restart purge done ($(sed -n 's/^result=//p' "${MODS:-/nonexistent}/.uninstall-result" 2>/dev/null))"
+        fi
+        sleep 4; wifi_diag "+20s-after-active"
+        stick_write .pending-powercycle ""      # clear a marker left by a failed boot
+    else
+        # Only on failure: tell the DJ (and the AZ-MODS app) what to do. The env already
+        # names this set, so a plain power-cycle loads it again; the way out is a stick that
+        # asks for none, which this loader then writes for the boot after.
+        rm -f "$RESTARTING" 2>/dev/null
+        log "!! EP147 did NOT come back (new pid + HuiProcessor) within ${AZ_ACTIVE_WAIT:-45}s after restart"
+        stick_write .pending-powercycle "EP147 did not come back after loading mods: add MODS/mods.off (or remove the stick) and power-cycle; it can take two boots to come up without mods"
+    fi
+    return 0
+}
+wifi_diag pre-gate
+# EP147 already dead (crash loop hit the start limit): nothing to protect, apply at once.
+if systemctl is-failed --quiet EP147.service 2>/dev/null; then
+    # crash-loop guard backstop: EP147 hit its start limit. If a non-stock preload
+    # is in effect, that set is what crash-looped it -> disable mods and come up stock.
+    if [ -n "$WANT" ]; then clguard_trip "EP147 in failed state (hit start limit) with a non-stock preload"; log "done"; finish; fi
+    log "EP147 is in failed state -> restarting without the gate"
+    systemctl daemon-reload 2>>"$LOG"; systemctl restart EP147.service 2>>"$LOG"
+    log "done"; finish
+fi
+# A mods update (a re-run that is not a community apply) never restarts EP147: the set
+# is staged and the env written; the Mod Menu's Reload or the next boot loads it.
+if [ -n "${AZ_RERUN:-}" ] && [ -z "${AZ_FORCE_RELOAD:-}" ]; then
+    pending_set update "a mods update is installed"
+    log "mods update staged [${WANT:-stock}]: NOT restarting EP147 (Update Mods says Reload to apply; the Mod Menu's Reload or the next boot loads it)"
+    finish
+fi
+# A deck that already runs mods is never restarted by the loader: EP147's first start
+# loaded the cached set (HAVE), the DJ has the Mod Menu, and its Reload row says
+# "Reload to apply." while $PENDING exists. The new set is staged and the env written, so
+# the DJ's Reload or the next boot loads it. Only a deck that is not running mods
+# (HAVE empty: a fresh install, or the boot after mods were off) is restarted, once and
+# early in boot, below: stock EP147 has no Mod Menu to offer a Reload. MODS/mods.off, an
+# uninstall and the DJ's own community apply (AZ_FORCE_RELOAD) are the DJ's requests
+# and keep the restart (mods.off is also the escape hatch). A missing stick, no MODS/ or no
+# usable core is not a request: the running set carries on and the stock env applies at the
+# Reload or the next boot. The crash-loop guard's restarts are above and unaffected.
+if [ -n "$HAVE" ] && [ -z "${AZ_FORCE_RELOAD:-}" ] && [ ! -e "${MODS:-/nonexistent}/uninstall" ] && [ "$MODS_OFF" != 1 ]; then
+    pending_set stick "the stick's mods differ from the running set"
+    log "restart policy: EP147 is running mods [$HAVE]; the stick's set [${WANT:-stock}] is staged -> NOT restarting (the Mod Menu's Reload row says Reload to apply; the next boot loads it)"
+    finish
+fi
+T0=$(upt); READY=""
+while :; do
+    SYS=$(systemctl is-system-running 2>/dev/null)
+    EPID=$(pidof EP147 2>/dev/null | awk '{print $1}')
+    HUI=no; AGE=0
+    if [ -n "$EPID" ]; then
+        grep -qx HuiProcessor /proc/"$EPID"/task/*/comm 2>/dev/null && HUI=yes
+        # EP147 age: /proc/<pid>/stat field 22 is start time in USER_HZ (always 100)
+        AGE=$(awk -v u="$(upt)" '{printf "%.1f", u - $22/100}' /proc/"$EPID"/stat 2>/dev/null)
+    fi
+    case "$SYS" in running|degraded)
+        if [ "$HUI" = yes ]; then
+            WIFI=""
+            if wifi_up; then READY="$WIFI"; break; fi
+            awk -v a="${AGE:-0}" -v m="${AZ_EP147_SETTLE:-30}" 'BEGIN{exit !(a>=m)}' \
+                && { READY="EP147 up ${AGE}s with HuiProcessor, WiFi not associated"; break; }
+        fi ;;
+    esac
+    elapsed_ge "$T0" "${AZ_GATE_MAX:-120}" && break
+    sleep 0.2      # fractional sleep: stock wlan-monitor.sh uses `sleep 0.2` too
+done
+GATE=$(awk -v a="$T0" -v b="$(upt)" 'BEGIN{printf "%.1f", b-a}')
+wifi_diag pre-restart
+if [ -z "$READY" ]; then
+    log "gate NOT satisfied after ${GATE}s (system=$SYS ep147=${EPID:-none} hui=$HUI age=${AGE}s) -> NOT restarting; the new set applies at the next boot"
+    finish
+fi
+log "restart gate satisfied after ${GATE}s (system=$SYS, EP147 age ${AGE}s; $READY)"
+# the restart policy (top of this file): early in boot, never over a loaded track
+if [ -n "${AZ_FORCE_RELOAD:-}" ]; then
+    log "restart policy: a community apply (the user's Reload now) -> restarting"
+elif may_restart boot; then
+    log "restart policy: $RWHY -> restarting"
+else
+    defer "$RWHY"; finish
+fi
+
+# 5. apply now (apply_restart, above)
+apply_restart
+log "done"
+finish

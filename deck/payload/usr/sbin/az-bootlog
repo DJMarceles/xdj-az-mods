@@ -1,0 +1,81 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# az-bootlog (release form): opt-in boot snapshot for support, started at boot by
+# az-bootlog.service (after EP147). Does nothing unless the stick carries
+# MODS/diag.on; then it writes one capture to MODS/az-boot.log and exits.
+#
+# Without diag.on it must change nothing, so:
+#   - it never mounts the stick itself; it only looks at the stock device-mount@
+#     mount already in /proc/mounts (a second FAT mount must never be added),
+#   - no stock mount with MODS/diag.on within ~30s -> exit 0, nothing written,
+#   - otherwise one capture (single-process REQ sampler, well under 2s CPU), written
+#     to MODS/az-boot.log, then exit. No loop, no timer, no resident process.
+set -u
+
+# 1. gate: a stock-mounted stick with MODS/diag.on. Poll /proc/mounts only.
+# AZ_BOOTLOG_TRIES and AZ_BOOTLOG_SETTLE shorten the waits for the release tests only.
+MP=""; i=0
+while [ "$i" -lt "${AZ_BOOTLOG_TRIES:-15}" ]; do
+    MP=$(awk '$1 ~ /^\/dev\/sd/ {print $2}' /proc/mounts 2>/dev/null | while IFS= read -r m; do
+        [ -e "$m/MODS/diag.on" ] && { printf '%s' "$m"; break; }
+    done)
+    [ -n "$MP" ] && break
+    i=$((i + 1)); sleep 2
+done
+[ -z "$MP" ] && exit 0
+
+# 2. let the boot settle, then one snapshot.
+sleep "${AZ_BOOTLOG_SETTLE:-30}"
+OUT=/tmp/az-bootlog.txt
+EP=$(pidof EP147 2>/dev/null)
+{
+    echo "=== az-boot.log $(date 2>/dev/null) ==="
+    echo "release: $(cat /tmp/release.txt 2>/dev/null)  uptime:$(uptime 2>/dev/null)"
+    echo "EP147 ActiveState=$(systemctl show EP147.service -p ActiveState --value 2>/dev/null) NRestarts=$(systemctl show EP147.service -p NRestarts --value 2>/dev/null) NeedDaemonReload=$(systemctl show EP147.service -p NeedDaemonReload --value 2>/dev/null) pid=$EP"
+    echo "azmod mapped (0=stock): $(grep -c azmod.so "/proc/$EP/maps" 2>/dev/null)"
+    echo "az-preload.env (p7): [$(cat /home/root/settings/az-usbload/az-preload.env 2>/dev/null)]"
+    echo "device-mount@sda1: $(systemctl is-active device-mount@sda1.service 2>/dev/null)  udev_usb1: [$(cat /proc/udev_usb1 2>/dev/null)]"
+    echo "--- mounts (sd) ---"; grep '^/dev/sd' /proc/mounts 2>/dev/null
+    echo "--- wifi (mlan0) ---"
+    echo "net_mlan0_state: [$(cat /var/net_mlan0_state.dat 2>/dev/null)]"
+    echo "has_ipv4: $(ip -o -4 addr show mlan0 2>/dev/null | grep -qc . && echo yes || echo no)"
+    # diagnostic: the matching process lines, arguments included
+    # shellcheck disable=SC2009
+    ps w 2>/dev/null | grep -E '[w]pa_(supplicant|cli)'
+    # state only, never the SSID, BSSID or any credential
+    wpa_cli -i mlan0 status 2>/dev/null | grep -E '^(wpa_state|mode|wifi_generation)='
+    echo "ssid set: $(wpa_cli -i mlan0 status 2>/dev/null | grep -qE '^ssid=.' && echo yes || echo no)"
+    # diagnostic: the socket names, for the log only
+    # shellcheck disable=SC2012
+    echo "ctrl: $(ls /var/run/wpa_supplicant 2>/dev/null | tr '\n' ' ')"
+    echo "--- az-usbload (this boot) ---"; cat /tmp/az-usbload.log 2>/dev/null
+    echo "--- az-usbload (p7 log, previous boots) ---"; cat /home/root/settings/az-usbload/usbload.log 2>/dev/null
+    echo "--- az-sshgate ---"; cat /tmp/az-sshgate.log 2>/dev/null
+    if grep -l 'Environment=LD_PRELOAD' /etc/systemd/system/EP147.service.d/*.conf >/dev/null 2>&1; then
+        echo "!! static Environment=LD_PRELOAD in EP147.service.d overrides the loader:"
+        grep -H 'Environment=LD_PRELOAD' /etc/systemd/system/EP147.service.d/*.conf 2>/dev/null
+    fi
+    # subucom REQ gpio flips (PASS: active lines >0; FAIL: a previously-active line
+    # = 0; gpio-12 idles even on a healthy deck = the control). 200 reads in one awk
+    # process instead of 400 forks, which keeps the capture cheap.
+    [ -r /sys/kernel/debug/gpio ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    if [ -r /sys/kernel/debug/gpio ]; then
+        awk 'BEGIN{f="/sys/kernel/debug/gpio"
+            for(s=0;s<200;s++){c=0
+                while((getline l < f)>0) if(l ~ /GPIO_REQ/){c++; split(l,a," "); g[c]=a[1]; v=(a[length(a)]=="hi")
+                    if(s && v!=p[c]) t[c]++; p[c]=v}
+                close(f)}
+            printf "REQ flips (200 samples):"; for(i=1;i<=c;i++) printf " %s=%d",g[i],t[i]+0; print ""}'
+    else echo "REQ: debugfs gpio unavailable"; fi
+    echo "--- dmesg subucom/usb/sd ---"; dmesg 2>/dev/null | grep -iE 'subucom|usb|sd[a-c]' | tail -25
+} > "$OUT" 2>&1
+
+# 3. write into the existing stock mount (opted in via diag.on); restore ro if it was.
+ro=$(awk -v m="$MP" '$2==m{print ($4 ~ /(^|,)ro(,|$)/)?1:0; exit}' /proc/mounts 2>/dev/null)
+[ "$ro" = 1 ] && mount -o remount,rw "$MP" 2>/dev/null
+{ cp -f "$OUT" "$MP/MODS/az-boot.log.new" && mv -f "$MP/MODS/az-boot.log.new" "$MP/MODS/az-boot.log"; } 2>/dev/null \
+    || rm -f "$MP/MODS/az-boot.log.new" 2>/dev/null
+sync
+[ "$ro" = 1 ] && mount -o remount,ro "$MP" 2>/dev/null
+exit 0

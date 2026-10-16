@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# ThreadSanitizer suppressions for the unit suites' sanitizer pass (run.sh SAN=tsan).
+# Each entry names what it suppresses and why it is not a defect of azmod or azstem.
+#
+# ---- meowgrid_test.c poison: EP147's teardown of a destroyed beat-grid object
+# drum_grid_native (guest/azstem/drumroll.c) loads a slot EP147 swaps, then checks the object's meow
+# guard word before it holds a reference, exactly as EP147's own readers do (0x1492ce0 on 1.30): the
+# object may be one EP147 is destroying at that moment, and its teardown clears the guard with a
+# plain store. The reference is then taken by compare-and-swap only while the count is above zero,
+# and the guard is checked again under it, so a destroyed object is never used (the suite's checks
+# and its controls ctl-noref / ctl-resurrect prove that). EP147's store cannot be made atomic: the
+# race on that one word is the situation under test.
+# Two entries, because either side can be the one reported first and the other side's stack can be
+# lost from the sanitizer's history ("failed to restore the stack"): the harness function that plays
+# EP147's teardown anywhere in a stack, and meow_acquire as the TOP frame of a stack (it touches only
+# the meow object itself; its count accesses are atomic and never reported). Both anchored, so a race
+# between two of azstem's own accesses is still reported. (A heap location's allocation stack cannot
+# be used: this libtsan matches only global names there.)
+race:^poison$
+race_top:^meow_acquire$

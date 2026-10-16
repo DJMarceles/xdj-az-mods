@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# fake EP147, sourced by the suites (`. /stub/fake-ep147`): a live process with a
+# HuiProcessor task, reported by the pidof stub, and WiFi already up, so the
+# restart gate passes at once unless a test changes that.
+sh -c 'echo -n HuiProcessor > /proc/self/comm; while :; do sleep 1; done' &
+echo $! > /tmp/stub.ep147pid
+mkdir -p /var; echo -n up > /var/net_mlan0_state.dat
+export AZ_EP147_SETTLE=0

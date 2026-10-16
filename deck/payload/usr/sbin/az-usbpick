@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# shellcheck shell=busybox
+# az-usbpick: picks the one stick the release acts on, by physical port, never
+# by sda/sdb enumeration order. USB1 wins; USB2 only if USB1 has no stick or no
+# mods stick. Not run on its own: sourced (`. az-usbpick`) by az-usbload,
+# usb-renotify.sh and the deck hooks that need the pick (caller defines log()).
+#
+# Port identity is the stock rule, verbatim: device-mount.sh takes the device's
+# udev path, keeps the path component just above ".../<iface>/hostN"
+#   DEV_BUS=$(... | sed -e "s/.*\(\/.*\)\/.*\/host.*/\1/g"); DEV_BUS_ID=${DEV_BUS##*/}
+# and writes 1-1 -> /proc/udev_usb1, 2-1 -> /proc/udev_usb2. 90-usb-caution.rules
+# also routes KERNELS=="3-1" -> udev_usb1 and "4-1" -> udev_usb2. Anything else
+# (e.g. a stick behind a hub) is unknown and ignored, with no fallback.
+
+# A MODS/ folder alone does not make a mods stick: the desktop app creates MODS/ on
+# every stick it prepares, so an empty one in USB1 must not outrank the real set in
+# USB2 (the deck would boot stock). A mods stick carries a core (azmod.so, azmod-core.so)
+# or one of the user's switches and requests that act without one (azmods.cfg, mods.off, its
+# older name disable, uninstall, logo.restore), so turning mods off, uninstalling or
+# restoring the boot logo still works from a stick whose .so files are gone.
+# community/ or deck/ alone does not count: nothing loads them without a core.
+is_mods_dir() {  # $1 = <mount>/MODS
+    [ -d "$1" ] || return 1
+    [ -f "$1/azmod.so" ] || [ -f "$1/azmod-core.so" ] || [ -f "$1/azmods.cfg" ] || [ -e "$1/mods.off" ] || [ -e "$1/disable" ] || [ -e "$1/uninstall" ] || [ -e "$1/logo.restore" ]
+}
+
+port_of() {  # $1 = /dev/sdX[N] -> prints 1, 2, or nothing (unknown)
+    bus=$(udevadm info --query=path --name="$1" 2>/dev/null | sed -n 's#.*/\([^/]*\)/[^/]*/host[0-9].*#\1#p')
+    case "$bus" in 1-1|3-1) echo 1 ;; 2-1|4-1) echo 2 ;; esac
+}
+
+# Sets MNT (the stock device-mount@ mountpoint of a mods stick, see is_mods_dir) and PORT, or
+# returns 1. Never mounts anything. Waits <=10s for any stick, <=25s overall.
+# The 25s is for a USB1 stick that is still being mounted. Once every mountable
+# node on USB1 is mounted and none is a mods stick, USB1 is settled and cannot outrank
+# USB2, so waiting on is pure delay (a plain stick in USB1 + the mods stick in
+# USB2 would cost 25s per loader pass). A node that never mounts (unknown FS) keeps
+# the full wait.
+pick_stick() {
+    MNT=""; PORT=""; i=0; any=0; unk=""
+    while [ "$i" -lt 25 ]; do
+        m1=""; m2=""; d1=0; c1=0; u1=0
+        for d in /dev/sd[a-h] /dev/sd[a-h][1-8]; do
+            [ -b "$d" ] || continue
+            any=1; p=$(port_of "$d")
+            [ "$p" = 1 ] && d1=1
+            mp=$(awk -v x="$d" '$1==x {print $2; exit}' /proc/mounts 2>/dev/null)
+            if [ "$p" = 1 ]; then          # mountable node: a partition, or a disk with none
+                case "$d" in
+                    *[0-9]) c1=$((c1 + 1)); [ -n "$mp" ] && u1=$((u1 + 1)) ;;
+                    *) ls "$d"[1-8] >/dev/null 2>&1 || { c1=$((c1 + 1)); [ -n "$mp" ] && u1=$((u1 + 1)); } ;;
+                esac
+            fi
+            [ -n "$mp" ] && is_mods_dir "$mp/MODS" || continue
+            case "$p" in
+                1) [ -z "$m1" ] && m1="$mp" ;;
+                2) [ -z "$m2" ] && m2="$mp" ;;
+                *) unk="$d" ;;
+            esac
+        done
+        if [ -n "$m1" ]; then
+            MNT="$m1"; PORT=1
+            [ -n "$m2" ] && log "USB2 MODS ignored (USB1 present)"
+            return 0
+        fi
+        # nothing in USB1 at all -> USB2 cannot be outranked; don't wait
+        [ "$d1" = 0 ] && [ -n "$m2" ] && { MNT="$m2"; PORT=2; return 0; }
+        # USB1 settled without a mods stick -> USB2 cannot be outranked either
+        [ "$c1" -gt 0 ] && [ "$u1" = "$c1" ] && [ -n "$m2" ] && {
+            MNT="$m2"; PORT=2; log "USB1 has no mod set -> using USB2 (USB1 settled after ${i}s)"; return 0; }
+        [ "$any" = 0 ] && [ "$i" -ge 10 ] && { log "no USB stick after 10s"; return 1; }
+        i=$((i + 1)); sleep 1
+    done
+    [ -n "$unk" ] && log "$unk has a mod set but its port is unknown (not 1-1/2-1/3-1/4-1) -> ignored"
+    # shellcheck disable=SC2034  # MNT and PORT are outputs: the sourcing script reads them
+    [ -n "$m2" ] && { MNT="$m2"; PORT=2; log "USB1 has no mod set -> using USB2"; return 0; }
+    log "no stock-mounted stick with a mod set on USB1 or USB2"
+    return 1
+}
