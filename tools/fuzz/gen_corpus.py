@@ -297,8 +297,8 @@ def cmcat():
     cat = (b"v1\n"
            b"repo|https://example.invalid/r0/azmods-repo.json|Community|1|1|\n"
            b"repo|https://example.invalid/r1/azmods-repo.json|Added|0|0|could not fetch\n"
-           b"mod|https://example.invalid/r0/azmods-repo.json|beat-meter|Beat Meter|1.0.2|someone|Shows the beat|tools|1|any|12000|icon.png||1.2.0|A longer text.|64|||0\n"
-           b"mod|https://example.invalid/r1/azmods-repo.json|other-mod|Other|0.1.0|x|y|fun|0|ep147-0123456789abcdef,ep147-1|5|||||0|https://example.invalid/r9/azmods-repo.json|other|2\n"
+           b"mod|https://example.invalid/r0/azmods-repo.json|beat-meter|Beat Meter|1.0.2|someone|Shows the beat|tools|1|any|12000|icon.png||1.2.0|A longer text.|64|||0|2019-10-08\n"
+           b"mod|https://example.invalid/r1/azmods-repo.json|other-mod|Other|0.1.0|x|y|fun|0|ep147-0123456789abcdef,ep147-1|5|||||0|https://example.invalid/r9/azmods-repo.json|other|2|20191008\n"
            b"more|3\n")
     status = b"state=running\nop=install\nid=beat-meter\nmsg=Downloading\ndone=10\ntotal=100\n"
     yield "home", b"\x00\x00" + cat + b"\0" + status
@@ -307,6 +307,8 @@ def cmcat():
     yield "modpage", b"\x03\x01" + cat + b"\0state=done\nop=enable\nid=beat-meter\n"
     yield "full-modpage", b"\x0b\x00" + cat
     yield "badversion", b"\x01\x00v2\nmod|a|b\n"
+    yield "browse-sorted", b"\x59\x03" + cat
+    yield "search-keyboard", b"\x4f\x00" + cat
 
 
 @seed("sdklib")
@@ -330,6 +332,52 @@ def sdklib():
     yield "sysfs", b"\x02/sys/devices/platform/usb/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda"
     yield "mounts", b"\x03/dev/sda1 /media/usb1 vfat rw 0 0\n/dev/sdb1 /media/a\\040b vfat rw 0 0\nproc /proc proc rw 0 0\n"
     yield "cursrc", b"\x04/media/usb1/Contents/a.mp3\n"
+
+
+def tzif(times, idx, offs, footer=b"\n", ver=b"2"):
+    """A TZif file: a minimal version 1 part, then the 64-bit part and the footer."""
+    def hdr(nt, nty):
+        return b"TZif" + ver + b"\0" * 15 + struct.pack(">6I", 0, 0, 0, nt, nty, 4)
+    v1 = hdr(0, 1) + struct.pack(">iBB", 0, 0, 0) + b"UTC\0"
+    v2 = hdr(len(times), len(offs)) + b"".join(struct.pack(">q", t) for t in times) + bytes(idx)
+    v2 += b"".join(struct.pack(">iBB", o, int(k == 1), 0)
+                   for k, o in enumerate(offs)) + b"MST\0"
+    return v1 + v2 + footer
+
+
+@seed("clocktz")
+def clocktz():
+    us = [1173603600 + k * 31556952 for k in range(20)]
+    yield "us-fat", b"\0" + tzif(us, [1 - (k & 1) for k in range(20)], [-7 * 3600, -6 * 3600],
+                                  b"\nMST7MDT,M3.2.0,M11.1.0\n")
+    yield "us-slim", b"\1" + tzif(us[:2], [1, 0], [-7 * 3600, -6 * 3600], b"\nMST7MDT,M3.2.0,M11.1.0\n")
+    yield "fixed", b"\2" + tzif([-(1 << 59)], [0], [19800], b"\nIST-5:30\n")
+    yield "quoted", b"\3" + tzif([0], [0], [-3 * 3600], b"\n<-03>3\n")
+    yield "no-footer", b"\4" + tzif(us[:3], [1, 0, 1], [-7 * 3600, -6 * 3600], b"")
+    yield "v1-only", b"\5" + tzif([], [], [0], b"", ver=b"\0")
+
+@seed("inputmem")
+def inputmem():
+    def ent(name, v):
+        return name + b"\0\x01\x05\x01" + struct.pack("<I", v)
+    def strent(name, v):
+        return name + b"\0\x01" + bytes([len(v) + 2]) + b"\x05" + v + b"\0"
+    base = (b"Setting\0" + strent(b"HistoryName", b"HISTORY") + ent(b"InputSelect0", 0)
+            + ent(b"InputSelect1", 0) + ent(b"InputSelect2", 2) + ent(b"InputSelect3", 3)
+            + ent(b"InputSelectMemory", 1) + ent(b"JogLcdBrightness", 2))
+    yield "deck-shape", base
+    yield "memory-off", base.replace(ent(b"InputSelectMemory", 1), ent(b"InputSelectMemory", 0))
+    yield "truncated", base[:-5]
+    yield "duplicate", base + ent(b"InputSelect2", 1)
+
+@seed("fcopy")
+def fcopy():
+    # "name\x01type\x02size\n" per entry under the source folder "S"; type 1 file, 2 folder
+    def ent(name, t, size=0):
+        return name.encode() + b"\x01" + bytes([t]) + b"\x02" + str(size).encode() + b"\n"
+    yield "plain", ent("a.mp3", 1, 100) + ent("Inner", 2) + ent("Inner/b.mp3", 1, 5)
+    yield "junk", ent("._a.mp3", 1, 4) + ent(".DS_Store", 1, 6) + ent("c.azcp", 1, 1)
+    yield "dotdot", ent("..", 1, 1) + ent("x/y", 1, 1)
 
 
 def box(t, payload):
@@ -388,6 +436,58 @@ def mp4():
     yield "m4a-v2", b"\0" + m4a_file(nsamp=2, ver=2)
     yield "mp3-lame", b"\1" + mp3_file()
     yield "mp3-xing", b"\1" + mp3_file(vendor=b"Lavc58.91", tag=b"Xing", id3=False)
+
+
+def anlz_file(sections):
+    """A synthetic analysis file: the PMAI header and the given (tag, header, body) sections."""
+    out = b""
+    for tag, hdr, body in sections:
+        out += tag + struct.pack(">II", 12 + len(hdr), 12 + len(hdr) + len(body)) + hdr + body
+    return b"PMAI" + struct.pack(">II", 28, 28 + len(out)) + b"\0" * 16 + out
+
+
+def pcpt(slot, ms):
+    e = b"PCPT" + struct.pack(">IIIIIHH", 0x1c, 0x38, slot, 0, 0x10000, 0xffff, 0xffff)
+    e += bytes([1, 0, 0, 0]) + struct.pack(">II", ms, 0xffffffff)
+    return e + b"\0" * (0x38 - len(e))
+
+
+def pcp2(slot, ms, rgb, comment=b""):
+    e = b"PCP2" + struct.pack(">III", 0x10, 0, slot) + bytes([1, 0, 0, 0])
+    e += struct.pack(">II", ms, 0xffffffff) + b"\0" * 12 + struct.pack(">I", len(comment)) + comment
+    e += bytes([0x26, rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255]) + b"\0" * 16
+    return e[:8] + struct.pack(">I", len(e)) + e[12:]
+
+
+@seed("hcanlz")
+def hcanlz():
+    cob = lambda typ, es: (b"PCOB", struct.pack(">IHH", typ, 0, len(es)) + b"\0" * 8, b"".join(es))
+    co2 = lambda typ, es: (b"PCO2", struct.pack(">IHH", typ, len(es), 0), b"".join(es))
+    yield "dat-split", anlz_file([cob(1, [pcpt(3, 300), pcpt(1, 100)]), cob(1, [pcpt(5, 500)]),
+                                  cob(0, [pcpt(0, 7)])])
+    yield "ext-colored", anlz_file([cob(1, [pcpt(4, 400)]), co2(1, [pcp2(1, 25399, 0xff0017),
+                                    pcp2(2, 29343, 0x00c4ff, b"\0d\0r\0o\0p"), pcp2(8, 999999, 0xffe800)])])
+    yield "no-cues", anlz_file([(b"PPTH", b"\0" * 4, b"\0" * 8)])
+    yield "short", b"PMAI\0\0\0\x1c"
+
+
+@seed("cmbrowse")
+def cmbrowse():
+    mods = (b"Echo Out|dubwise|One-press echo out.|A tempo-synced tail.|audio|2019-09-14|1|1\n"
+            b"Beat Counter|djmara|Counts beats.||visual|2019-10-12|1|1\n"
+            b"Auto Gain|levels|Suggests a TRIM.||controls|2019-10-18|0|1\n"
+            b"Old Deck|prism|Needs a newer core.||controls|2019-10-19|0|0\n"
+            b"Mystery|someone|No category.||||0|1\n"
+            b"Echo Out|other|Same name.||audio|2019-09-14|0|1")
+    yield "all-az", b"\0\n" + mods
+    yield "effects-updated", b"\x0f\n" + mods
+    yield "installed-search", b"\x1eecho dub\n" + mods
+    yield "unknown-sort", b"\xff  ECHO  \n" + mods
+    yield "bad-values", (b"\x14\n"
+                         b"A|b|c|d|Visual|2019-13-01|1|1\nB|b|c|d|visuals|2019-10-190|0|1\n"
+                         b"C|b|c|d|synths|2019-10-1|0|1\nD|b|c|d|audio|2019/10/19|0|1\n"
+                         b"E|b|c|d|tools|2019-02-31|1|0\nF|\xc3\xa9|\xff||controls|0000-01-01")
+    yield "no-mods", b"\x05abc"
 
 
 def main():

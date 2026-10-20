@@ -2,8 +2,9 @@
 /* screen_community.c: Community Mods: the catalog and status files, the pages, the slide, the draw services a mod's page paints through.
  * Part of the Mod Menu's one translation unit: #included by menu.c, in the order listed there. */
 /* ==== Community (Mod Menu > Community Mods) ============================================
- * Home: the quarantine banner, the master switch, the firmware tag and the trust note, then
- * three tabs: Installed (azcm_info rows), Browse (the catalog as a grid of tiles) and
+ * Home: the master switch and the trust note in the header; the quarantine banner and the
+ * firmware tag, then three tabs: Installed (azcm_info rows), Browse (the catalog as a grid of tiles,
+ * narrowed by a category and a search and put in one of three orders: cm_browse.h) and
  * Repositories (+ Add repository, Refresh). Pages: an installed mod (state, Turn back on, its
  * own screen), a catalog mod (Install / Update / Remove / Enable / Disable, progress), the
  * trust screen (first install, once), the Add-repository keyboard.
@@ -13,6 +14,8 @@
  * (cm_layout), so what is drawn is what is hit. Icons: azcm_icon (community_icons.c,
  * decoded by EP147's own JUCE PNG decoder); until one is ready a tile shows the first letter. */
 #include <sys/stat.h>
+#include "scroll_glide.h"
+#include "cm_browse.h"
 /* every control of one page: up to CM_NCAT tiles, or CM_NREPO repository rows with a Remove each,
  * plus the tabs and buttons; a control past this would be drawn but could not be touched */
 #define CM_MAXCTL 256
@@ -26,7 +29,6 @@
 enum {
     CMC_RESUME = 1,
     CMC_KEEPOFF,
-    CMC_MASTER,
     CMC_MOD,
     CMC_UNSUSPEND,
     CMC_TAB,
@@ -47,7 +49,11 @@ enum {
     CMC_RELOAD_OK,
     CMC_RELOAD_NO,
     CMC_MODUPD,
-    CMC_ALLOW
+    CMC_ALLOW,
+    CMC_SEARCH,
+    CMC_QCLEAR,
+    CMC_SORT,
+    CMC_FCAT
 };
 enum {
     CMA_INSTALL = 1,
@@ -77,7 +83,7 @@ typedef struct {
  * one line per id: an id is one folder, one settings file and one data folder on the deck) */
 typedef struct {
     char repo[260], id[33], name[48], ver[24], author[48], summary[120], cat[24], fw[800], icon[160], inst[24], mc[16],
-        desc[600], held[128], also[128];
+        desc[600], held[128], also[128], upd[12];
     int hooks, assets_kb, nalso;
     long size;
 } cm_cmod;
@@ -99,7 +105,11 @@ static int g_cm_view, g_cm_page = -1, g_cm_cat = -1, g_cm_tab;
 static int g_cm_sel;                /* knob focus: index into the current page's controls */
 static int g_cm_knob;               /* the knob moved focus last: show it (a touch hides it) */
 static int g_cm_press = -1;         /* the control under a finger: lit from press to lift */
-static int g_cm_scroll;             /* px the home page is scrolled (the knob keeps its focus in view) */
+static int g_cm_scroll;             /* px the home page is scrolled (a drag or the knob) */
+static int g_cm_smax;               /* how far the home page can scroll, from its last layout */
+static struct glide g_cm_gl;        /* the home page's scroll in motion (scroll_glide.h): g_cm_scroll is what it shows */
+static int g_cm_glpx;               /* the g_cm_scroll it last wrote; any other value was set from outside and stops it */
+static int g_cm_nbody;              /* the last layout's controls before the header's (back square, Reload now) */
 static int g_cm_resumed, g_cm_keptoff, g_cm_pending_off = -1, g_cm_unsusp[16];
 static int g_cm_reload;             /* a request changed what loads: offer Reload */
 static int g_cm_allow_err = -1;     /* azcm index whose Allow could not be saved on the deck, or -1 */
@@ -165,10 +175,28 @@ static int cm_pend_get(const char *id) { /* 1 on, 0 off, -1 nothing pending */
 }
 static char g_cm_kb[96];
 static int g_cm_kbnum;
+/* Browse: the category shown (CMB_ALL or a cm_browse.h index), the order, and the search; for
+ * this EP147 run. g_cm_kbsearch: the keyboard page edits the search, not a repository address. */
+static int g_cm_fcat = CMB_ALL, g_cm_sort = CMB_SORT_NAME, g_cm_kbsearch;
+static char g_cm_q[CMB_QMAX];
 static long cm_ms(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000L + t.tv_nsec / 1000000;
+}
+/* the glide follows g_cm_scroll when anything else set it (a reset, a tab, a page restored) */
+static void cm_glide_sync(void) {
+    if (g_cm_scroll == g_cm_glpx) return;
+    glide_set(&g_cm_gl, (float) g_cm_scroll);
+    g_cm_glpx = g_cm_scroll;
+}
+/* one frame of the glide; true while it moves */
+static bool cm_glide_frame(void) {
+    cm_glide_sync();
+    if (!g_cm_gl.on) return false;
+    glide_step(&g_cm_gl, cm_ms(), (float) g_cm_smax);
+    g_cm_scroll = g_cm_glpx = glide_px(&g_cm_gl);
+    return true;
 }
 /* ---- the fetcher's files ---------------------------------------------------------- */
 static int cm_split(char *line, char **f, int max) {   /* '|' fields, in place */
@@ -189,6 +217,7 @@ static int cm_repo_listed(const char *repo) {
         if (!strcmp(g_cr[i].repo, repo)) return g_cr[i].listed;
     return 0;
 }
+#define CM_TRUST_NOTE "Made by other developers, not checked by AZ-MODS." /* the Installed tab's header */
 #define CM_UNLISTED "Not in the Mod Index"   /* the wording the SDK and index docs promise */
 #define CM_HELD_FROM "A different mod with this ID is installed (from %s). Remove it first."
 #define CM_HELD_HAND "A different mod with this ID is on the USB (copied there by hand). Remove it first."
@@ -221,8 +250,8 @@ static void cm_load(void) {   /* re-read catalog + status when they changed; at 
                     if (!v1) break;
                     continue;
                 }   /* unknown version: show nothing */
-                char *fl[19];
-                int n = cm_split(line, fl, 19);
+                char *fl[20];
+                int n = cm_split(line, fl, 20);
                 if (n >= 6 && !strcmp(fl[0], "repo") && g_ncr >= CM_NREPO) g_cr_more++;
                 else if (n >= 13 && !strcmp(fl[0], "mod") && g_ncc >= CM_NCAT) g_cc_more++;
                 else if (n == 2 && !strcmp(fl[0], "more")) {
@@ -255,6 +284,7 @@ static void cm_load(void) {   /* re-read catalog + status when they changed; at 
                     cm_cpy(m->held, sizeof m->held, n >= 17 ? fl[16] : "");
                     cm_cpy(m->also, sizeof m->also, n >= 18 ? fl[17] : "");
                     m->nalso = n >= 19 ? atoi(fl[18]) : 0;
+                    cm_cpy(m->upd, sizeof m->upd, n >= 20 && cmb_date_ok(fl[19]) ? fl[19] : ""); /* updated (a fetcher without it: "") */
                 }
             }
             if (f) fclose(f);
@@ -358,6 +388,11 @@ static void cm_reset(void) {
     g_cm_row = -1;
 }
 static int cm_off_now(void) { return g_cm_pending_off >= 0 ? g_cm_pending_off : azcm_all_off(); }
+/* off by the stick's flag and not changed here: only the AZ-MODS app turns them back on */
+static int cm_master_stick(void) {
+    int off = cm_off_now();
+    return off && azcm_off_by_stick() && off == azcm_all_off();
+}
 static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_t *col) {
     switch (m->state) {
     case AZCM_LOADED:
@@ -367,7 +402,7 @@ static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_
         }
         if (cm_pend_get(m->id) == 0) {
             *col = C_AVAIL;
-            return "Turns off after Reload.";
+            return "Disabled after Reload.";
         }
         *col = C_OK;
         return "Running";
@@ -378,10 +413,10 @@ static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_
         }
         if (cm_pend_get(m->id) == 1) {
             *col = C_AVAIL;
-            return "Turns on after Reload.";
+            return "Enabled after Reload.";
         }
         *col = C_TEXT_DIM;
-        snprintf(buf, n, "%s", m->reason[0] ? m->reason : "Turned off");
+        snprintf(buf, n, "%s", m->reason[0] ? m->reason : "Disabled");
         return buf;
     case AZCM_SUSPENDED:
         if (cm_removed(m->id)) {
@@ -394,17 +429,17 @@ static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_
         }   /* Try again */
         if (azcm_suspended() && g_cm_keptoff) {
             *col = C_TEXT_DIM;
-            return "Turned off (all community mods kept off)";
+            return "Disabled (all community mods are disabled)";
         }
         if (azcm_suspended() && g_cm_resumed) {
             *col = C_AVAIL;
-            return cm_off_now() ? "Stays off: community mods are turned off" : "Loads again after Reload.";
+            return cm_off_now() ? "Stays disabled: community mods are disabled" : "Loads again after Reload.";
         }
         *col = CM_BAD;
         if (azcm_suspended()) snprintf(buf, n, "%s", "Held back (see above)");
-        else if (strstr(m->reason, "while this mod was starting")) snprintf(buf, n, "Turned off: the deck stopped while it was starting");
-        else if (strstr(m->reason, "crashed")) snprintf(buf, n, "Turned off: it crashed the deck");
-        else snprintf(buf, n, "%s", m->reason[0] ? m->reason : "Turned off after a problem");
+        else if (strstr(m->reason, "while this mod was starting")) snprintf(buf, n, "Disabled: the deck stopped while it was starting");
+        else if (strstr(m->reason, "crashed")) snprintf(buf, n, "Disabled: it crashed the deck");
+        else snprintf(buf, n, "%s", m->reason[0] ? m->reason : "Disabled after a problem");
         return buf;
     case AZCM_FAILED:
         *col = CM_BAD;
@@ -428,7 +463,7 @@ static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_
         }
         if (cm_pend_get(m->id) == 0) {
             *col = C_AVAIL;
-            return "Turns off after Reload.";
+            return "Disabled after Reload.";
         }
         *col = C_AVAIL;
         snprintf(buf, n, "Not loaded: %s", m->reason);
@@ -439,7 +474,7 @@ static const char *cm_state_text(const azcm_info_t *m, char *buf, int n, uint32_
 static int cm_crashed(const azcm_info_t *m);
 /* 1 = the mod is turned on, whether or not it loaded. The core reads the Turn off mark before
  * any other check, so a mod refused at load (wrong firmware, newer AZ-MODS needed) or whose
- * init() failed is still turned on: its toggle says Turn off, as the catalog page's does. */
+ * init() failed is still turned on: its toggle says Disable, as the catalog page's does. */
 static int cm_turned_on(const azcm_info_t *m) {
     return m->state == AZCM_LOADED || m->state == AZCM_REFUSED || m->state == AZCM_FAILED;
 }
@@ -496,6 +531,39 @@ static void cm_textw(const azmod_fb *fb, int x, int y, int w, int h, const char 
         }
     }
     c_text(fb, x, y, 0, h, t, px, c);
+}
+/* The header's breadcrumb: "Community Mods  >  <tab>" on the home page, then each page opened
+ * from it ("  >  Beat Counter", "  >  Install"); the reload page stands alone ("  >  Reload").
+ * When it is wider than w at px, the tab is left out first; cm_textw then ends it with "...". */
+#define CM_CRUMB_MAX 192
+#define CM_SEP "  >  "
+static const char *const CM_TABNAME[3] = {"Installed", "Browse", "Repositories"};
+static void cm_crumbs(char *t, size_t n, int w, int px) {
+    const char *page = 0, *sub = 0;
+    azcm_info_t m;
+    int tab = g_cm_tab >= 0 && g_cm_tab < 3 ? g_cm_tab : 0;
+    switch (g_cm_view) {
+    case CMV_MOD: page = !azcm_info(g_cm_page, &m) ? m.name : 0; break;
+    case CMV_CAT: page = g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0; break;
+    case CMV_TRUST:
+        page = g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0;
+        sub = "Install";
+        break;
+    case CMV_KBD: page = g_cm_kbsearch ? "Search" : "Add repository"; break;
+    case CMV_RELOAD: snprintf(t, n, "Community Mods" CM_SEP "Reload"); return;
+    default: break;
+    }
+    for (int with_tab = 1; with_tab >= 0; with_tab--) {
+        int k = snprintf(t, n, "Community Mods");
+        if (with_tab && k >= 0 && (size_t) k < n)
+            k += snprintf(t + k, n - (size_t) k, CM_SEP "%s", CM_TABNAME[tab]);
+        if (page && page[0] && k >= 0 && (size_t) k < n)
+            k += snprintf(t + k, n - (size_t) k, CM_SEP "%s", page);
+        if (sub && k >= 0 && (size_t) k < n)
+            snprintf(t + k, n - (size_t) k, CM_SEP "%s", sub);
+        if (w <= 0 || cm_tw(t, px) <= w || (!page && !sub))
+            return;
+    }
 }
 static int cm_tw(const char *s, int px) {
     int w = azmod_ttf_menu_width ? azmod_ttf_menu_width(s, (int) strlen(s), px, 2) : 0;
@@ -701,7 +769,8 @@ struct cm_lay {
             n++;                 \
         }                        \
     } while (0)
-#define CM_FOC (g_full && s->pane && n < CM_MAXCTL && ((g_cm_knob && g_cm_sel == n) || g_cm_press == n))
+/* the home page shows no knob focus (the knob scrolls it) */
+#define CM_FOC (g_full && s->pane && n < CM_MAXCTL && ((g_cm_knob && g_cm_view != CMV_HOME && g_cm_sel == n) || g_cm_press == n))
 
 /* The notice shown when every enabled mod was held back this start. */
 static void cm_home_held_back(struct cm_lay *lay) {
@@ -725,7 +794,7 @@ static void cm_home_held_back(struct cm_lay *lay) {
         int ty = y + pad / 2;
         /* clang-format off */
         c_text(fb, bx + pad, ty, 0, lh, !g_cm_resumed ? "Community mods were held back this time."
-                                        : cm_off_now() ? "Community mods are turned off below, so they stay off after a reload."
+                                        : cm_off_now() ? "Community mods are disabled below, so they stay disabled after a reload."
                                         : "Community mods will load again after a reload.", dpx, g_cm_resumed ? C_TEXT : CM_BAD);
         /* clang-format on */
         char why[112] = "The deck restarted twice while starting with them.";
@@ -830,7 +899,7 @@ static void cm_home_installed(struct cm_lay *lay) {
             int alloff = cm_off_now();
             /* clang-format off */
             c_text(fb, bx + pad + aw, y + rh - fb->h * 10 / 800, 0, lh,
-                   alloff ? "Installed. Community mods are off." : pend == 0 ? "Installed, turned off." : "Installed. Starts after Reload.",
+                   alloff ? "Installed. Community mods are disabled." : pend == 0 ? "Installed, disabled." : "Installed. Starts after Reload.",
                    dpx, alloff ? C_TEXT_DIM : C_AVAIL);
             /* clang-format on */
             int chh = rh * 2 / 5, chw = chh * 16 / 28;
@@ -845,6 +914,15 @@ static void cm_home_installed(struct cm_lay *lay) {
     lay->n = n;
 }
 
+/* the catalog as cm_browse.h sees it, one entry per g_cc line */
+static cmb_mod g_cm_bm[CM_NCAT];
+static void cm_browse_fill(void) {
+    for (int i = 0; i < g_ncc; i++) {
+        cm_cmod *m = &g_cc[i];
+        g_cm_bm[i] = (cmb_mod) {m->name, m->author, m->summary, m->desc, m->cat, m->upd,
+                                m->inst[0] && !cm_removed(m->id), cm_works(m) && cm_core_ok(m)};
+    }
+}
 /* The Browse and Repositories tabs: the status line with Refresh, then the tile grid or the repository list. */
 static void cm_home_catalog(struct cm_lay *lay) {
     azmod_state *s = lay->s;
@@ -862,12 +940,34 @@ static void cm_home_catalog(struct cm_lay *lay) {
     int y = lay->y;
     int n = lay->n;
     int bw2 = fb->w * 140 / 1280;
+    int bar = g_cm_tab == 1 && g_ncc && !cm_status_shown();   /* Browse: the search and the order beside Refresh */
     if (draw) {
         if (cm_status_shown()) cm_progress(fb, bx + pad, y, bw - bw2 - 2 * pad, bh3, dpx);
-        else c_text(fb, bx + pad, y, 0, bh3, g_ncc || g_ncr ? "" : "Nothing loaded yet: press Refresh.", dpx, C_TEXT_DIM);
+        else if (!bar) c_text(fb, bx + pad, y, 0, bh3, g_ncc || g_ncr ? "" : "Nothing loaded yet: press Refresh.", dpx, C_TEXT_DIM);
         cm_button(fb, bx + bw - bw2, y, bw2, bh3, cm_busy() ? "Working..." : "Refresh", 0, !cm_busy(), CM_FOC);
     }
     CM_CTL(CMC_REFRESH, 0, bx + bw - bw2, y, bw2, bh3);
+    if (bar) {   /* the search field (a tap opens the keyboard), its clear square, then the three orders */
+        int sw = fb->w * 120 / 1280, fw = bw - bw2 - CMB_NSORT * sw - (CMB_NSORT + 2) * pad - bh3;
+        if (draw) {
+            fill_rect(fb, bx, y, fw, bh3, 0x00343434u);
+            if (g_cm_q[0]) {
+                char t[CMB_QMAX + 2];
+                snprintf(t, sizeof t, "%s", g_cm_q);
+                cm_textw(fb, bx + pad, y, fw - 2 * pad, bh3, t, dpx, C_TEXT);
+            } else c_text(fb, bx + pad, y, 0, bh3, "Search name, author or description", dpx, C_TEXT_DIM);
+        }
+        CM_CTL(CMC_SEARCH, 0, bx, y, fw, bh3);
+        if (g_cm_q[0]) {
+            if (draw) cm_button(fb, bx + fw + pad / 2, y, bh3, bh3, "x", 0, 1, CM_FOC);
+            CM_CTL(CMC_QCLEAR, 0, bx + fw + pad / 2, y, bh3, bh3);
+        }
+        for (int k = 0; k < CMB_NSORT; k++) {
+            int qx = bx + fw + bh3 + 2 * pad + k * (sw + pad / 2);
+            if (draw) cm_button(fb, qx, y, sw, bh3, cmb_sort_label[k], g_cm_sort == k, 1, CM_FOC);
+            CM_CTL(CMC_SORT, k, qx, y, sw, bh3);
+        }
+    }
     y += bh3 + pad;
     if (g_cm_tab == 1) {   /* the grid: 3 columns of tiles, 5 on the full screen */
         int cols = g_cm_full ? 5 : 3, gap = pad, tw = (bw - (cols - 1) * gap) / cols, ic = tw * 45 / 100, th = ic + 3 * lh + pad;
@@ -885,10 +985,26 @@ static void cm_home_catalog(struct cm_lay *lay) {
             }
             y += lh + pad / 2;
         }
-        int order[CM_NCAT], no = 0;   /* mods that can install here first, the rest after */
-        for (int pass = 0; pass < 2; pass++)
-            for (int i = 0; i < g_ncc; i++)
-                if ((cm_works(&g_cc[i]) && cm_core_ok(&g_cc[i])) == !pass) order[no++] = i;
+        /* the category row, then the mods it and the search show, in the chosen order (cm_browse.h) */
+        cmb_mod *bm = g_cm_bm;
+        cm_browse_fill();
+        if (g_ncc) {
+            int cnt[CMB_NCAT + 1], cw = (bw - CMB_NCAT * (pad / 2)) / (CMB_NCAT + 1);
+            cmb_counts(bm, g_ncc, g_cm_q, cnt);
+            for (int c = CMB_ALL; c < CMB_NCAT; c++) {
+                int qx = bx + (c + 1) * (cw + pad / 2), k = c == CMB_ALL ? CMB_NCAT : c;
+                if (draw) {
+                    char t[32];
+                    snprintf(t, sizeof t, "%s  %d", c == CMB_ALL ? "All" : cmb_cat_label[c], cnt[k]);
+                    cm_button(fb, qx, y, cw, bh3, t, g_cm_fcat == c, cnt[k] > 0 || g_cm_fcat == c, CM_FOC);
+                }
+                CM_CTL(CMC_FCAT, c, qx, y, cw, bh3);
+            }
+            y += bh3 + pad;
+        }
+        int order[CM_NCAT], no = cmb_view(bm, g_ncc, g_cm_fcat, g_cm_sort, g_cm_q, order);
+        if (g_ncc && !no && draw)
+            c_text(fb, bx + pad, y, 0, lh, g_cm_q[0] ? "No mods match the search here. Try All, or clear the search." : "No mods in this category yet.", dpx, C_TEXT_DIM);
         for (int o = 0; o < no; o++) {
             int i = order[o];
             cm_cmod *m = &g_cc[i];
@@ -919,7 +1035,7 @@ static void cm_home_catalog(struct cm_lay *lay) {
                     badge = "Needs newer AZ-MODS";
                     bc = C_AVAIL;
                 } else if (m->inst[0] && toff) {
-                    badge = "Installed, turned off";
+                    badge = "Installed, disabled";
                     bc = C_TEXT_DIM;
                 } else if (m->inst[0]) {
                     badge = "Installed";
@@ -938,7 +1054,7 @@ static void cm_home_catalog(struct cm_lay *lay) {
             }
             CM_CTL(CMC_TILE, i, tx, ty, tw, th);
         }
-        y += ((g_ncc + cols - 1) / cols) * (th + gap);
+        y += ((no + cols - 1) / cols) * (th + gap) + (g_ncc && !no ? lh : 0);
     } else {   /* repositories: Add first so the list growing never moves it */
         int abw = fb->w * 220 / 1280;
         if (draw) cm_button(fb, bx, y, abw, bh3, "Add repository", 1, !cm_busy(), CM_FOC);
@@ -989,9 +1105,7 @@ static void cm_layout_home(struct cm_lay *lay) {
     int draw = lay->draw;
     int bx = lay->bx;
     int bw = lay->bw;
-    int rh = lay->rh;
     int lh = lay->lh;
-    int px = lay->px;
     int dpx = lay->dpx;
     int pad = lay->pad;
     int bh3 = lay->bh3;
@@ -1016,34 +1130,18 @@ static void cm_layout_home(struct cm_lay *lay) {
         }
         if (nc) {
             char t[200];
-            if (nc == 1) snprintf(t, sizeof t, "%s stopped the deck, so it was turned off. Your other mods were not affected.", who);
-            else snprintf(t, sizeof t, "%d mods stopped the deck, so they were turned off. Your other mods were not affected.", nc);
+            if (nc == 1) snprintf(t, sizeof t, "%s stopped the deck, so it was disabled. Your other mods were not affected.", who);
+            else snprintf(t, sizeof t, "%d mods stopped the deck, so they were disabled. Your other mods were not affected.", nc);
             if (draw) { cm_textw(fb, bx + pad, y, bw - 2 * pad, lh, t, dpx, CM_BAD); }
             y += lh;
             if (draw) c_text(fb, bx + pad, y, 0, lh, "Open it under Installed to try it again or remove it.", dpx, C_TEXT_DIM);
             y += lh + fb->h * 6 / 800;
         }
     }
-    {   /* the master switch (also the Community Mods row's checkbox in the Mod Menu); a change applies at the next start */
-        int off = cm_off_now(), was = azcm_all_off(), stick = off && azcm_off_by_stick() && off == was, foc = CM_FOC;
-        int sh = rh * 4 / 5, sz = fb->h * 20 / 800;
-        if (draw) {
-            fill_rect(fb, bx, y, bw, sh, foc ? C_FOCUS_BAND : 0x00343434u);
-            if (foc) c_focus_ring(fb, bx, y, bw, sh);
-            c_text(fb, bx + pad, y, 0, sh, "Community mods", px, C_TEXT);
-            const char *st = off != was ? (off ? "Turns off after Reload" : "Turns on after Reload")
-                             : stick    ? "Off on this USB: turn them on in the AZ-MODS app"
-                             : off      ? "Off: none of them load"
-                                        : "On";
-            int stw = cm_tw(st, dpx);
-            c_text(fb, bx + bw - (stick ? pad : 2 * pad + sz) - stw - (stick ? 0 : pad), y, 0, sh, st, dpx, off != was ? C_AVAIL : C_TEXT_DIM);
-            if (!stick) draw_checkbox(fb, bx + bw - pad - sz, y + (sh - sz) / 2, sz, !off, foc);
-        }
-        if (!stick) CM_CTL(CMC_MASTER, 0, bx + bw * 55 / 100, y, bw - bw * 55 / 100, sh);   /* the switch end of the row only */
-        y += sh + pad;
+    if (cm_master_stick()) {   /* off by the stick's flag: say why, and where they turn on again */
+        if (draw) c_text(fb, bx + pad, y, 0, lh, "Community mods are disabled on this USB: enable them in the AZ-MODS app.", dpx, C_TEXT_DIM);
+        y += lh + fb->h * 8 / 800;
     }
-    if (draw) c_text(fb, bx + pad, y, 0, lh, "Community mods are made by other people and are not checked by AZ-MODS.", dpx, C_TEXT_DIM);
-    y += lh + fb->h * 8 / 800;
     {
         static const char *TABS[3] = {"Installed", "Browse", "Repositories"};   /* the tabs */
         int tw = (bw - 2 * pad) / 3;
@@ -1109,8 +1207,8 @@ static int cm_layout_mod(struct cm_lay *lay) {
         /* found turned on on the USB, but this deck has not approved this exact mod file: put
          * there by the AZ-MODS app, copied by hand, or a different build of a mod approved before */
         char t[320];
-        if (m.from[0]) snprintf(t, sizeof t, "Turned on on this USB, from %s, but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust where it came from.", m.from);
-        else snprintf(t, sizeof t, "Turned on on this USB, copied there by hand (no record of where it came from), but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust it.");
+        if (m.from[0]) snprintf(t, sizeof t, "Enabled on this USB, from %s, but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust where it came from.", m.from);
+        else snprintf(t, sizeof t, "Enabled on this USB, copied there by hand (no record of where it came from), but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust it.");
         y += cm_wrap(fb, bx + pad, y, bw - 2 * pad, lh, t, dpx, C_TEXT, 3, draw) * lh + pad / 2;
         int bw2 = fb->w * 200 / 1280, x = bx + pad, busy = cm_busy();
         if (!m.allowed) {
@@ -1126,12 +1224,12 @@ static int cm_layout_mod(struct cm_lay *lay) {
             y += lh + pad / 2;
         }
         if (draw && cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
-    } else {   /* the actions, on every installed page: Try again (after a crash) or Turn on/off, and Remove */
+    } else {   /* the actions, on every installed page: Try again (after a crash) or Enable / Disable, and Remove */
         int bw2 = fb->w * 200 / 1280, x = bx + pad, busy = cm_busy(), gone = cm_removed(m.id);
         int crashed = cm_crashed(&m), tried = (g_cm_page < 16 && g_cm_unsusp[g_cm_page]) || cm_pend_get(m.id) == 1;
         if (crashed && draw && !tried) {
             char t[200];
-            snprintf(t, sizeof t, "%s %s, so it was turned off. Your other mods were not affected.", m.name,
+            snprintf(t, sizeof t, "%s %s, so it was disabled. Your other mods were not affected.", m.name,
                      strstr(m.reason, "while this mod was starting") ? "stopped the deck while it was starting" : "crashed the deck");
             cm_wrap(fb, bx + pad, y, bw - 2 * pad, lh, t, dpx, CM_BAD, 2, 1);
         }
@@ -1153,7 +1251,7 @@ static int cm_layout_mod(struct cm_lay *lay) {
                 /* Try again pressed: the state line above says "Loads again after Reload." */
             } else if (!azcm_suspended()) {
                 int pend = cm_pend_get(m.id), on = pend >= 0 ? pend : cm_turned_on(&m);
-                if (draw) cm_button(fb, x, y, bw2, bh3, on ? "Turn off" : "Turn on", 0, !busy, CM_FOC);
+                if (draw) cm_button(fb, x, y, bw2, bh3, on ? "Disable" : "Enable", 0, !busy, CM_FOC);
                 CM_CTL(CMC_MODACT, on ? CMA_DISABLE : CMA_ENABLE, x, y, bw2, bh3);
                 x += bw2 + pad;
             }
@@ -1204,9 +1302,11 @@ static int cm_layout_cat(struct cm_lay *lay) {
     cm_cmod *m = &g_cc[g_cm_cat];
     int ic = g_cm_full ? rh * 3 : rh * 2;
     int works = cm_works(m), core = cm_core_ok(m), ii = cm_installed_idx(m->id);
+    /* the top block: the icon, and right of it the facts line by line, then the buttons on the
+     * icon's bottom edge (lower when the lines need it), so the description gets the rest */
+    int tx = bx + 2 * pad + ic, ni = m->inst[0] ? 3 : 2, bh3t = ni * lh + pad / 2 + bh3, top = ic > bh3t ? ic : bh3t;
     if (draw) {
         cm_icon(fb, bx + pad, y, ic, m->id, m->name, m->icon);
-        int tx = bx + 2 * pad + ic;
         char t[240];
         snprintf(t, sizeof t, "v%s  by %s", m->ver, m->author);
         c_text(fb, tx, y, 0, lh, t, dpx, C_TEXT);
@@ -1217,8 +1317,37 @@ static int cm_layout_cat(struct cm_lay *lay) {
             c_text(fb, tx, y + 2 * lh, 0, lh, t, dpx, C_OK);
         }
     }
+    int bw2 = fb->w * 140 / 1280, x = tx, busy = cm_busy(), yb = y + top - bh3;
+#define CM_BTN(lbl, act, prim, act_ok)                                                  \
+    do {                                                                                \
+        if (draw) cm_button(fb, x, yb, bw2, bh3, lbl, prim, (act_ok) && !busy, CM_FOC); \
+        CM_CTL(CMC_ACT, act, x, yb, bw2, bh3);                                          \
+        x += bw2 + pad;                                                                 \
+    } while (0)
+    if (!m->inst[0]) CM_BTN("Install", CMA_INSTALL, 1, works && core && !m->held[0]);
+    else {
+        if (azcm_ver_newer(m->ver, m->inst)) CM_BTN("Update", CMA_UPDATE, 1, works && core);
+        azcm_info_t im;
+        int pend = cm_pend_get(m->id);
+        int off = pend >= 0 ? !pend : ii >= 0 && !azcm_info(ii, &im) && im.state == AZCM_DISABLED;
+        if (!cm_removed(m->id)) {
+            CM_BTN(off ? "Enable" : "Disable", off ? CMA_ENABLE : CMA_DISABLE, 0, 1);
+            CM_BTN("Remove", CMA_REMOVE, 0, 1);
+        }
+    }
+#undef CM_BTN
+    /* this mod's status line: on the button row when it has the width, else on a line of its own
+     * under the top block (taken only while there is something to say) */
+    int pw = bx + bw - pad - x, mine = cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m->id);
+    y += top + pad;
+    if (pw >= 2 * bw2) {
+        if (draw && mine) cm_progress(fb, x, yb, pw, bh3, dpx);
+    } else if (mine) {
+        if (draw) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
+        y += lh + pad;
+    }
     {   /* the summary (wrapped), then the facts: one per line */
-        int ty = y + ic + pad, nl = cm_wrap(fb, bx + pad, ty, bw - 2 * pad, lh, m->summary, dpx, C_TEXT, g_cm_full ? 3 : 2, draw);
+        int ty = y, nl = cm_wrap(fb, bx + pad, ty, bw - 2 * pad, lh, m->summary, dpx, C_TEXT, g_cm_full ? 3 : 2, draw);
         ty += nl * lh;
         char t[240];
         int k = 0;
@@ -1274,28 +1403,6 @@ static int cm_layout_cat(struct cm_lay *lay) {
         }
         y = ty + k * lh + pad;
     }
-    int bw2 = fb->w * 140 / 1280, x = bx + pad, busy = cm_busy();
-#define CM_BTN(lbl, act, prim, act_ok)                                                 \
-    do {                                                                               \
-        if (draw) cm_button(fb, x, y, bw2, bh3, lbl, prim, (act_ok) && !busy, CM_FOC); \
-        CM_CTL(CMC_ACT, act, x, y, bw2, bh3);                                          \
-        x += bw2 + pad;                                                                \
-    } while (0)
-    if (!m->inst[0]) CM_BTN("Install", CMA_INSTALL, 1, works && core && !m->held[0]);
-    else {
-        if (azcm_ver_newer(m->ver, m->inst)) CM_BTN("Update", CMA_UPDATE, 1, works && core);
-        azcm_info_t im;
-        int pend = cm_pend_get(m->id);
-        int off = pend >= 0 ? !pend : ii >= 0 && !azcm_info(ii, &im) && im.state == AZCM_DISABLED;
-        if (!cm_removed(m->id)) {
-            CM_BTN(off ? "Turn on" : "Turn off", off ? CMA_ENABLE : CMA_DISABLE, 0, 1);
-            CM_BTN("Remove", CMA_REMOVE, 0, 1);
-        }
-    }
-#undef CM_BTN
-    y += bh3 + pad;
-    if (draw && cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m->id)) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
-    y += lh + pad;
     g_cm_desc.r.h = 0;
     if (g_cm_desc.cat != g_cm_cat) {
         g_cm_desc.cat = g_cm_cat;
@@ -1346,7 +1453,7 @@ static void cm_layout_trust(struct cm_lay *lay) {
     int y = lay->y;
     int n = lay->n;
     static const char *L[] = {"", "",
-                              "Community mods are made by other people, not by AZ-MODS.",
+                              "Community mods are made by other developers, not by AZ-MODS.",
                               "AZ-MODS does not check them. They run inside the deck software",
                               "with full access to your deck, and a faulty one can stop the music.",
                               "", "Only install mods whose source you trust. You can turn every",
@@ -1411,22 +1518,34 @@ static void cm_layout_kbd_full(struct cm_lay *lay) {
     int n = lay->n;
     int fh = rh * 13 / 10, fpx = rh * 52 / 100, bw2 = fb->w * 150 / 1280;
     if (draw) {
-        c_text(fb, bx + pad, y, 0, lh, "Type owner/repo, a github.com address, or an https:// address ending in azmods-repo.json:", dpx, C_TEXT_DIM);
+        c_text(fb, bx + pad, y, 0, lh, g_cm_kbsearch ? "Search the mods by name, author or description. Each word you type must match." : "Type owner/repo, a github.com address, or an https:// address ending in azmods-repo.json:", dpx, C_TEXT_DIM);
         int fw = bw - 2 * pad - 2 * (bw2 + pad);
         fill_rect(fb, bx + pad, y + lh + pad / 2, fw, fh, 0x00343434u);
         /* the end of what was typed stays in view: cut from the left */
         char t[110];
-        snprintf(t, sizeof t, "%s_", g_cm_kb);
+        snprintf(t, sizeof t, "%s_", g_cm_kbsearch ? g_cm_q : g_cm_kb);
         const char *v = t;
         while (*v && cm_tw(v, fpx) > fw - 2 * pad) v++;
         c_text(fb, bx + 2 * pad, y + lh + pad / 2, 0, fh, v, fpx, C_TEXT);
     }
     int ky = y + lh + pad / 2 + (fh - bh3) / 2, ax = bx + bw - pad - 2 * bw2 - pad;
-    if (draw) cm_button(fb, ax, ky, bw2, bh3, "Add", 1, g_cm_kb[0] != 0, CM_FOC);
+    if (draw) cm_button(fb, ax, ky, bw2, bh3, g_cm_kbsearch ? "Done" : "Add", 1, g_cm_kbsearch || g_cm_kb[0] != 0, CM_FOC);
     CM_CTL(CMC_KB_OK, 0, ax, ky, bw2, bh3);
-    if (draw) cm_button(fb, ax + bw2 + pad, ky, bw2, bh3, "Cancel", 0, 1, CM_FOC);
+    if (draw) cm_button(fb, ax + bw2 + pad, ky, bw2, bh3, g_cm_kbsearch ? "Clear" : "Cancel", 0, 1, CM_FOC);
     CM_CTL(CMC_KB_NO, 0, ax + bw2 + pad, ky, bw2, bh3);
-    {   /* whole pieces of an address, one press each */
+    if (g_cm_kbsearch) {   /* what the search finds as it is typed, in the category shown */
+        if (draw) {
+            int out[CM_NCAT], k;
+            cm_browse_fill();
+            k = cmb_view(g_cm_bm, g_ncc, g_cm_fcat, g_cm_sort, g_cm_q, out);
+            char t[160];
+            int o = snprintf(t, sizeof t, k == 1 ? "1 mod matches" : "%d mods match", k);
+            if (g_cm_fcat != CMB_ALL) o += snprintf(t + o, sizeof t - o, " in %s", cmb_cat_label[g_cm_fcat]);
+            for (int i = 0; i < k && i < 3 && o < (int) sizeof t; i++) o += snprintf(t + o, sizeof t - o, "%s%s", i ? ", " : ": ", g_cc[out[i]].name);
+            if (k > 3 && o < (int) sizeof t) snprintf(t + o, sizeof t - o, "...");
+            cm_textw(fb, bx + pad, y + lh + pad / 2 + fh + pad, bw - 2 * pad, bh3, t, dpx, k ? C_TEXT : C_AVAIL);
+        }
+    } else {   /* whole pieces of an address, one press each */
         static const char *SC[3] = {"https://", "github.com/", "/azmods-repo.json"};
         int sy = y + lh + pad / 2 + fh + pad, sx = bx + pad;
         for (int k = 0; k < 3; k++) {
@@ -1492,7 +1611,7 @@ static void cm_layout_kbd(struct cm_lay *lay) {
         c_text(fb, bx + pad, y, 0, lh, "Type owner/repo, or a github.com address:", dpx, C_TEXT_DIM);
         fill_rect(fb, bx + pad, y + lh, bw - 2 * pad, rh, 0x00343434u);
         char t[110];
-        snprintf(t, sizeof t, "%s_", g_cm_kb);
+        snprintf(t, sizeof t, "%s_", g_cm_kbsearch ? g_cm_q : g_cm_kb);
         c_text(fb, bx + 2 * pad, y + lh, 0, rh, t, px, C_TEXT);
     }
     int bw2 = fb->w * 130 / 1280, ky = y + lh + rh + pad;
@@ -1535,7 +1654,8 @@ static void cm_layout_kbd(struct cm_lay *lay) {
     lay->n = n;
 }
 
-/* The full-screen header band: the back square, the section's icon, the page title and the Reload note. */
+/* The full-screen header band: the back square, the section's icon, the page title and the Reload note;
+ * on the home page also the master switch and the trust note. */
 static void cm_layout_header(struct cm_lay *lay) {
     azmod_state *s = lay->s;
     const azmod_fb *fb = lay->fb;
@@ -1546,27 +1666,26 @@ static void cm_layout_header(struct cm_lay *lay) {
     int bh3 = lay->bh3;
     int n = lay->n;
     int top = dock_y(fb), hh = menu_hdrh(fb), side = hh * 5 / 8, qx = fb->w / 40, qy = top + (hh - side) / 2;
+    int isz = hh * 45 / 100, ix = qx + side + fb->w / 50, tx = ix + isz + fb->w / 60, tright = fb->w - fb->w / 40, tpx = hh * 32 / 100;
+    int tw_title = 0;
+    if (cm_need_reload() && !cm_busy() && g_cm_view != CMV_RELOAD)   /* leave room for the Reload note + button */
+        tright -= fb->w * 180 / 1280 + 2 * pad + cm_tw("Changes take effect after a reload", dpx);
     if (draw) {
         fill_rect(fb, 0, top, fb->w, hh, C_HEADER_BG);
         draw_rect_outline(fb, qx, qy, side, side, 2, CM_FOC ? C_HI : C_CHECK_BOX);
         int asz = side * 3 / 5;
         blit_icon(fb, qx + (side - asz) / 2, qy + (side - asz) / 2, asz, C_TEXT, IC_BACK);
-        int isz = hh * 45 / 100, ix = qx + side + fb->w / 50;
         draw_item_icon(fb, ix, top + (hh - isz) / 2, isz, AZI_COMMUNITY, C_TEXT);
-        const char *title = "Community Mods";
-        azcm_info_t m;
-        if (g_cm_view == CMV_MOD && !azcm_info(g_cm_page, &m)) title = m.name;
-        else if (g_cm_view == CMV_CAT && g_cm_cat >= 0 && g_cm_cat < g_ncc) title = g_cc[g_cm_cat].name;
-        else if (g_cm_view == CMV_KBD) title = "Add repository";
-        else if (g_cm_view == CMV_RELOAD) title = "Reload";
-        char t[120];
-        if (g_cm_view == CMV_HOME || g_cm_view == CMV_TRUST) snprintf(t, sizeof t, "%s", title);
-        else snprintf(t, sizeof t, "Community Mods  >  %s", title);
-        int tx = ix + isz + fb->w / 60, tright = fb->w - fb->w / 40;
-        if (cm_need_reload() && !cm_busy() && g_cm_view != CMV_RELOAD)   /* leave room for the Reload note + button */
-            tright -= fb->w * 180 / 1280 + 2 * pad + cm_tw("Changes take effect after a reload", dpx);
-        cm_textw(fb, tx, top, tright - tx - pad, hh, t, hh * 32 / 100, C_TEXT);
+        char t[CM_CRUMB_MAX];
+        cm_crumbs(t, sizeof t, tright - tx - pad, tpx);
+        cm_textw(fb, tx, top, tright - tx - pad, hh, t, tpx, C_TEXT);
+        tw_title = cm_tw(t, tpx);
         fill_rect(fb, 0, top + hh - 2, fb->w, 2, C_DIVIDER);
+    }
+    if (g_cm_view == CMV_HOME && g_cm_tab == 0 && draw) {   /* Installed: the trust note beside the title */
+        int spx = dpx * 70 / 100, nx = tx + tw_title + fb->w / 40;
+        if (tright - pad - nx >= cm_tw("Made by...", spx))   /* else no room beside the title */
+            cm_textw(fb, nx, top, tright - pad - nx, hh, CM_TRUST_NOTE, spx, C_TEXT_DIM);
     }
     if (cm_need_reload() && !cm_busy() && g_cm_view != CMV_RELOAD) {   /* something changed what loads: one fixed place */
         int rbw = fb->w * 180 / 1280, rx = fb->w - fb->w / 40 - rbw, ry = top + (hh - bh3) / 2;
@@ -1581,6 +1700,13 @@ static void cm_layout_header(struct cm_lay *lay) {
     lay->n = n;
 }
 
+/* The home page scrolls through content px in a view px tall: how far it can go, and an offset
+ * kept inside that. */
+static int cm_scroll_max(int content, int view) { return view > 0 && content > view ? content - view : 0; }
+static int cm_scroll_clamp(int v, int max) {
+    if (v > max) v = max;
+    return v < 0 ? 0 : v;
+}
 static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) {
     int bx, by, bw, bh;
     cm_box(fb, &bx, &by, &bw, &bh);
@@ -1589,6 +1715,10 @@ static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) 
     struct cm_lay lay = {s, fb, ctl, draw, bx, by, bw, bh, rh, lh, px, dpx, pad, bh3, y, n};
     if (g_cm_view == CMV_HOME) {
         cm_layout_home(&lay);
+        int content = lay.y - y;   /* the whole page, from its top edge to its last row */
+        g_cm_smax = cm_scroll_max(content, bh);
+        /* EP147's own list scroll bar in the right margin, only while the page overflows (ui_draw.c draw_vsb) */
+        if (draw) draw_vsb(fb, bx + bw + pad, by, bh, content, bh, g_cm_scroll);
     } else if (g_cm_view == CMV_MOD) {
         if (!cm_layout_mod(&lay))
             return 0;
@@ -1604,6 +1734,7 @@ static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) 
     } else if (g_cm_view == CMV_KBD) {
         cm_layout_kbd(&lay);
     }
+    g_cm_nbody = lay.n;
     if (g_cm_full)
         cm_layout_header(&lay);
     return lay.n;
@@ -1620,7 +1751,7 @@ static void cm_draw_card(azmod_state *s, const azmod_fb *fb) {
     c_text(fb, x0 + pad, top, 0, hh, "Community Mods", hh * 34 / 100, C_TEXT);
     fill_rect(fb, x0, top + hh - 2, w0, 2, C_DIVIDER);
     int y = top + hh + fb->h * 14 / 800;
-    c_text(fb, x0 + pad, y, 0, lh, "Mods made by other people: browse, install and manage them.", dpx, C_TEXT_DIM);
+    c_text(fb, x0 + pad, y, 0, lh, "Mods made by other developers: browse, install and manage them.", dpx, C_TEXT_DIM);
     c_text(fb, x0 + pad, y + lh, 0, lh, "They are not checked by AZ-MODS and run with full access to your deck.", dpx, C_TEXT_DIM);
     y += 2 * lh + fb->h * 14 / 800;
     int off = cm_off_now(), was = azcm_all_off(), nm = azcm_count(), live = 0;
@@ -1628,7 +1759,7 @@ static void cm_draw_card(azmod_state *s, const azmod_fb *fb) {
         azcm_info_t m;
         if (!azcm_info(i, &m) && m.state == AZCM_LOADED) live++;
     }
-    c_text(fb, x0 + pad, y, 0, rh, off ? "Community mods are off." : "Community mods are on.", px, C_TEXT);
+    c_text(fb, x0 + pad, y, 0, rh, off ? "Community mods are disabled." : "Community mods are enabled.", px, C_TEXT);
     if (off != was) {
         const char *a = "Changes after Reload";
         c_text(fb, x0 + w0 - pad - cm_tw(a, dpx), y, 0, rh, a, dpx, C_AVAIL);
@@ -1646,7 +1777,7 @@ static void cm_draw_card(azmod_state *s, const azmod_fb *fb) {
     c_text(fb, x0 + pad, y, 0, lh, t, dpx, C_TEXT);
     y += lh;
     if (bad) {
-        snprintf(t, sizeof t, "%d turned off after a problem", bad);
+        snprintf(t, sizeof t, "%d disabled after a problem", bad);
         c_text(fb, x0 + pad, y, 0, lh, t, dpx, CM_BAD);
         y += lh;
     }
@@ -1680,6 +1811,7 @@ static void cm_draw(azmod_state *s, const azmod_fb *fb) {
     cm_ctl ctl[CM_MAXCTL];
     int n = cm_layout(s, fb, ctl, 0);
     if (g_cm_sel >= n) g_cm_sel = n ? n - 1 : 0;
+    if (g_cm_view == CMV_HOME) g_cm_scroll = cm_scroll_clamp(g_cm_scroll, g_cm_smax);   /* the page may have shrunk */
     cm_layout(s, fb, ctl, 1);
 }
 /* ---- the slide: in from the right on open, out to the right on BACK ------
@@ -1810,7 +1942,6 @@ static void cm_fire(const cm_ctl *c) {
     switch (c->kind) {
     case CMC_RESUME:  azcm_resume(); g_cm_resumed = 1; g_cm_sel = 0; break;
     case CMC_KEEPOFF: azcm_set_all_off(1); g_cm_pending_off = 1; g_cm_keptoff = 1; g_cm_sel = 0; break;
-    case CMC_MASTER:  cm_master_toggle(); break;
     case CMC_BACK:    if (g_cm_s && !cm_back()) cm_full_close(g_cm_s); break;
     case CMC_MOD:     if (!g_cm_row_opening) azcm_page_screen(-1, NULL);   /* from the list: the mod's own page */
                       g_cm_page = c->idx; cm_open(CMV_MOD); if (cm_page_screen()) azcm_screen_enter(g_cm_page); break;
@@ -1820,7 +1951,7 @@ static void cm_fire(const cm_ctl *c) {
     case CMC_TAB:     g_cm_tab = c->idx; g_cm_scroll = 0; if (c->idx && !g_ncc && !g_ncr && !cm_busy()) cm_req("refresh", 0, 0); break;
     case CMC_TILE:    g_cm_cat = c->idx; cm_open(CMV_CAT); break;
     case CMC_REFRESH: if (!cm_busy()) cm_req("refresh", 0, 0); break;
-    case CMC_ADDREPO: if (!cm_busy()) { g_cm_kbnum = 0; cm_open(CMV_KBD); } break;   /* the draft is kept until a repository is added */
+    case CMC_ADDREPO: if (!cm_busy()) { g_cm_kbsearch = 0; g_cm_kbnum = 0; cm_open(CMV_KBD); } break;   /* the draft is kept until a repository is added */
     case CMC_DELREPO:
         if (!cm_busy() && c->idx < g_ncr)
             cm_ask("Remove repository?", g_cr[c->idx].name[0] ? g_cr[c->idx].name : g_cr[c->idx].repo,
@@ -1865,19 +1996,27 @@ static void cm_fire(const cm_ctl *c) {
         cm_open(CMV_CAT);
     } break;
     case CMC_TRUST_NO: cm_open(CMV_CAT); break;
-    case CMC_KEY: {
-        size_t L = strlen(g_cm_kb);
+    case CMC_KEY: {   /* into the search, or the repository address */
+        char *kb = g_cm_kbsearch ? g_cm_q : g_cm_kb;
+        size_t cap = g_cm_kbsearch ? sizeof g_cm_q : sizeof g_cm_kb, L = strlen(kb);
         if (c->idx == 0x100) g_cm_kbnum = !g_cm_kbnum;
-        else if (c->idx == 0x101) { if (L + 1 < sizeof g_cm_kb && L) { g_cm_kb[L] = ' '; g_cm_kb[L + 1] = 0; } }
-        else if (c->idx == 0x102) { if (L) g_cm_kb[L - 1] = 0; }
+        else if (c->idx == 0x101) { if (L + 1 < cap && L) { kb[L] = ' '; kb[L + 1] = 0; } }
+        else if (c->idx == 0x102) { if (L) kb[L - 1] = 0; }
         else if (c->idx >= 0x110 && c->idx <= 0x112) {
             static const char *SC[3] = { "https://", "github.com/", "/azmods-repo.json" };
-            snprintf(g_cm_kb + L, sizeof g_cm_kb - L, "%s", SC[c->idx - 0x110]);
+            if (!g_cm_kbsearch) snprintf(kb + L, cap - L, "%s", SC[c->idx - 0x110]);
         }
-        else if (L + 1 < sizeof g_cm_kb) { g_cm_kb[L] = (char)c->idx; g_cm_kb[L + 1] = 0; }
+        else if (L + 1 < cap) { kb[L] = (char)c->idx; kb[L + 1] = 0; }
     } break;
-    case CMC_KB_OK:   if (g_cm_kb[0]) { cm_req("addrepo %s", g_cm_kb, 0); g_cm_tab = 2; cm_open(CMV_HOME); } break;
-    case CMC_KB_NO:   cm_open(CMV_HOME); break;
+    case CMC_KB_OK:
+        if (g_cm_kbsearch) { cm_open(CMV_HOME); g_cm_scroll = 0; }
+        else if (g_cm_kb[0]) { cm_req("addrepo %s", g_cm_kb, 0); g_cm_tab = 2; cm_open(CMV_HOME); }
+        break;
+    case CMC_KB_NO:   if (g_cm_kbsearch) g_cm_q[0] = 0; else cm_open(CMV_HOME); break;
+    case CMC_SEARCH:  g_cm_kbsearch = 1; g_cm_kbnum = 0; cm_open(CMV_KBD); break;
+    case CMC_QCLEAR:  g_cm_q[0] = 0; g_cm_scroll = 0; break;
+    case CMC_SORT:    g_cm_sort = c->idx; g_cm_scroll = 0; break;
+    case CMC_FCAT:    g_cm_fcat = c->idx; g_cm_scroll = 0; break;
     }
     /* clang-format on */
 }
@@ -1956,6 +2095,28 @@ static bool cm_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool to
         if (ev.kind) azcm_screen_input(g_cm_page, &ev);
         return true;
     }
+    if (g_cm_view == CMV_HOME) {
+        /* The home page works by touch: a press is decided on its release (azmod_pane_drag, as in
+         * the Mod Menu's lists), so a drag scrolls the page and never opens or toggles anything.
+         * The knob scrolls the page a row per detent and focuses nothing; its click does nothing
+         * here (no control is focused for it to press). */
+        if (touched) {
+            int ctl = cm_home_ctl_at(s, fb, tx, ty);
+            cm_glide_sync();
+            if (glide_flinging(&g_cm_gl)) {   /* a finger on a flinging list stops it and opens nothing */
+                glide_stop(&g_cm_gl);
+                g_cm_scroll = g_cm_glpx = glide_px(&g_cm_gl);
+                if (ty >= dock_y(fb) + menu_hdrh(fb)) ctl = -1;   /* the header's controls still work */
+            }
+            c_press(tx, ty, ctl, true, g_cm_scroll);
+        } else if (d) {   /* a row per detent, gliding; quick detents add up from where it is heading */
+            cm_glide_sync();
+            float from = g_cm_gl.on ? g_cm_gl.goal : (float) g_cm_scroll;
+            glide_to(&g_cm_gl, (float) cm_scroll_clamp((int) (from + 0.5f) + d * c_rrowh(fb), g_cm_smax), cm_ms());
+            cm_glide_frame();
+        }
+        return true;
+    }
     if (d && n && !g_cm_knob) { /* after a touch, the first detent shows the focus where it is */
         g_cm_knob = 1;
         d = 0;
@@ -1976,17 +2137,6 @@ static bool cm_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool to
         int nk = n;   /* the back square is the last control and the knob skips it (the BACK button goes back) */
         if (nk > 1 && ctl[nk - 1].kind == CMC_BACK) nk--;
         g_cm_sel = ((g_cm_sel + d) % nk + nk) % nk;   /* every detent counts (a fast turn arrives as one delta) */
-        if (g_cm_view == CMV_HOME) {   /* scroll only as far as needed to show the focused control */
-            int bx, by, bw, bh;
-            cm_box(fb, &bx, &by, &bw, &bh);
-            (void) bx;
-            (void) bw;
-            const cm_ctl *c = &ctl[g_cm_sel];
-            if (g_cm_sel == 0) g_cm_scroll = 0;
-            else if (c->y + c->h > by + bh) g_cm_scroll += c->y + c->h - (by + bh);
-            else if (c->y < by) g_cm_scroll -= by - c->y;
-            if (g_cm_scroll < 0) g_cm_scroll = 0;
-        }
     }
     if (click && n && g_cm_sel < n) cm_fire(&ctl[g_cm_sel]);
     if (touched && g_cm_view == CMV_CAT && g_cm_desc.r.h > 0 &&
@@ -2011,6 +2161,58 @@ static bool cm_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool to
             }
     }
     return true;
+}
+/* ---- the home page's touch gesture (azmod_pane_drag decides it, c_press starts it) ----
+ * A control is named by its kind and index ((kind << 16) | idx), never by its place in the
+ * layout, so a release judged against a fresh layout can only fire the control that was pressed. */
+static int cm_code(const cm_ctl *c) { return c->kind << 16 | (c->idx & 0xffff); }
+/* the gesture still belongs to the page it started on */
+static bool cm_home_live(const azmod_state *s) {
+    return s->mode == AZ_COMMUNITY && g_cm_full && !cm_animating() && g_cm_view == CMV_HOME;
+}
+/* The finger's point during a drag (phase 1) and at the lift (2): the page is at the finger, and
+ * a lift while moving flings it on (any speed a fling would not stop at at once). */
+static bool cm_home_scroll_to(const azmod_fb *fb, int v, int phase) {
+    (void) fb;
+    int was = g_cm_scroll;
+    cm_glide_sync();
+    if (phase == 2) glide_release(&g_cm_gl, (float) v, cm_ms(), GLIDE_STOP_V);
+    else glide_drag(&g_cm_gl, (float) v, cm_ms());
+    cm_glide_frame();
+    return g_cm_scroll != was;
+}
+/* opening a page or switching a tab: a slow tap still counts (as a Mod Menu row's does) */
+static bool cm_home_nav(int ctl) {
+    int k = ctl >> 16;
+    return k == CMC_TAB || k == CMC_TILE || k == CMC_MOD || k == CMC_INSTCAT || k == CMC_BACK;
+}
+/* The control under a point on the home page, padded for a finger, or -1. The header's controls
+ * first; the page's only where the page shows (the header covers what scrolled up under it, and
+ * nothing below the menu's bottom edge is drawn). Lays the page out, which also refreshes
+ * g_cm_smax. */
+static int cm_home_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty) {
+    cm_ctl ctl[CM_MAXCTL];
+    int n = cm_layout(s, fb, ctl, 0), nb = g_cm_nbody < n ? g_cm_nbody : n, pad = fb->h * 8 / 800;
+    for (int k = nb; k < n; k++)
+        if (in_rect(tx, ty, ctl[k].x - pad, ctl[k].y - pad, ctl[k].w + 2 * pad, ctl[k].h + 2 * pad))
+            return cm_code(&ctl[k]);
+    if (ty < dock_y(fb) + menu_hdrh(fb) || ty >= dock_y(fb) + dock_h(fb))
+        return -1;
+    for (int k = 0; k < nb; k++)
+        if (in_rect(tx, ty, ctl[k].x - pad, ctl[k].y - pad, ctl[k].w + 2 * pad, ctl[k].h + 2 * pad))
+            return cm_code(&ctl[k]);
+    return -1;
+}
+/* a tap on the home page: fire the control with that code in the current layout */
+static void cm_home_fire(azmod_state *s, const azmod_fb *fb, int code) {
+    cm_ctl ctl[CM_MAXCTL];
+    int n = cm_layout(s, fb, ctl, 0);
+    g_cm_s = s;
+    for (int k = 0; k < n; k++)
+        if (cm_code(&ctl[k]) == code) {
+            cm_fire(&ctl[k]);
+            return;
+        }
 }
 /* Community > a catalog mod's page: the description follows the finger in whole lines. Same
  * contract as azmod_changelog_drag (cm_input starts it; 1 = a step, 2 = the release). */
@@ -2042,6 +2244,7 @@ static bool cm_tick(azmod_state *s) {
         return false;
     }
     if (g_cm_dir) return true;                          /* the slide: a frame every tick */
+    if (g_cm_full && g_cm_view == CMV_HOME && cm_glide_frame()) return true;   /* the scroll in motion */
     unsigned n = azcm_icons_done();
     if (n != icons) {
         icons = n;

@@ -1,0 +1,6 @@
+Yv1
+repo|https://example.invalid/r0/azmods-repo.json|Community|1|1|
+repo|https://example.invalid/r1/azmods-repo.json|Added|0|0|could not fetch
+mod|https://example.invalid/r0/azmods-repo.json|beat-meter|Beat Meter|1.0.2|someone|Shows the beat|tools|1|any|12000|icon.png||1.2.0|A longer text.|64|||0|2019-10-08
+mod|https://example.invalid/r1/azmods-repo.json|other-mod|Other|0.1.0|x|y|fun|0|ep147-0123456789abcdef,ep147-1|5|||||0|https://example.invalid/r9/azmods-repo.json|other|2|20191008
+more|3

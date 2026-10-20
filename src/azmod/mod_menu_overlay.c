@@ -492,9 +492,13 @@ static void menu_touch_log(const char *what, const XEvent *ev) {
         return;
     int x = ev->type == MotionNotify ? ev->xmotion.x_root : ev->xbutton.x_root;
     int y = ev->type == MotionNotify ? ev->xmotion.y_root : ev->xbutton.y_root;
-    fprintf(f, "%ld %s win=0x%lx send=%d btn=%u x=%d y=%d mode=%d -> %s\n", now_ms(), what,
+    /* age: ms from the server's timestamp to now (both CLOCK_MONOTONIC ms, the server's in 32
+     * bits): how long the event waited before it was handled */
+    Time et = ev->type == MotionNotify ? ev->xmotion.time : ev->xbutton.time;
+    unsigned age = (unsigned) ((uint32_t) now_ms() - (uint32_t) et);
+    fprintf(f, "%ld %s win=0x%lx send=%d btn=%u x=%d y=%d mode=%d age=%u -> %s\n", now_ms(), what,
             (unsigned long) ev->xany.window, (int) ev->xany.send_event,
-            ev->type == MotionNotify ? 0u : ev->xbutton.button, x, y, (int) g_state.mode,
+            ev->type == MotionNotify ? 0u : ev->xbutton.button, x, y, (int) g_state.mode, age,
             azmod_menu_last_hit());
     fclose(f);
 }
@@ -603,10 +607,20 @@ static void install_static_hooks(void) {
         install_srcrow_hook(); /* the MOD MENU row: default ON */
     install_scrntrace_hook();  /* observe-only; silent without azmod-scrntrace.on */
     install_wavestems_hook();  /* always installed; forcing is driven by arm_stems (STEMS master) */
+    install_jogstems();        /* stem state on the jog display (off: azmod-jogstems.off) */
     install_qrlogin_guard();   /* stock EP147 crash: null deref in the QR cloud login path */
     install_bpmstate_hook();   /* per-deck live BPM for the drum roll */
     install_master_hook();     /* master deck: Phase Meter and the drum roll; before either */
+    install_link_members();    /* PRO DJ LINK players 3/4 own CH3/CH4: Stem Volume stands down */
     install_stemsmark();     /* stems mark in browse rows (off: azmod-stemsmark.off) */
+    {
+        int ph = install_preview_hotcues(); /* hot cue marks on the PREVIEW column; needs the above */
+        FILE *pf = azlog_open("/tmp/azmod-stemsmark.log", "a");
+        if (pf) {
+            fprintf(pf, "install preview hot cues: %d\n", ph);
+            fclose(pf);
+        }
+    }
     install_hidetitle();     /* Hide Track Title (mod 35): inert while the mod is off */
     install_phasemeter();    /* Phase Meter (mod 36): data hooks; drawing is gated on the mod */
     if (daymode_wanted()) {
@@ -631,6 +645,7 @@ struct ov_window {
 
 /* Everything the overlay thread keeps from one tick to the next. One instance lives on the
  * overlay thread's stack for the life of the process; nothing else touches it. */
+#include "touch_seq.h"
 struct overlay_ctx {
     Display *dpy;
     int scr;
@@ -638,6 +653,7 @@ struct overlay_ctx {
     int scr_w, scr_h;
     GC gc;
     uint8_t *buf; /* the full-screen software framebuffer behind g_fb */
+    struct touch_seq touch; /* every button event on our windows, in order (overlay thread) */
     XImage *img;  /* wraps buf for XPutImage */
 
     struct ov_window menu;     /* the Mod Menu, docked panel and stem strip (deck 1) */
@@ -645,6 +661,7 @@ struct overlay_ctx {
     struct ov_window strip2;   /* deck 2's stem strip */
     struct ov_window srcicon;  /* the AZ icon in the native MOD MENU source row */
     struct ov_window readouts; /* the OVERLAYS readouts (FPS and the rest) */
+    struct ov_window clockn;   /* the Clock, in the place of EP147's recording time readout */
     struct ov_window lane[AZMOD_STEM_DECKS]; /* one stem-lane band per deck */
 
     int need_raise;     /* something covered us: raise our windows once this tick */
@@ -664,7 +681,7 @@ static void ov_window_init(struct ov_window *w) {
 /* Community mods' surfaces and foreign windows (sdk_surface.c, included by community.c). */
 static void sdk_overlay_attach(struct overlay_ctx *c);
 static void sdk_overlay_tick(struct overlay_ctx *c);
-static int sdk_overlay_x_event(struct overlay_ctx *c, XEvent *ev);
+static int sdk_overlay_x_event(struct overlay_ctx *c, XEvent *ev, int touch);
 static int sdk_overlay_knob(int dir, int click);
 static void sdk_overlay_place(struct overlay_ctx *c, int layer);
 static void sdk_overlay_place_xwin(struct overlay_ctx *c);
@@ -740,6 +757,9 @@ static void ov_create_windows(struct overlay_ctx *c) {
     /* The OVERLAYS readouts, top right of the deck screen. */
     ov_window_init(&c->readouts);
     c->readouts.id = ov_create_window(c, &a, -16, -16, 1, 1, 1);
+    /* The Clock when it sits top left. */
+    ov_window_init(&c->clockn);
+    c->clockn.id = ov_create_window(c, &a, -16, -16, 1, 1, 1);
     /* Stem lanes: one window per deck's waveform band, input-transparent so the waveform
      * underneath still takes needle-drop touches. There must be one per AZMOD_STEM_DECKS: the
      * paint loop uses lane[d] for every deck, and an uncreated entry is a BadWindow, which
@@ -823,7 +843,7 @@ static void ov_on_press(struct overlay_ctx *c, XEvent *ev) {
     azmod_mode before = g_state.mode;
     int before_top = azmod_menu_at_top(&g_state);
     /* Test, logs flag only: make the emulator's touch stream look like the deck's.
-     * EP147's decoder sends no motion (/tmp/azmod-touchsim-nomotion); releases can be
+     * MotionNotify can be missing (/tmp/azmod-touchsim-nomotion); releases can be
      * dropped too (/tmp/azmod-touchsim-norelease). Read once per press. */
     g_touchsim = g_azlog_on > 0
                      ? (access("/tmp/azmod-touchsim-nomotion", F_OK) == 0) |
@@ -873,13 +893,26 @@ static void ov_on_motion(struct overlay_ctx *c, XEvent *ev) {
     menu_touch_log("motion", ev);
 }
 
+/* A press while the finger is still down: on the deck, the finger moved there (touch_seq.h).
+ * It is a drag step for every gesture in progress and never a new touch. */
+static void ov_on_press_move(struct overlay_ctx *c, XEvent *ev) {
+    if (azmod_changelog_drag(&g_state, &g_fb, ev->xbutton.y_root, 1))
+        c->dirty = 1;
+    if (azmod_cm_drag(&g_state, &g_fb, ev->xbutton.y_root, 1))
+        c->dirty = 1;
+    azmod_menu_clock(now_ms());
+    if (azmod_pane_drag(&g_state, &g_fb, ev->xbutton.x_root, ev->xbutton.y_root, 1))
+        c->dirty = 1;
+    menu_touch_log("press(move)", ev);
+}
+
 static void ov_on_release(struct overlay_ctx *c, XEvent *ev) {
     if (g_touchsim & 2) {
         menu_touch_log("release(sim-dropped)", ev);
         return;
     }
-    /* The deck sends no motion while a finger moves (EP147's decoder only warps the
-     * pointer), so the release's own position is a drag step too. */
+    /* The last step of a move can be the release itself, so its position is a drag step
+     * too. */
     if (azmod_changelog_drag(&g_state, &g_fb, ev->xbutton.y_root, 1))
         c->dirty = 1;
     if (azmod_changelog_drag(&g_state, &g_fb, ev->xbutton.y_root, 2))
@@ -907,9 +940,16 @@ static void ov_drain_x_events(struct overlay_ctx *c) {
     while (XPending(c->dpy)) {
         XEvent ev;
         XNextEvent(c->dpy, &ev);
-        if (sdk_overlay_x_event(c, &ev))
+        /* one touch sequence for all our windows: a finger that lands on one and moves onto
+         * another is still one touch */
+        int touch = ev.type == ButtonPress || ev.type == ButtonRelease
+                        ? touch_seq_feed(&c->touch, ev.type == ButtonPress, ev.xbutton.button, now_ms())
+                        : TOUCH_OTHER;
+        if (sdk_overlay_x_event(c, &ev, touch))
             continue; /* a community mod's surface */
-        if (ev.type == ButtonPress) {
+        if (ev.type == ButtonPress && touch == TOUCH_MOVE) {
+            ov_on_press_move(c, &ev);
+        } else if (ev.type == ButtonPress) {
             ov_on_press(c, &ev);
         } else if (ev.type == MotionNotify) {
             ov_on_motion(c, &ev);
@@ -946,6 +986,25 @@ static void ov_on_browse_view(struct overlay_ctx *c) {
     }
 }
 
+/* The page a resume brings back (mm_resume.h mmr_page_*): every close the overlay makes keeps
+ * the mode it ends, and the open after a resume shows that mode again instead of the reset;
+ * the selection, the panes, their scroll and the Community Mods view are left as they were by
+ * the close. Overlay thread. */
+static int g_mm_page = MMR_PAGE_NONE;
+static void ov_menu_close(void) {
+    g_mm_page = mmr_page_keep(g_mm_page, (int) g_state.mode);
+    g_state.mode = AZ_CLOSED;
+}
+/* An open: the kept page when a resume armed it (returns 1), else the last category as before. */
+static int ov_menu_open_page(void) {
+    int page = mmr_page_take(&g_mm_page_armed, g_mm_page);
+    if (page == MMR_PAGE_NONE) {
+        azmod_menu_reset(&g_state);
+        return 0;
+    }
+    g_state.mode = (azmod_mode) page;
+    return 1;
+}
 /* Apply what the bus and EP147's threads handed over since the last tick: knob turns and
  * clicks, BACK, a native MOD MENU row item, a screen button that closed the menu, and a
  * theme change. */
@@ -999,7 +1058,7 @@ static void ov_take_menu_handoffs(struct overlay_ctx *c) {
     }
     if (__atomic_exchange_n(&g_close_pending, 0, __ATOMIC_ACQ_REL) &&
         g_state.mode != AZ_CLOSED) {
-        g_state.mode = AZ_CLOSED;
+        ov_menu_close();
         menu_drop_intent();
         c->dirty = 1; /* left via a screen button */
         /* We are also leaving SOURCE: say so now. source_visible is a 1-in-5 title sample
@@ -1143,6 +1202,8 @@ static void ov_resolve_drum_exports(void) {
     *(void **) &g_stem_eq_fn = dlsym(
         RTLD_DEFAULT, "azstem_stem_eq"); /* absent in older azstem: no stem volume */
     *(void **) &g_deck_has_track_fn = dlsym(RTLD_DEFAULT, "azstem_deck_has_track");
+    *(void **) &g_stem_gain_fn = dlsym(
+        RTLD_DEFAULT, "azstem_stem_gain"); /* absent in older azstem: waveforms at unity */
 }
 
 static void ov_sync_stem_volume(void) {
@@ -1153,18 +1214,23 @@ static void ov_sync_stem_volume(void) {
     if (g_stem_eq_fn) {
         static int sent[2] = {-2, -2};
         int seq_on = az_on(AZF_STEM_EQ) && az_active(AZF_STEM_EQ);
-        /* Deck 3 or 4 in use: channels 3/4 belong to those decks and so does their EQ.
-         * Stems go back to unity on both channels until both decks are ejected. Without
-         * the azstem export we cannot tell, so stand down too; never guess "empty". */
+        /* Channels 3/4 in use, by deck 3 or 4 or by PRO DJ LINK player 3 or 4: they own that
+         * EQ. Stems go back to unity on both channels until both are free. Unknown (no azstem
+         * export, no member watch) stands down too; never guess "free" (link_members.h). */
         static int busy_last = -1;
-        int busy = !g_deck_has_track_fn || g_deck_has_track_fn(2) || g_deck_has_track_fn(3);
+        int busy = stemvol_stand_down(g_deck_has_track_fn != NULL,
+                                      g_deck_has_track_fn && g_deck_has_track_fn(2),
+                                      g_deck_has_track_fn && g_deck_has_track_fn(3), lm_watch_ok(),
+                                      lm_players());
         if (busy != busy_last) {
             busy_last = busy;
             FILE *bf = azlog_open("/tmp/azmod-bt.log", "a");
             if (bf) {
-                fprintf(bf, "[%ld] stem volume: decks 3/4 %s\n", (long) time(NULL),
-                        busy ? "in use (or unknown) -> EQ is the decks' again"
-                             : "empty -> CH3/CH4 EQ set stem volumes");
+                fprintf(bf, "[%ld] stem volume: channels 3/4 %s (link players %llx)\n",
+                        (long) time(NULL),
+                        busy ? "in use (or unknown) -> EQ is stock"
+                             : "free -> CH3/CH4 EQ set stem volumes",
+                        (unsigned long long) lm_players());
                 fclose(bf);
             }
         }
@@ -1314,6 +1380,13 @@ static void ov_sync_deck_pads(struct overlay_ctx *c, int d) {
                      azmod_stems_engine(&g_state) && !g_state.stems_available[d],
                      __ATOMIC_RELAXED);
     {
+        unsigned mask = 0; /* the jog display's copy (jog_display.c) */
+        for (int i = 0; i < AZMOD_STEM_COUNT && i < 4; i++)
+            if (g_state.stem_on[d][i])
+                mask |= 1u << i;
+        __atomic_store_n(&g_jog_src[d], jog_word(engaged, 1, mask), __ATOMIC_RELAXED);
+    }
+    {
         unsigned char blk[32];
         if (engaged)
             build_pad_led(&g_state, d, blk);
@@ -1449,6 +1522,7 @@ static void ov_srcrow_focus(struct overlay_ctx *c) {
      *  EP147's left list. CLICK (g_srcrow_open) -> FOCUSED: azmod takes the knob.
      *  Selection leaves our row (want cleared) while not focused -> hide. */
     int mm_want = __atomic_load_n(&g_srcrow_want, __ATOMIC_RELAXED);
+    int resumed = 0; /* this tick's open brought back a resumed page: the focus below keeps it */
     /* PREVIEW opens only on the SOURCE screen. g_srcrow_want mirrors EP147's source-list
      * selection, and that selection outlives the screen: every later refresh of the
      * list (USB STOP, a library write, a device change) runs src_rows_hook's RESYNC,
@@ -1462,7 +1536,7 @@ static void ov_srcrow_focus(struct overlay_ctx *c) {
     if (mm_want && g_state.mode == AZ_CLOSED &&
         g_state.source_visible) { /* PREVIEW: show on hover */
         azmod_set_docked(true);
-        azmod_menu_reset(&g_state);
+        resumed = ov_menu_open_page();
         c->dirty = 1;
         __atomic_store_n(&g_srcrow_menu, 1, __ATOMIC_RELEASE); /* native item rows exist */
     }
@@ -1494,7 +1568,8 @@ static void ov_srcrow_focus(struct overlay_ctx *c) {
          * renders. Such a close refers to a state this open replaced, so it is stale; a
          * close raised after still arrives on the next tick. */
         __atomic_store_n(&g_srcrow_close, 0, __ATOMIC_RELAXED);
-        azmod_menu_reset(&g_state);
+        if (!resumed)
+            ov_menu_open_page();
         c->dirty = 1;
         /* Open-path trace (azmod-srcrow.log): what the overlay decided (mode,
          * source_visible, the wanted_rect() result, mapped). It records that this path
@@ -1521,12 +1596,12 @@ static void ov_srcrow_focus(struct overlay_ctx *c) {
     }
     int mm_focused = __atomic_load_n(&g_menu_focused, __ATOMIC_RELAXED);
     if (!mm_want && !mm_focused && azmod_docked() && g_state.mode != AZ_CLOSED) {
-        g_state.mode = AZ_CLOSED;
+        ov_menu_close();
         c->dirty = 1; /* hover off + not focused -> hide */
     }
     if (__atomic_exchange_n(&g_srcrow_close, 0, __ATOMIC_ACQ_REL) && azmod_docked() &&
         g_state.mode != AZ_CLOSED) {
-        g_state.mode = AZ_CLOSED;
+        ov_menu_close();
         __atomic_store_n(&g_menu_focused, 0, __ATOMIC_RELAXED);
         c->dirty = 1;
     }
@@ -1570,7 +1645,7 @@ static void ov_docked_gate(struct overlay_ctx *c) {
                 fclose(lf);
             }
         }
-        g_state.mode = AZ_CLOSED;
+        ov_menu_close();
         menu_drop_intent();
         azmod_set_docked(false);
         gate_miss = 0;
@@ -2009,6 +2084,115 @@ static void ov_poll_readouts(struct overlay_ctx *c) {
     }
 }
 
+/* The Clock readout's text, once a second. It stays "" (drawn as --:--, "Not set" in the menu)
+ * until the system clock is synchronized, by the rule timedatectl uses (systemd ntp_synced):
+ * the kernel's maximum error, from adjtimex(), under 16 s. It is at that limit from boot (the
+ * deck's RTC does not keep time through a power-off) until systemd-timesyncd's first NTP answer,
+ * and again after any settimeofday(); without NTP updates it grows by 500 ppm and passes 16 s
+ * after about 9 hours. A time set by hand (Set Time Manually) is shown too, as long as the
+ * clock has not fallen back below it: the set leaves an empty file whose modification time is
+ * the time set (CLOCK_SET_MARK), and a power-off that resets the RTC puts the clock before it
+ * (clock_set.h cs_valid). NTP, when it answers, sets the time over it.
+ * The zone file is read when the zone changes; a zone that cannot be read or answered
+ * (clock_tz.h) also leaves the text empty. */
+static void ov_clock_log(const char *fmt, ...) {
+    FILE *f = azlog_open("/tmp/azmod-clock.log", "a");
+    if (!f)
+        return;
+    fprintf(f, "[%ld] ", (long) time(NULL));
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+#define CLOCK_SET_MARK "/home/root/settings/azmod-clock-set"
+/* Set Time Manually: the system time, the RTC (UTC, as the kernel reads it at boot) and the
+ * marker; the time of the marker, or 0 when the time could not be set. */
+static int64_t ov_clock_set(int64_t t) {
+    struct timespec ts = {(time_t) t, 0};
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+        ov_clock_log("set time %lld: clock_settime failed (errno %d)\n", (long long) t, errno);
+        return 0;
+    }
+    struct tm tm;
+    time_t tt = (time_t) t;
+    int rtc = -1, fd = open("/dev/rtc0", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 && gmtime_r(&tt, &tm)) {
+        struct rtc_time r;
+        memset(&r, 0, sizeof r);
+        r.tm_sec = tm.tm_sec, r.tm_min = tm.tm_min, r.tm_hour = tm.tm_hour;
+        r.tm_mday = tm.tm_mday, r.tm_mon = tm.tm_mon, r.tm_year = tm.tm_year;
+        rtc = ioctl(fd, RTC_SET_TIME, &r);
+    }
+    if (fd >= 0)
+        close(fd);
+    int64_t mark = 0;
+    int mf = open(CLOCK_SET_MARK, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    struct stat st;
+    if (mf >= 0) {
+        if (futimens(mf, NULL) == 0 && fstat(mf, &st) == 0)
+            mark = (int64_t) st.st_mtime;
+        close(mf);
+    }
+    ov_clock_log("set time %lld: system ok, rtc %s, marker %lld\n", (long long) t, rtc == 0 ? "ok" : "failed",
+                 (long long) mark);
+    return mark ? mark : t;
+}
+static void ov_poll_clock(struct overlay_ctx *c) {
+    static long tt;
+    static int loaded = -1, zone_ok, last_sync = -1;
+    static int64_t mark = -1;
+    static struct ctz z;
+    static unsigned char zbuf[1 << 16];
+    int64_t req = __atomic_exchange_n(&g_azmod_clock_set_req, 0, __ATOMIC_ACQ_REL);
+    if (mark < 0) { /* the last manual set, once per run */
+        struct stat st;
+        mark = stat(CLOCK_SET_MARK, &st) == 0 ? (int64_t) st.st_mtime : 0;
+    }
+    if (req)
+        mark = ov_clock_set(req);
+    long nowt = now_ms();
+    if (!req && nowt - tt < 1000)
+        return;
+    tt = nowt;
+    int k = __atomic_load_n(&g_azmod_clock_tz, __ATOMIC_RELAXED);
+    if (k != loaded) {
+        char p[160];
+        loaded = k;
+        zone_ok = 0;
+        snprintf(p, sizeof p, "/usr/share/zoneinfo/%s", azmod_clock_tz_zone(k));
+        int fd = open(p, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            ssize_t n = read(fd, zbuf, sizeof zbuf);
+            close(fd);
+            zone_ok = n > 0 && ctz_parse(zbuf, (size_t) n, &z) == 0;
+        }
+        ov_clock_log("zone %s: %s\n", azmod_clock_tz_zone(k), zone_ok ? "ok" : "unusable");
+    }
+    struct timex tx;
+    memset(&tx, 0, sizeof tx);
+    int st = adjtimex(&tx), sync = st >= 0 && tx.maxerror < 16000000L;
+    if (sync != last_sync) {
+        last_sync = sync;
+        ov_clock_log("system clock %s (adjtimex %d, status 0x%x, maxerror %ld us)\n",
+                     sync ? "synchronized" : "not synchronized", st, (unsigned) tx.status, (long) tx.maxerror);
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    char t[sizeof g_state.clock_text] = "";
+    int32_t off;
+    if (cs_valid(sync, mark, (int64_t) ts.tv_sec) && zone_ok && ctz_offset(&z, (int64_t) ts.tv_sec, &off) == 0) {
+        ctz_format(t, sizeof t, (int64_t) ts.tv_sec, off, az_get(AZF_CLOCK_24H) == 1);
+        if (k == 0)
+            strncat(t, " UTC", sizeof t - strlen(t) - 1);
+    }
+    if (strcmp(t, g_state.clock_text)) {
+        memcpy(g_state.clock_text, t, sizeof t);
+        c->dirty = 1;
+    }
+}
+
 /* Once a second: EP147's paint rate to the debug log. */
 static void ov_log_paint_rate(void) {
     static long pl = 0;
@@ -2059,8 +2243,8 @@ static void ov_sync_wave_hooks(void) {
         int gate = __atomic_load_n(&g_wavemute, __ATOMIC_RELAXED) |
                    (__atomic_load_n(&g_wavecolor, __ATOMIC_RELAXED) << 1);
         if (gate != last_gate) {
-            if (last_gate >= 0)
-                __atomic_store_n(&g_ov_refresh, 1, __ATOMIC_RELEASE);
+            if (last_gate >= 0) /* every deck's tiles */
+                __atomic_fetch_or(&g_ov_refresh, (1 << AZMOD_STEM_DECKS) - 1, __ATOMIC_RELEASE);
             last_gate = gate;
         }
     }
@@ -2079,22 +2263,39 @@ static void ov_sync_wave_hooks(void) {
     wave_zoom_tick();
 }
 
-/* Rebuild a deck's waveform attenuation table when its stem mask or track changes. */
+/* Rebuild a deck's waveform attenuation table when its stem mask, its track or a Stem Volume
+ * gain changes. Runs on every overlay tick, so a knob turn is followed at the tick rate; a gain
+ * sweep is rate limited per deck (watt_should_build), and its overview tiles on a slower
+ * cadence (watt_ov_step). A pad toggle or a track change rebuilds and refreshes on this tick.
+ * Overlay thread only. */
 static void ov_rebuild_attenuation(void) {
+    static unsigned sig[AZMOD_STEM_DECKS];
+    static unsigned long long gsig[AZMOD_STEM_DECKS];
+    static long last_ms[AZMOD_STEM_DECKS], ov_last_ms[AZMOD_STEM_DECKS];
+    static int ov_pend[AZMOD_STEM_DECKS];
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now_ms = (long) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
     for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
-        static unsigned sig[AZMOD_STEM_DECKS];
         unsigned cur = (unsigned) (g_stem_frames ? g_stem_frames(d) : 0) << 5;
         for (int k = 0; k < AZMOD_STEM_COUNT; k++)
             if (g_state.stem_on[d][k])
                 cur |= 1u << k;
-        if (0) /* Tint Blend: retired slot 2, forced off (features.def) */
-            cur |= 1u << 4;
-        /* Retry while the curve is missing: azstem publishes stem_frames just before the
-         * envelope is built, so the first attempt after a load usually lands in between. */
-        if (cur != sig[d] || (cur && !__atomic_load_n(&g_att_have[d], __ATOMIC_RELAXED))) {
+        /* The gains this deck's stems play at; unity without the azstem export. */
+        int gq[AZMOD_STEM_COUNT];
+        for (int k = 0; k < AZMOD_STEM_COUNT; k++)
+            gq[k] = g_stem_gain_fn ? watt_gain_q(g_stem_gain_fn(d, k)) : WATT_GQ_ONE;
+        unsigned long long gcur = watt_gain_key(gq);
+        int have = __atomic_load_n(&g_att_have[d], __ATOMIC_RELAXED);
+        int built = 0, keyed = cur != sig[d] || (cur && !have); /* not a gain-only change */
+        if (watt_should_build(cur, gcur, sig[d], gsig[d], have, now_ms, last_ms[d])) {
             sig[d] = cur;
-            build_atten(d);
+            gsig[d] = gcur;
+            last_ms[d] = now_ms;
+            built = build_atten(d, gq);
         }
+        if (watt_ov_step(built, keyed, &ov_pend[d], &ov_last_ms[d], now_ms))
+            __atomic_fetch_or(&g_ov_refresh, 1 << d, __ATOMIC_RELEASE);
     }
 }
 
@@ -2117,7 +2318,7 @@ static void ov_sync_pad_beatloop(struct overlay_ctx *c) {
 /* Every 5th tick, in every mode: rates and readouts, the waveform hooks' mirrors, the
  * attenuation tables and the stem-strip placement. */
 static void ov_slow_tick(struct overlay_ctx *c) {
-    /* None of the work below is specific to the closed menu (FPS readout, build_atten LUTs,
+    /* None of the work below is specific to the closed menu (FPS readout,
      * wave_prov_report, wave_zoom_tick, the pad_beatloop mirror), so it runs in every mode
      * on its own throttle; under the closed guard it would freeze while the menu is open. */
     if ((++c->wave_tick % 5) != 0)
@@ -2129,9 +2330,9 @@ static void ov_slow_tick(struct overlay_ctx *c) {
         az_on(AZF_PLAYLIST_EDITING) && !g_reorder_hooks;
     ov_poll_1hz(c);
     ov_poll_readouts(c);
+    ov_poll_clock(c);
     ov_log_paint_rate();
     ov_sync_wave_hooks();
-    ov_rebuild_attenuation();
     ov_sync_pad_beatloop(c);
 }
 
@@ -2278,7 +2479,8 @@ static void ov_place_srcicon(struct overlay_ctx *c) {
     ov_window_show(c, &c->srcicon);
 }
 
-/* The OVERLAYS readouts (FPS and the rest) share one band, shown only on the deck view. */
+/* The OVERLAYS readouts (FPS and the rest) share one band, shown only on the deck view; the
+ * Clock has its own window, in the place of EP147's recording time readout. */
 static void ov_place_readouts(struct overlay_ctx *c) {
     int x = -16, y = -16, w = 1, h = 1; /* parked off screen while unwanted */
     c->readouts.wanted = azmod_stats_any(&g_state) && g_state.waveform_visible;
@@ -2286,6 +2488,12 @@ static void ov_place_readouts(struct overlay_ctx *c) {
         azmod_stats_rect(&g_state, &g_fb, &x, &y, &w, &h);
     ov_window_place(c, &c->readouts, x, y, w, h);
     ov_window_show(c, &c->readouts);
+    x = y = -16, w = h = 1;
+    c->clockn.wanted = azmod_clockn_on(&g_state); /* every screen: the status bar is on all of them */
+    if (c->clockn.wanted)
+        azmod_clockn_rect(&g_fb, &x, &y, &w, &h);
+    ov_window_place(c, &c->clockn, x, y, w, h);
+    ov_window_show(c, &c->clockn);
 }
 
 /* One deck's stem-lane window: only while the deck screen is up, STEMS is on and that deck
@@ -2414,6 +2622,10 @@ static void ov_present(struct overlay_ctx *c) {
         azmod_draw_stats(&g_state, &g_fb);
         XPutImage(c->dpy, c->readouts.id, c->gc, c->img, c->readouts.x, c->readouts.y, 0, 0, c->readouts.w, c->readouts.h);
     }
+    if (c->clockn.wanted && c->clockn.mapped) {
+        azmod_draw_clockn(&g_state, &g_fb);
+        XPutImage(c->dpy, c->clockn.id, c->gc, c->img, c->clockn.x, c->clockn.y, 0, 0, c->clockn.w, c->clockn.h);
+    }
 }
 
 /* Startup work that needs EP147 running: the hook table, Hide Track Title's runtime part,
@@ -2489,6 +2701,7 @@ static void ov_update_state(struct overlay_ctx *c) {
     ov_track_stems(c);
     ov_detect_source_docked(c);
     ov_detect_source_closed(c);
+    ov_rebuild_attenuation(); /* every tick: a Stem Volume knob is followed at the tick rate */
     ov_slow_tick(c);
 }
 
@@ -2501,6 +2714,26 @@ static useconds_t ov_tick_us(void) {
             (g_state.mode != AZ_CLOSED && __atomic_load_n(&g_menu_focused, __ATOMIC_RELAXED)))
                ? 10000
                : 30000;
+}
+
+/* Waits for the next tick: the tick's time, or less when an X event (a touch) arrives on our
+ * connection, so a finger's step is drawn as soon as it is reported instead of after the rest
+ * of the tick. A tick is never shorter than OV_MIN_TICK_US, however busy the connection. */
+#define OV_MIN_TICK_US 4000
+static void ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
+    if (us > OV_MIN_TICK_US)
+        usleep(OV_MIN_TICK_US);
+    else {
+        usleep(us);
+        return;
+    }
+    if (XEventsQueued(c->dpy, QueuedAlready) > 0)
+        return;
+    long left = (long) (us / 1000) - (now_ms() - start_ms);
+    if (left <= 0)
+        return;
+    struct pollfd p = {.fd = ConnectionNumber(c->dpy), .events = POLLIN};
+    poll(&p, 1, (int) left);
 }
 
 /* The Mod Menu's thread: owns g_state and every overlay window. */
@@ -2516,6 +2749,7 @@ static void *overlay_thread(void *arg) {
     ov_create_windows(c);
     ov_load_state();
     for (;;) {
+        long tick_start = now_ms();
         bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
         vs_save_flush(); /* before any continue: a Vinyl Speed Adjust value posted by
                           * the touch handler on EP147's message thread */
@@ -2531,7 +2765,7 @@ static void *overlay_thread(void *arg) {
         c->need_raise = 0;
         XFlush(c->dpy);
         c->dirty = 0;
-        usleep(ov_tick_us());
+        ov_wait(c, ov_tick_us(), tick_start);
     }
     return NULL;
 }

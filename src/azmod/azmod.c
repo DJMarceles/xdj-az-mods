@@ -44,6 +44,7 @@
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
+#include "bl_flip.h"   /* BEAT LOOP press: azmod's page flip or EP147's */
 #include "../common/azlogcap.h" /* every /tmp append is size-capped */
 #include "../common/azprot.h"   /* every write into EP147's image: unlock, write, restore */
 #include "../common/azspawn.h"  /* helpers start with posix_spawn: no fork of EP147, no shell */
@@ -56,6 +57,7 @@ static int g_ep147_build;        /* EPB_* from ep147build.h, set in azmod_init *
 #include "caption_strips.h"
 #include "srcref.h"
 #include "wavref.h"
+#include "wave_att.h" /* the stem waveform height rule (stems, toggles, Stem Volume) */
 #include <dirent.h>
 #include <dlfcn.h>
 #include <link.h> /* dl_iterate_phdr: EP147's image bounds (img_q) */
@@ -82,6 +84,11 @@ static int g_ep147_build;        /* EPB_* from ep147build.h, set in azmod_init *
 #include <time.h>
 #include <termios.h> /* bt_uart_recover: the Bluetooth UART speed */
 #include <poll.h>
+#include <sys/timex.h> /* adjtimex: is the system clock synchronized (the Clock readout) */
+#include "clock_tz.h"   /* the Clock readout's zone file and local time */
+#include "clock_set.h"  /* Set Time Manually: when a set time may be shown */
+#include <linux/rtc.h>  /* RTC_SET_TIME: Set Time Manually also sets the RTC */
+#include "mm_resume.h"  /* reopen the Mod Menu when SOURCE comes back */
 #include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -635,6 +642,13 @@ static volatile int g_back_pending = 0;
 static volatile int g_close_pending = 0;
 static int
     g_src_swallow; /* bus thread only: SOURCE closed the focused menu; drop it until released */
+/* What the Mod Menu showed when SOURCE was left, to show again when it comes back
+ * (mm_resume.h levels). Written by the bus thread (screen-select presses) and the JUCE
+ * message thread (SOURCE view hidden / shown, a real source picked); __atomic only. */
+static int g_mm_resume;
+/* A resume asked for the page the menu showed, not just its category (mm_resume.h
+ * mmr_page_*): set by the message thread, taken by the overlay thread; __atomic only. */
+static int g_mm_page_armed;
 static volatile int g_search_on = 0; /* SEARCH screen-select bit live */
 static volatile int g_menu_open =
     0; /* mirrors g_state.mode != AZ_CLOSED; overlay thread writes it */
@@ -1177,6 +1191,7 @@ static volatile unsigned g_dbg_reqraised[AZMOD_STEM_DECKS]; /* cumulative pad_re
 static void vs_save_flush(void); /* vinyl_slider.c: the overlay thread writes the saved value */
 static void load_config(azmod_state *s); /* the settings block, below */
 static int settings_import_pending(void);  /* likewise */
+#include "link_members.c" /* PRO DJ LINK player numbers present (Stem Volume) */
 #include "mod_menu_overlay.c"
 /* ==== settings: azmod.conf (the authority) + azmod.cfg (1.2.2's file, dual-written) =======
  *
@@ -1371,7 +1386,8 @@ static int btchannel_ok(const char *w) {
 static void conf_refresh_files(struct azconf *c) {
     conf_copy_file(c, "bluetooth.channel", "azmod-btchannel", btchannel_ok);
 }
-/* The theme and the vinyl value from the conf: absent or invalid = day / the stock values. */
+/* The theme, the vinyl value and the clock's time zone from the conf: absent or invalid = day / the
+ * stock values / UTC. */
 static void conf_apply_small(const struct azconf *c) {
     const char *const *themes;
     int nt = azmod_theme_keys(&themes), th = 0;
@@ -1383,6 +1399,8 @@ static void conf_apply_small(const struct azconf *c) {
     v = azconf_get(c, "vinyl.brake");
     int m = v && vinyl_ok(v) ? (int) (strtod(v, NULL) * 1000.0 + 0.5) : -1;
     g_vb_milli = m; /* _Atomic */
+    int tz = azmod_clock_tz_index(azconf_get(c, "clock.tz")); /* absent or unknown: UTC */
+    __atomic_store_n(&g_azmod_clock_tz, tz < 0 ? 0 : tz, __ATOMIC_RELAXED);
 }
 static void conf_capture_small(struct azconf *c) {
     const char *const *themes;
@@ -1393,6 +1411,7 @@ static void conf_capture_small(struct azconf *c) {
     if (m >= 0 && m <= 1000)
         snprintf(w, sizeof w, "%.2f", (double) m / 1000.0);
     azconf_set(c, "vinyl.brake", w); /* empty = never set: the stock values */
+    azconf_set(c, "clock.tz", azmod_clock_tz_zone(__atomic_load_n(&g_azmod_clock_tz, __ATOMIC_RELAXED)));
 }
 /* A conf written before the theme and the vinyl value moved into it: each key it lacks is
  * imported once from its old file (when that holds a valid value). The key is then present
@@ -1862,7 +1881,8 @@ static void rtick_hook(long self) {
      * timer callback, on the message thread but outside any paint traversal. */
     stems_avail_redispatch(); /* eject / no-stem track takes the grid back */
     stems4_tick();            /* 4-DECK: each deck's source cell shows its own stem strip */
-    sm_tick();                /* opt-in: Browse stems mark, repaint once statuses land */
+    jogstems_tick();          /* jog display picture style: pictures, timing log */
+    sm_tick();               /* opt-in: Browse stems mark, repaint once statuses land */
     ov_refresh_if_needed();   /* stem toggle -> every deck preview (deck view and BROWSE strips) */
     pm_tick();                /* Phase Meter: repaint its band so it moves every frame */
     pl_tick(); /* PHASE layout (2/4 DECK tapped again): table + panels, re-asserted */
@@ -1925,6 +1945,7 @@ static void setvis_hook(long self, int on) {
 #include "vinyl_brake.c"
 #include "crash_guards.c"
 #include "track_list_rows.c"
+#include "folder_copy.h" /* the FOLDER-view copy plan (playlist_editor.c reads its names) */
 #include "playlist_editor.c"
 #include "library_db.c"
 #include "library_edits.c"
@@ -1955,6 +1976,7 @@ enum {
 static int az_banner_strip_state(void);
 static int az_banner_strip_clear(void);
 #include "playlist_actions.c"
+#include "folder_copy.c" /* COPY / PASTE in the Browse FOLDER view, to the other USB */
 /* The clipboard (Copy, Paste and Move). MENU > COPY or MOVE on a row puts it
  * here; MENU > PASTE on a highlighted row puts it there: into a folder; a track
  * into a playlist; a playlist/folder right below a playlist row, in that row's
@@ -2159,6 +2181,7 @@ static void msg_tick(void) {
             pl_edit_notify(MV_OP_CPREAD, 2);
         }
     }
+    fc_tick(); /* a FOLDER-view copy: progress and result */
     if (__atomic_load_n(&g_cp.state, __ATOMIC_ACQUIRE) ==
         CP_DONE) { /* a cross-stick copy finished */
         int rc = g_cp.rc;
@@ -2405,9 +2428,17 @@ static void msg_tick(void) {
     }
 }
 #include "bluetooth.c"
+#include "font_size.c"
+#include "streaming_key.c"
+#include "spin_back.c"
+#include "browse_remember.c"
+#include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void calltimers_hook(void *self) {
     msg_tick();
     bt_mods_tick();
+    br_tick();
+    cn_tick();
+    sk_tick();
     mp_anim_tick();
     cm_icons_tick();
     /* installed at run time from any thread: never branch to an original not yet visible */
@@ -2547,13 +2578,15 @@ static void install_wavestems_hook(void) {
         dbg("fx header hook %d\n", fh);
         dbg("fxrow zone hook %d\n", fz);
         /* BEAT JUMP 2 First (mod 27): the pad tasks swap page lengths (never the BEAT
-         * JUMP buttons); off = untouched. */
+         * JUMP buttons), and the jog display shows the swapped lengths; off = untouched. */
         {
             int bp = azm_install_hook(BJ_PADPRESS_RUN, (void *) bj_padpress_hook,
                                       (void **) &g_orig_bj_padpress);
             int br = azm_install_hook(BJ_PADREL_RUN, (void *) bj_padrel_hook,
                                       (void **) &g_orig_bj_padrel);
-            dbg("bj2 pad-task hooks press %d release %d\n", bp, br);
+            int bj = azm_install_hook(BJ_JOGINFO_STORE, (void *) bj_joginfo_hook,
+                                      (void **) &g_orig_bj_joginfo);
+            dbg("bj2 pad-task hooks press %d release %d jog %d\n", bp, br, bj);
         }
         /* Stepless vinyl brake: the SHORTCUT slider (vinyl_slider.c). Always installed;
          * it passes EP147's value through untouched until the slider has been used. */
@@ -2795,6 +2828,7 @@ static int g_last_click_bit = 0, g_last_back_bit = 0;
 #include "touch_accum.c"  /* opt-in azmod-touchaccum.on: slow touch drags scroll */
 #include "menu_popup.c"   /* playlist editing in EP147's own MENU panel */
 #include "vinyl_slider.c" /* SHORTCUT: Vinyl Speed Adjust Time as a stepless slider */
+#include "jog_display.c"  /* stem state on the jog display */
 #include "onelibrary_key_emulator.c"
 #include "community.c"       /* community mod host */
 #include "sdk_input.c"       /* frame and touch filters for community mods */
@@ -2856,8 +2890,13 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_azm_inert = 0;
     }
     bt_uart_recover(); /* before EP147 can open /dev/ttyS0 (synchronous, <= ~1 s) */
+    install_browse_remember(); /* EP147's PREVIEW and sub column choice remembered */
+    install_clock_native();    /* the Clock in the place of EP147's status bar readout */
     install_bt_mods(); /* Bluetooth Auto-Connect / Remember Selected Channel: inert
                           while off */
+    install_font_size(); /* Remember Font Size: before EP147 loads its settings */
+    install_streaming_key(); /* streaming keys in Camelot */
+    install_spin_back(); /* Extended Lead-In: inert while off */
     /* The reporter's handlers are SA_ONSTACK. This is EP147's main thread (JUCE's message
      * thread): give it an alternate stack so a stack overflow there is still recorded. Our
      * own threads get theirs from az_thread_create. */

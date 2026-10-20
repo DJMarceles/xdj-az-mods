@@ -39,6 +39,8 @@
  * parent tree are alive for the call: plain reads behind alignment, null and vtable checks,
  * no syscalls on this per-frame path, nothing cached between calls. */
 #include "eyeicon.h"
+#include "ht_tap.h"
+#include "ht_cover.h"
 #define HT_VT2 EP_2d37158 /* TrackInfo2DeckWidget fns */
 #define HT_VT4 EP_2d387d0 /* TrackInfo4DeckWidget fns */
 /* Firmware 2.00 inserted one virtual before setText in TrackInfo{2,4}DeckWidget and
@@ -115,9 +117,15 @@ static int ht_deck(uintptr_t widget) {
  * writable data, so this is a pointer store with no mprotect (azm_patch_vtable's PROT_READ
  * would break every later lazy bind on that page). The original comes from dlsym, never
  * the slot: an unbound slot holds the resolver stub, which would rebind over us.
- * The input thread only records the point; the deck's setTitle call (message thread, every
- * frame, holding the live widget) hit-tests it and claims it once (CAS on the seq). A tap
- * expires after HT_TAP_TTL_MS so one made where no panel shows (BROWSE) is not claimed
+ * Only a whole tap counts (ht_tap.h: press and release close together, one finger), so a
+ * drag, a resting hand or a brush that starts on a title bar toggles nothing. EP147 reads its
+ * X events on the JUCE message thread, and this hook sees each one before EP147 handles it:
+ * at the press, JUCE's own hit test says which deck's PlayerInfo widget gets it
+ * (ht_cover.h), so a press on a popup drawn over a title bar (EJECT's question, which closes
+ * on a press outside its box) belongs to no deck. The tap's press point is recorded when it
+ * lifts; the deck's setTitle call (message thread, every frame, holding the live widget)
+ * hit-tests it and claims it once (CAS on the seq), only when the press was that deck's. A
+ * tap expires after HT_TAP_TTL_MS so one made where no panel shows (BROWSE) is not claimed
  * later when WAVEFORM comes back. */
 #define HT_GOT_XNEXTEVENT EP_3b25a60
 #define HT_TAP_TTL_MS 150 /* setTitle runs every frame while the panel shows */
@@ -125,14 +133,30 @@ static int (*g_ht_xnext)(Display *, XEvent *);
 static _Atomic unsigned long g_ht_tap; /* seq << 32 | y << 16 | x */
 static _Atomic unsigned g_ht_tap_done; /* last seq claimed */
 static _Atomic long g_ht_tap_ms;
+static struct ht_gest g_ht_gest; /* under g_ht_gest_mu */
+static pthread_mutex_t g_ht_gest_mu = PTHREAD_MUTEX_INITIALIZER;
+/* each deck's TrackInfo component as ht_title last saw it (vtable-checked at use), the decks
+ * whose bar got the last first-finger press, and that mask for the tap it completed */
+static uintptr_t g_ht_bar[HT_COVER_DECKS]; /* __atomic only */
+static _Atomic unsigned g_ht_press_mask, g_ht_tap_mask;
+static unsigned ht_press_mask(int x, int y);
 static int ht_xnext_hook(Display *dpy, XEvent *ev) {
     int r = g_ht_xnext(dpy, ev);
-    if (ev && ev->type == ButtonPress && ev->xbutton.button == Button1) {
-        int x = ev->xbutton.x_root, y = ev->xbutton.y_root;
-        if (x >= 0 && y >= 0 && x < 65536 && y < 65536) {
+    if (ev && (ev->type == ButtonPress || ev->type == ButtonRelease)) {
+        int x = ev->xbutton.x_root, y = ev->xbutton.y_root, tx, ty;
+        long ms = now_ms();
+        if (ev->type == ButtonPress && ev->xbutton.button == 1) /* before EP147 handles it */
+            __atomic_store_n(&g_ht_press_mask, ht_on() ? ht_press_mask(x, y) : 0u, __ATOMIC_RELAXED);
+        pthread_mutex_lock(&g_ht_gest_mu);
+        int tap = ht_gest_feed(&g_ht_gest, ev->type == ButtonPress, ev->xbutton.button, x, y, ms,
+                               &tx, &ty);
+        pthread_mutex_unlock(&g_ht_gest_mu);
+        if (tap && tx >= 0 && ty >= 0 && tx < 65536 && ty < 65536) {
             unsigned long seq = (__atomic_load_n(&g_ht_tap, __ATOMIC_RELAXED) >> 32) + 1;
-            __atomic_store_n(&g_ht_tap_ms, now_ms(), __ATOMIC_RELAXED);
-            __atomic_store_n(&g_ht_tap, seq << 32 | (unsigned long) y << 16 | (unsigned long) x,
+            __atomic_store_n(&g_ht_tap_ms, ms, __ATOMIC_RELAXED);
+            __atomic_store_n(&g_ht_tap_mask, __atomic_load_n(&g_ht_press_mask, __ATOMIC_RELAXED),
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&g_ht_tap, seq << 32 | (unsigned long) ty << 16 | (unsigned long) tx,
                              __ATOMIC_RELEASE);
         }
     }
@@ -186,6 +210,44 @@ static int ht_screen_rect(uintptr_t comp, int r[4]) {
 #define HT_INK_H 14
 #define HT_PAD_RIGHT 7 /* ink to the bar's right edge, every layout */
 #define HT_PI4D_CVT EP_2d3dbe0
+/* JUCE's hit test, the one that routes the mouse: the deepest visible component under a point
+ * that wants it (hitTest), children front to back. Called only, never hooked (its first
+ * instructions include a PC-relative tbz). */
+#define HT_COMPONENT_AT EP_2482f30 /* juce::Component::getComponentAt(const Point<int> &) */
+static uintptr_t ht_parent(uintptr_t c) {
+    uintptr_t p = *(volatile uintptr_t *) (c + 0x18); /* juce parentComponent */
+    return ht_ptr_ok(p) ? p : 0;
+}
+/* the component under screen point (x, y), asked of the top-level component `root` */
+static uintptr_t ht_at(uintptr_t root, int x, int y) {
+    int pt[2] = {x - *(volatile int *) (root + 0x20), y - *(volatile int *) (root + 0x24)};
+    uintptr_t hit =
+        (uintptr_t) ((void *(*) (void *, const int *) ) HT_COMPONENT_AT)((void *) root, pt);
+    return ht_ptr_ok(hit) ? hit : 0;
+}
+/* The decks whose PlayerInfo widget gets a press at (x, y), asked before EP147 handles it.
+ * Message thread (EP147 reads X events there); every widget vtable-checked at use, a deck
+ * whose bar ht_title has not seen gets nothing. */
+static unsigned ht_press_mask(int x, int y) {
+    uintptr_t owner[HT_COVER_DECKS] = {0}, root = 0;
+    for (int d = 0; d < HT_COVER_DECKS; d++) {
+        uintptr_t c = __atomic_load_n(&g_ht_bar[d], __ATOMIC_RELAXED), par;
+        if (!ht_ptr_ok(c) ||
+            (*(volatile uintptr_t *) c != HT_CVT2 && *(volatile uintptr_t *) c != HT_CVT4))
+            continue;
+        par = ht_parent(c);
+        if (!par || (*(volatile uintptr_t *) par != HT_PI2D_CVT &&
+                     *(volatile uintptr_t *) par != HT_PI4D_CVT))
+            continue;
+        owner[d] = par;
+        if (!root) { /* the top-level component: every bar is in the one window */
+            root = par;
+            for (int i = 0; i < HT_COVER_DEPTH && ht_parent(root); i++)
+                root = ht_parent(root);
+        }
+    }
+    return ht_cover_mask(owner, root, x, y, ht_at, ht_parent);
+}
 static int ht_row_ex(uintptr_t parcomp, int row[4], uintptr_t *ticomp, int bar[3]);
 static int ht_row(uintptr_t parcomp, int row[4], uintptr_t *ticomp) {
     return ht_row_ex(parcomp, row, ticomp, 0);
@@ -271,6 +333,7 @@ static int ht_title(void *self, void *str) {
     if (d < 0)
         return 0;
     uintptr_t comp = (uintptr_t) self + HT_COMP_OFF, sp = 0;
+    __atomic_store_n(&g_ht_bar[d], comp, __ATOMIC_RELAXED);
     if (str && ht_ptr_ok((uintptr_t) str))
         sp = *(volatile uintptr_t *) str; /* juce::String = its char* */
     unsigned bit = 1u << d, has = sp && *(const char *) sp ? bit : 0;
@@ -289,6 +352,7 @@ static int ht_title(void *self, void *str) {
         else
             r[2] = 0;
         if (r[2] > 0 && x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3] &&
+            (__atomic_load_n(&g_ht_tap_mask, __ATOMIC_RELAXED) & bit) && /* the bar got it */
             __atomic_compare_exchange_n(&g_ht_tap_done, &done, seq, 0, __ATOMIC_RELAXED,
                                         __ATOMIC_RELAXED)) {
             __atomic_xor_fetch(&g_ht_hide, bit, __ATOMIC_RELAXED);

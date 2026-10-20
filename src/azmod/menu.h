@@ -30,7 +30,13 @@ typedef enum {
     AZ_UPDATE,     /* Update Mods: the on-deck mods updater's status + one-click update */
     AZ_OVERLAYS,   /* the deck-screen readouts: master toggle + one row per readout */
     AZ_COMMUNITY,  /* Community Mods: banner, master switch, installed list, a mod's page */
+    AZ_CLOCK_TZ,   /* the Clock's time zones by region, opened from the Clock screen (screen_overlays.c) */
+    AZ_CLOCK,      /* the Clock: its switch, time format and time zone (screen_overlays.c) */
+    AZ_CLOCK_SET,  /* Set Time Manually: the date and time picker, opened from the Clock (screen_overlays.c) */
 } azmod_mode;
+#define AZMOD_HAVE_CLOCK_TZ_LIST 1 /* AZ_CLOCK_TZ exists (the menu dump names it) */
+#define AZMOD_HAVE_CLOCK_SCREEN 1  /* AZ_CLOCK exists (likewise) */
+#define AZMOD_HAVE_CLOCK_SET 1     /* AZ_CLOCK_SET exists (likewise) */
 
 /* Deck count (bus/LED geometry). */
 #define AZMOD_DECK_COUNT 4
@@ -208,6 +214,7 @@ typedef struct {
     int cpu_clk_mhz;          /* fastest core's current clock; < 0 = unknown */
     bool cpu_clk_throttled;   /* that core runs below its own max */
     int ram_use_pct;          /* (MemTotal - MemAvailable) / MemTotal; < 0 = unknown */
+    char clock_text[16];      /* the Clock readout's text; "" = the time is not known yet */
     bool pledit_needs_reload; /* Playlist Editing is ON but its hooks were not installed at start */
     bool reload_pending;      /* the loader staged a set this EP147 has not loaded (/run/az-reload-pending) */
     int fps_paint, fps_ui;    /* measured 1/s by azmod.c: WaveformView
@@ -235,6 +242,7 @@ typedef struct {
     bool pad_colors_on;
 } azmod_state;
 
+
 #include "stem_overlay.h"
 
 /* Zero the menu state and set its defaults. Call once before first use; azmod.c then loads
@@ -245,6 +253,18 @@ __attribute__((visibility("hidden"))) int azmod_theme_keys(const char *const **k
 /* The current theme: an index into azmod_theme_keys. azmod.c sets it at every settings load
  * and saves it as "theme"; the Themes picker sets it; day_mode.c's watcher applies it. */
 extern __attribute__((visibility("hidden"))) int g_azmod_theme; /* __atomic builtins only */
+/* The Clock's time zone: an index into the Overlays screen's list (screen_overlays.c), saved as
+ * azmod.conf's "clock.tz" (the zone's name under /usr/share/zoneinfo). */
+extern __attribute__((visibility("hidden"))) int g_azmod_clock_tz; /* __atomic builtins only */
+/* clock_native.c: where the Clock takes EP147's readout's place (screen rect packed by
+ * clock_native.h cn_rect_pack, 0 = nowhere), EP147's ink and ground there; __atomic only */
+extern __attribute__((visibility("hidden"))) uint64_t g_azmod_clockn_rect;
+extern __attribute__((visibility("hidden"))) uint32_t g_azmod_clockn_ink, g_azmod_clockn_ground;
+/* Set Time Manually: the UTC time the menu asks the overlay thread to set, 0 = none (screen_overlays.c
+ * writes it, mod_menu_overlay.c ov_poll_clock takes it); __atomic only */
+extern __attribute__((visibility("hidden"))) int64_t g_azmod_clock_set_req;
+__attribute__((visibility("hidden"))) int azmod_clock_tz_index(const char *zone); /* -1 unknown */
+__attribute__((visibility("hidden"))) const char *azmod_clock_tz_zone(int k);     /* UTC if out of range */
 
 /* Input event. touch_* in framebuffer pixels. enc_delta = browse-encoder steps
  * this tick (from the mixer-bus position counter, see azmod.c); enc_click = knob
@@ -280,6 +300,11 @@ bool azmod_stats_any(const azmod_state *s);
 /* The readout band actually used: the enabled readouts packed right-aligned
  * against the FPS slot's right edge. */
 void azmod_stats_rect(const azmod_state *s, const azmod_fb *fb, int *x, int *y, int *w, int *h);
+/* The Clock in the place of EP147's recording time readout (clock_native.c publishes it):
+ * whether it shows, its rect, its drawing (the overlay's own window). */
+__attribute__((visibility("hidden"))) bool azmod_clockn_on(const azmod_state *s);
+__attribute__((visibility("hidden"))) void azmod_clockn_rect(const azmod_fb *fb, int *x, int *y, int *w, int *h);
+__attribute__((visibility("hidden"))) void azmod_draw_clockn(const azmod_state *s, const azmod_fb *fb);
 
 /* A screen's row rect, i in [0..N]. */
 void azmod_item_rect(const azmod_fb *fb, int i, int *x, int *y, int *w, int *h);

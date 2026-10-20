@@ -637,6 +637,9 @@ static void src_selrow_hook(void *m, int row) {
         g_o_src_selrow(m, row);
         return;
     }
+    /* A real source picked: the Mod Menu is not reopened when SOURCE comes back. */
+    mmr_forget(&g_mm_resume);
+    mmr_page_disarm(&g_mm_page_armed);
     if (want) {
         __atomic_store_n(&g_srcrow_want, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&g_srcrow_item, -1, __ATOMIC_RELAXED);
@@ -845,6 +848,31 @@ static void install_scrntrace_hook(void) {
     dbg("scrntrace: ShortcutView::setVisible hooked (orig=%p); flag azmod-scrntrace.on\n",
         (void *) g_o_shortcut_setvis);
 }
+/* SOURCE is back and the Mod Menu was up when it was left: select MOD MENU again (EP147's
+ * selection hook then marks it ours and the overlay docks the preview), and for a menu that
+ * was focused, focus it the way a tap on the selected row does. Message thread. */
+static void srcrow_resume(void *m, int level) {
+    void *tbl = srcrow_tbl_for(m);
+    int ours = srcrow_find_ours(m);
+    if (!tbl || ours < 0)
+        return;
+    /* before the selection: the overlay's open can follow it at once, and takes the page then */
+    mmr_page_arm(&g_mm_page_armed);
+    if (((int (*)(void *, int)) LISTBOX_GETSELECTED)(tbl, 0) != ours)
+        ((void (*)(void *, int, int, int)) LISTBOX_SELECTROW)(tbl, ours, 0, 1);
+    if (!__atomic_load_n(&g_srcrow_want, __ATOMIC_ACQUIRE)) { /* the selection did not land */
+        mmr_page_disarm(&g_mm_page_armed);
+        SRCROW_TRACE(12, "RESUME: level=%d, MOD MENU not selected, nothing reopened\n", level);
+        return;
+    }
+    if (level == MMR_FOCUSED) {
+        __atomic_store_n(&g_menu_focused, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_menu_open, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_srcrow_open, 1, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&g_srcrow_repaint, 1, __ATOMIC_RELEASE);
+    SRCROW_TRACE(12, "RESUME: level=%d ours=%d\n", level, ours);
+}
 /* SourceSelectView::setVisible. Hide: fold everything. Show: make sure the row is
  * in the table and the list is sized for it; EP147 sizes the list only on its own
  * device events, so a SOURCE view entered before any of them would clip our row. */
@@ -856,7 +884,14 @@ static void src_setvis_hook(void *c, int visible) {
         __asm__ volatile("mov %0, x29" : "=r"(fp));
         scrn_log(fp, (visible & 1) ? "SRC-SHOW" : "SRC-HIDE", visible);
     }
+    int resume = MMR_NONE; /* show: the Mod Menu level to bring back (mm_resume.h) */
     if (!(visible & 1)) {
+        /* Remember what the menu showed, before the folding below clears it. A real source
+         * picked first has already cleared want, so a deliberate pick remembers nothing. */
+        mmr_page_disarm(&g_mm_page_armed); /* a resume whose open never came */
+        mmr_hide(&g_mm_resume, __atomic_load_n(&g_menu_open, __ATOMIC_RELAXED),
+                 __atomic_load_n(&g_srcrow_want, __ATOMIC_RELAXED),
+                 __atomic_load_n(&g_menu_focused, __ATOMIC_RELAXED));
         __atomic_store_n(&g_srcrow_close, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&g_srcrow_menu, 0, __ATOMIC_RELEASE);
         if (__atomic_exchange_n(&g_srcrow_want, 0, __ATOMIC_ACQ_REL)) {
@@ -865,6 +900,8 @@ static void src_setvis_hook(void *c, int visible) {
                 srcrow_release_blue(m, srcrow_find_ours(m));
         }
     }
+    if (visible & 1) /* taken before EP147's show, whose own selection moves would clear it */
+        resume = mmr_take(&g_mm_resume);
     g_o_src_setvis(c, visible);
     if (visible & 1) {
         void *m = g_srcrow_model;
@@ -887,6 +924,8 @@ static void src_setvis_hook(void *c, int visible) {
         if (m && srcrow_tbl_for(m)) {
             srcrow_ensure(m);
             srcrow_fit(m);
+            if (resume != MMR_NONE)
+                srcrow_resume(m, resume);
         }
     }
 }

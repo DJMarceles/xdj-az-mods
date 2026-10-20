@@ -104,7 +104,8 @@ enum {
 enum {
     CPK_TRACK,
     CPK_PLAYLIST,
-    CPK_TAGGED /* the Tag List's tracks (g_tag_cids) into one playlist */
+    CPK_TAGGED /* the Tag List's tracks (g_tag_cids) into one playlist */,
+    CPK_FOLDER /* a folder: every folder and list inside it, and every list's tracks */
 };
 #define CP_MAX_TRACKS 300 /* one spool = one transaction; ~3 KB SQL per track, under its 1 MB cap  \
                            */
@@ -113,6 +114,15 @@ struct cp_trk {
     unsigned char isnull[CPF_N];
     char img_dst[200], albimg_dst[200];
     char anlz_dst[256]; /* the .DAT path for content when the source's is taken on the target */
+    int node;           /* CPK_FOLDER: the g_cp.node entry (a list) this track goes into */
+};
+/* CPK_FOLDER: one row of the copied tree. Entry 0 is the folder itself; the others follow
+ * breadth-first, so a parent always comes before its children. */
+struct cp_node {
+    char name[PL_TGT_NAME_MAX];
+    int parent; /* index of the parent entry; -1 for entry 0 */
+    int folder; /* 1 a folder, 0 a list */
+    int seq;    /* 1..N among its siblings, in the source's display order */
 };
 static struct {
     _Atomic int state;
@@ -121,6 +131,8 @@ static struct {
     char dst_name[PL_TGT_NAME_MAX], src_pl_name[PL_TGT_NAME_MAX], src_mount[128], dst_mount[128];
     struct cp_trk *trk; /* heap, filled on the source's library thread */
     int ntrk;
+    struct cp_node *node; /* CPK_FOLDER: heap, filled with trk */
+    int nnode;
     _Atomic int done_n; /* tracks whose files are copied (progress) */
     int rc;
 } g_cp;
@@ -151,13 +163,99 @@ static int cp_read_one(uintptr_t conn, unsigned cid, struct cp_trk *t) {
     g_sq.finalize(st);
     return rc;
 }
-/* source library thread: the track, or the playlist's name + every track in order. */
+/* source library thread, CPK_FOLDER: the folder's tree into g_cp.node (breadth-first, each
+ * level in EP147's display order: sequenceNo, then playlist_id) and every list's tracks, in
+ * order, into cids, with tnode[k] = the entry track k goes into. Folders and plain lists only:
+ * any other kind of list holds no playlist_content to copy, so the copy is refused whole
+ * rather than arriving without it. An empty folder or list is copied as it is. */
+static int cp_read_folder(uintptr_t conn, unsigned *cids, int *tnode, int *n_out) {
+    long long at[1] = {0};
+    if (sq_row((void *) conn, "SELECT attribute FROM playlist WHERE playlist_id = ?1", g_cp.src_pl,
+               -1, at, 1) != 1)
+        return -44;
+    if (at[0] != PL_ATTR_FOLDER)
+        return -45;
+    if (!sq_text((void *) conn, "SELECT name FROM playlist WHERE playlist_id = ?1", g_cp.src_pl,
+                 g_cp.src_pl_name, sizeof g_cp.src_pl_name) ||
+        !g_cp.src_pl_name[0])
+        return -44;
+    struct cp_node *nd = calloc(FD_MAX, sizeof *nd);
+    unsigned *src = calloc(FD_MAX, sizeof *src);
+    if (!nd || !src) {
+        free(nd);
+        free(src);
+        return -48;
+    }
+    int nn = 1, n = 0, rc = 0;
+    src[0] = g_cp.src_pl;
+    nd[0].parent = -1;
+    nd[0].folder = 1;
+    utf8_copy(nd[0].name, sizeof nd[0].name, g_cp.src_pl_name);
+    for (int q = 0; q < nn && !rc; q++) {
+        void *st = 0;
+        if (g_sq.prepare((void *) conn,
+                         nd[q].folder
+                             ? "SELECT playlist_id, attribute, name FROM playlist WHERE "
+                               "playlist_id_parent = ?1 ORDER BY sequenceNo, playlist_id"
+                             : "SELECT content_id FROM playlist_content WHERE playlist_id = ?1 "
+                               "ORDER BY sequenceNo",
+                         -1, &st, 0) != 0 ||
+            !st) {
+            rc = -42;
+            break;
+        }
+        g_sq.bind_int64(st, 1, src[q]);
+        int seq = 0;
+        while (!rc && g_sq.step(st) == SQLITE_ROW) {
+            if (!nd[q].folder) {
+                if (n >= CP_MAX_TRACKS)
+                    rc = -46;
+                else {
+                    cids[n] = (unsigned) g_sq.column_int64(st, 0);
+                    tnode[n++] = q;
+                }
+                continue;
+            }
+            long long a = g_sq.column_int64(st, 1);
+            if (a != PL_ATTR_LIST && a != PL_ATTR_FOLDER)
+                rc = -45;
+            else if (nn >= FD_MAX)
+                rc = -49;
+            else {
+                const unsigned char *x = g_sq.column_text(st, 2);
+                src[nn] = (unsigned) g_sq.column_int64(st, 0);
+                nd[nn].parent = q;
+                nd[nn].folder = a == PL_ATTR_FOLDER;
+                nd[nn].seq = ++seq;
+                utf8_copy(nd[nn].name, sizeof nd[nn].name, x ? (const char *) x : "");
+                nn++;
+            }
+        }
+        g_sq.finalize(st);
+    }
+    free(src);
+    if (rc) {
+        free(nd);
+        return rc;
+    }
+    g_cp.node = nd;
+    g_cp.nnode = nn;
+    *n_out = n;
+    return 0;
+}
+/* source library thread: the track, or the playlist's name + every track in order, or a
+ * folder's whole tree (cp_read_folder). */
 static int cp_read(uintptr_t conn, FILE *lg) {
     if (!cp_mount_of((void *) conn, g_cp.src_mount, sizeof g_cp.src_mount))
         return -41;
     unsigned cids[CP_MAX_TRACKS];
+    int tnode[CP_MAX_TRACKS];
     int n = 0;
-    if (g_cp.kind == CPK_TRACK)
+    if (g_cp.kind == CPK_FOLDER) {
+        int rc = cp_read_folder(conn, cids, tnode, &n);
+        if (rc)
+            return rc;
+    } else if (g_cp.kind == CPK_TRACK)
         cids[n++] = g_cp.cid;
     else if (g_cp.kind == CPK_TAGGED) { /* read at COPY time on this same stick */
         for (int i = 0; i < g_tag_n && n < CP_MAX_TRACKS; i++)
@@ -196,23 +294,26 @@ static int cp_read(uintptr_t conn, FILE *lg) {
         if (!n)
             return -47;
     }
-    g_cp.trk = calloc((size_t) n, sizeof *g_cp.trk);
-    if (!g_cp.trk)
-        return -48;
-    for (int k = 0; k < n; k++) {
-        int rc = cp_read_one(conn, cids[k], &g_cp.trk[k]);
-        if (rc) {
-            if (lg)
-                fprintf(lg, "CPREAD cid=%u rc=%d\n", cids[k], rc);
-            free(g_cp.trk);
-            g_cp.trk = 0;
-            return rc;
-        }
+    g_cp.trk = calloc((size_t) (n ? n : 1), sizeof *g_cp.trk); /* a folder may hold no track */
+    int rc = g_cp.trk ? 0 : -48;
+    for (int k = 0; k < n && !rc; k++) {
+        rc = cp_read_one(conn, cids[k], &g_cp.trk[k]);
+        g_cp.trk[k].node = g_cp.kind == CPK_FOLDER ? tnode[k] : 0;
+        if (rc && lg)
+            fprintf(lg, "CPREAD cid=%u rc=%d\n", cids[k], rc);
+    }
+    if (rc) {
+        free(g_cp.trk);
+        g_cp.trk = 0;
+        free(g_cp.node);
+        g_cp.node = 0;
+        g_cp.nnode = 0;
+        return rc;
     }
     g_cp.ntrk = n;
     if (lg)
-        fprintf(lg, "CPREAD kind=%d n=%d src=%s pl=%u \"%s\"\n", g_cp.kind, n, g_cp.src_mount,
-                g_cp.src_pl, g_cp.src_pl_name);
+        fprintf(lg, "CPREAD kind=%d n=%d nodes=%d src=%s pl=%u \"%s\"\n", g_cp.kind, n, g_cp.nnode,
+                g_cp.src_mount, g_cp.src_pl, g_cp.src_pl_name);
     return 0;
 }
 static int cp_mkdirs(const char *path) { /* mkdir -p of path's directory */
@@ -509,6 +610,31 @@ static char *cp_track_sql(char *o, char *end, const struct cp_trk *t, const char
 #undef SUBQ_S
     return o;
 }
+/* A new playlist row's id on the target: past every existing one and never below 16385, the
+ * range EP147's own new playlists use. */
+#define CP_NEW_PLID "(SELECT MAX(16384,COALESCE(MAX(playlist_id),0))+1 FROM playlist)"
+/* CPK_FOLDER: every folder and list inside the copied folder (g_cp.node 1..nnode-1, parents
+ * first), under the new row of its parent. Entry i carries image_id mark - i until the
+ * spool's last statement, so each row finds its parent by that mark alone: a row whose
+ * parent was not written is not written either. Names are the source's (a new folder has no
+ * other children to clash with). */
+static char *cp_folder_sql(char *o, char *end, long long mark) {
+    char q[200];
+    for (int i = 1; i < g_cp.nnode; i++) {
+        const struct cp_node *nd = &g_cp.node[i];
+        cp_put(&o, end,
+               "INSERT INTO playlist "
+               "(playlist_id,sequenceNo,name,image_id,attribute,playlist_id_parent) SELECT " CP_NEW_PLID
+               ",");
+        snprintf(q, sizeof q, "%d,", nd->seq);
+        cp_put(&o, end, q);
+        cp_lit(&o, end, nd->name, 0);
+        snprintf(q, sizeof q, ",%lld,%d,p.playlist_id FROM playlist p WHERE p.image_id=%lld;\n",
+                 mark - i, nd->folder ? PL_ATTR_FOLDER : PL_ATTR_LIST, mark - nd->parent);
+        cp_put(&o, end, q);
+    }
+    return o;
+}
 /* The whole spool: the destination playlist (created inside a target FOLDER, or the
  * target list itself), then every track in order. One file = one transaction.
  * A pasted PLAYLIST is always a new list, named like the source or "<name> (1)",
@@ -517,7 +643,8 @@ static char *cp_track_sql(char *o, char *end, const struct cp_trk *t, const char
  * transaction, since only the destination knows its names. The new row carries a
  * negative image_id unique to this spool so the track rows find exactly it; the last
  * statement resets image_id to 0. No free name, or the folder gone: no list and no
- * playlist_content rows are written. */
+ * playlist_content rows are written. A pasted FOLDER is the same new row as a folder, then
+ * its tree (cp_folder_sql), then each list's tracks into that list's new row. */
 static int cp_build_spool(char *buf, size_t cap) {
     char *o = buf, *end = buf + cap;
     char plsel[600], plguard[600], q[300];
@@ -558,13 +685,14 @@ static int cp_build_spool(char *buf, size_t cap) {
     } while (0)
         cp_put(&o, end,
                "INSERT INTO playlist "
-               "(playlist_id,sequenceNo,name,image_id,attribute,playlist_id_parent) SELECT "
-               "(SELECT COALESCE(MAX(playlist_id),0)+1 FROM playlist),"
-               "(SELECT COALESCE(MAX(sequenceNo),0)+1 FROM playlist WHERE playlist_id_parent=");
+               "(playlist_id,sequenceNo,name,image_id,attribute,playlist_id_parent) SELECT ");
+        cp_put(&o, end, g_cp.kind == CPK_FOLDER ? CP_NEW_PLID : "(SELECT COALESCE(MAX(playlist_id),0)+1 FROM playlist)");
+        cp_put(&o, end,
+               ",(SELECT COALESCE(MAX(sequenceNo),0)+1 FROM playlist WHERE playlist_id_parent=");
         cp_put(&o, end, pf);
         cp_put(&o, end, "),nm,");
         cp_put(&o, end, mk);
-        cp_put(&o, end, ",0,");
+        cp_put(&o, end, g_cp.kind == CPK_FOLDER ? ",1," : ",0,");
         cp_put(&o, end, pf);
         cp_put(&o, end,
                " FROM (SELECT (WITH RECURSIVE n(k) AS (SELECT 0 UNION ALL SELECT k+1 FROM n WHERE "
@@ -582,15 +710,26 @@ static int cp_build_spool(char *buf, size_t cap) {
         /* the destination = the row this spool just made */
         snprintf(plsel, sizeof plsel, "(SELECT playlist_id FROM playlist WHERE image_id=%s)", mk);
         snprintf(plguard, sizeof plguard, "1=1");
+        if (g_cp.kind == CPK_FOLDER)
+            o = cp_folder_sql(o, end, mark);
     } else {
         snprintf(plsel, sizeof plsel, "%u", g_cp.dst_pl);
         cp_put(&g, ge, "p.name=");
         cp_lit(&g, ge, g_cp.dst_name, 0);
         *g = 0;
     }
-    for (int k = 0; k < g_cp.ntrk; k++)
+    for (int k = 0; k < g_cp.ntrk; k++) {
+        if (g_cp.kind == CPK_FOLDER) /* each track into its own list's new row */
+            snprintf(plsel, sizeof plsel, "(SELECT playlist_id FROM playlist WHERE image_id=%lld)",
+                     mark - g_cp.trk[k].node);
         o = cp_track_sql(o, end, &g_cp.trk[k], plsel, plguard, !mark); /* mark: a new list */
-    if (mark) {
+    }
+    if (mark && g_cp.kind == CPK_FOLDER) {
+        snprintf(q, sizeof q,
+                 "UPDATE playlist SET image_id=0 WHERE image_id BETWEEN %lld AND %lld;\n",
+                 mark - (g_cp.nnode - 1), mark);
+        cp_put(&o, end, q);
+    } else if (mark) {
         snprintf(q, sizeof q, "UPDATE playlist SET image_id=0 WHERE image_id=%lld;\n", mark);
         cp_put(&o, end, q);
     }
@@ -728,7 +867,7 @@ static void *cp_worker(void *arg) {
         } /* nothing is written to the library */
         __atomic_store_n(&g_cp.done_n, k + 1, __ATOMIC_RELEASE);
     }
-    size_t cap = (size_t) g_cp.ntrk * 4096 + 8192;
+    size_t cap = (size_t) g_cp.ntrk * 4096 + (size_t) g_cp.nnode * 512 + 8192;
     sql = malloc(cap);
     if (!sql || cp_build_spool(sql, cap) < 0) {
         g_cp.rc = -54;
@@ -769,6 +908,8 @@ out:
     free(sql);
     free(g_cp.trk);
     g_cp.trk = 0;
+    free(g_cp.node);
+    g_cp.node = 0;
     if (lg) {
         fprintf(lg, "DONE rc=%d\n", g_cp.rc);
         fclose(lg);
@@ -776,17 +917,28 @@ out:
     __atomic_store_n(&g_cp.state, CP_DONE, __ATOMIC_RELEASE);
     return NULL;
 }
-/* message thread */
-static int cp_arm(unsigned src_media, struct pl_addtgt *t) {
+/* message thread: 0 when no copy is reading or copying, so g_cp may be set up. The callers
+ * check it before they write any g_cp field, since a running copy reads them. */
+static int cp_busy(void) {
     if (__atomic_load_n(&g_cp.state, __ATOMIC_ACQUIRE) != CP_IDLE)
         return -2;
     if (__atomic_load_n(&g_drag_on, __ATOMIC_RELAXED))
         return -1;
     if (__atomic_load_n(&g_mv_state, __ATOMIC_ACQUIRE) != MV_IDLE)
         return -2;
+    return 0;
+}
+/* message thread */
+static int cp_arm(unsigned src_media, struct pl_addtgt *t) {
+    int busy = cp_busy();
+    if (busy)
+        return busy;
     free(g_cp.trk);
     g_cp.trk = 0;
     g_cp.ntrk = 0;
+    free(g_cp.node);
+    g_cp.node = 0;
+    g_cp.nnode = 0;
     g_cp.done_n = 0;
     g_cp.rc = 0;
     g_cp.src_media = src_media;
@@ -808,6 +960,9 @@ static int cp_arm(unsigned src_media, struct pl_addtgt *t) {
 static int cp_request(unsigned src_media, unsigned cid, struct pl_addtgt *t) {
     if (t->attr == PL_ATTR_FOLDER)
         return -60; /* a track needs a playlist, not a folder */
+    int busy = cp_busy();
+    if (busy)
+        return busy;
     g_cp.kind = CPK_TRACK;
     g_cp.cid = cid;
     g_cp.src_pl = 0;
@@ -821,6 +976,9 @@ static int cp_request(unsigned src_media, unsigned cid, struct pl_addtgt *t) {
 static int cp_request_tagged(unsigned src_media, struct pl_addtgt *t) {
     if (t->attr == PL_ATTR_FOLDER)
         return -60;
+    int busy = cp_busy();
+    if (busy)
+        return busy;
     g_cp.kind = CPK_TAGGED;
     g_cp.cid = 0;
     g_cp.src_pl = 0;
@@ -832,6 +990,9 @@ static int cp_request_tagged(unsigned src_media, struct pl_addtgt *t) {
     return rc;
 }
 static int cp_request_playlist(unsigned src_media, unsigned src_pl, struct pl_addtgt *t) {
+    int busy = cp_busy();
+    if (busy)
+        return busy;
     g_cp.kind = CPK_PLAYLIST;
     g_cp.cid = 0;
     g_cp.src_pl = src_pl;
@@ -840,6 +1001,24 @@ static int cp_request_playlist(unsigned src_media, unsigned src_pl, struct pl_ad
     int rc = cp_arm(src_media, t);
     drag_log("COPY playlist armed rc=%d: pl %u media %04x -> %s %u \"%s\" at %s\n", rc, src_pl,
              src_media, t->attr == PL_ATTR_FOLDER ? "folder" : "list", t->pl, t->name, t->mount);
+    return rc;
+}
+/* A whole folder onto the other stick: a new folder in t (a folder, 0 = the top level) with
+ * the same tree inside it and every list's tracks. */
+static int cp_request_folder(unsigned src_media, unsigned src_pl, struct pl_addtgt *t) {
+    if (t->attr != PL_ATTR_FOLDER)
+        return -60;
+    int busy = cp_busy();
+    if (busy)
+        return busy;
+    g_cp.kind = CPK_FOLDER;
+    g_cp.cid = 0;
+    g_cp.src_pl = src_pl;
+    g_cp.src_pl_name[0] = 0;
+    g_mv.cid = 0;
+    int rc = cp_arm(src_media, t);
+    drag_log("COPY folder armed rc=%d: pl %u media %04x -> folder %u \"%s\" at %s\n", rc, src_pl,
+             src_media, t->pl, t->name, t->mount);
     return rc;
 }
 static int mv_add(uintptr_t svc, uintptr_t lib, uintptr_t conn, FILE *lg) {

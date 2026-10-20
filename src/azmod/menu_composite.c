@@ -293,13 +293,14 @@ static void compose_pad_colors(azmod_state *s, const azmod_fb *fb, int rowh, int
     }
 }
 
-/* Overlays: the master toggle and one checkbox row per readout. */
+/* Overlays or the Clock: the switch and one row per setting under it. */
 static void compose_overlays(azmod_state *s, const azmod_fb *fb, int rowh, int scale) {
-    bool on = az_on(AZF_OVERLAYS);
-    draw_menu_header(fb, rowh, scale, "Overlays");
-    int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(ovr);
+    int head = sub_head(s->mode);
+    bool on = az_on(head);
+    draw_menu_header(fb, rowh, scale, az_label(head));
+    int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(head, ovr);
     for (int r = 0; r < OVERLAYS_ROWS; r++) {
-        /* the readouts gray while the master is off (their picks are kept) */
+        /* the rows under the switch gray while it is off (their picks are kept) */
         uint32_t ink = (r == 0 || on) ? C_TEXT : C_TEXT_DIM;
         draw_colors_row(s, fb, r, rowh, overlays_label(r, ovr[r]), scale, ink);
         int rx, ry, rw, rh;
@@ -307,7 +308,17 @@ static void compose_overlays(azmod_state *s, const azmod_fb *fb, int rowh, int s
         int sz = g_full ? fb->h * 20 / 800 : rh / 2,
             cbx = rx + rw - sz - (g_full ? fb->w / 40 : rh / 3), cby = ry + (rh - sz) / 2;
         bool hi = s->menu_sel == r || (s->pressed_item == r && s->pressed_ticks > 0);
-        draw_checkbox(fb, cbx, cby, sz, az_on(ovr[r]), hi);
+        const char *val = overlays_value(s, ovr[r]);
+        if (!val) {
+            draw_checkbox(fb, cbx, cby, sz, az_on(ovr[r]), hi);
+            continue;
+        }
+        /* a choice or the time zone: its value, right-aligned where the checkbox would be */
+        int px = menu_text_px(fb), right = cbx + sz, cy = ry + (rh - 7 * scale) / 2;
+        int tw = azmod_ttf_menu_width ? azmod_ttf_menu_width(val, (int) strlen(val), px, 2) : 0;
+        uint32_t vc = (hi && !g_full) ? C_HI_TEXT : ink;
+        if (tw <= 0 || !azmod_ttf_menu || !azmod_ttf_menu(fb, right - tw, cy, 0, 7 * scale, val, px, 0, 2, vc))
+            draw_text(fb, right - (int) strlen(val) * 6 * scale, cy, val, scale, vc);
     }
 }
 
@@ -503,13 +514,23 @@ void azmod_composite(azmod_state *s, const azmod_fb *fb) {
         return;
     }
 
-    if (s->mode == AZ_OVERLAYS) {
+    if (s->mode == AZ_OVERLAYS || s->mode == AZ_CLOCK) {
         compose_overlays(s, fb, rowh, scale);
         return;
     }
 
     if (s->mode == AZ_COLOR_PICK) {
         compose_color_pick(s, fb, rowh, scale);
+        return;
+    }
+
+    if (s->mode == AZ_CLOCK_TZ) {
+        compose_clock_tz(s, fb, rowh, scale);
+        return;
+    }
+
+    if (s->mode == AZ_CLOCK_SET) {
+        compose_clock_set(s, fb, rowh, scale);
         return;
     }
 

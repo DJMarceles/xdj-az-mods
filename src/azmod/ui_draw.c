@@ -420,6 +420,14 @@ static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, u
     case AZF_OVERLAYS:
         blit_icon(fb, x, y, sz, c, IC_FPS);
         break; /* speedometer */
+    case AZF_CLOCK: { /* a clock face: ring + two hands */
+        float S = (float) sz, cx2 = (float) x + S / 2, cy2 = (float) y + S / 2;
+        struct aa_shape sh[3] = {{1, cx2, cy2, S * 0.38f, 0, S * 0.055f},
+                                 {0, cx2, cy2, cx2, cy2 - S * 0.24f, S * 0.07f},
+                                 {0, cx2, cy2, cx2 + S * 0.17f, cy2, S * 0.07f}};
+        aa_icon(fb, x, y, sz, sh, 3, c);
+        break;
+    }
     case AZI_RELOAD:
         blit_icon(fb, x, y, sz, c, IC_RELOAD);
         break;
@@ -473,6 +481,49 @@ static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, u
             {0, r, d, cx, b, w},
         };
         aa_icon(fb, x, y, sz, sh, 5, c);
+        break;
+    }
+    case AZF_PREVIEW_HOT_CUES: { /* a preview line with three hot cue flags (Preview Hot Cues) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float l = X + S * .10f, r = X + S * .90f, m = Y + S * .62f, t = Y + S * .22f,
+              b = Y + S * .80f, f = S * .10f;
+        struct aa_shape sh[7] = {
+            {0, l, m, r, m, w},
+            {0, X + S * .26f, t, X + S * .26f, b, w},
+            {0, X + S * .26f, t, X + S * .26f + f, t, w},
+            {0, X + S * .52f, t, X + S * .52f, b, w},
+            {0, X + S * .52f, t, X + S * .52f + f, t, w},
+            {0, X + S * .78f, t, X + S * .78f, b, w},
+            {0, X + S * .78f, t, X + S * .78f - f, t, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 7, c);
+        break;
+    }
+    case AZF_EXTENDED_LEAD_IN: { /* a platter, the track's start and a long arrow back */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float ay = Y + S * .84f, tip = X + S * .12f, h = S * .10f;
+        struct aa_shape sh[5] = {
+            {1, X + S * .42f, Y + S * .40f, S * .24f, 0, w},
+            {0, X + S * .86f, Y + S * .14f, X + S * .86f, Y + S * .70f, w},
+            {0, X + S * .86f, ay, tip, ay, w},
+            {0, tip, ay, tip + h, ay - h, w},
+            {0, tip, ay, tip + h, ay + h, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 5, c);
+        break;
+    }
+    case AZF_CAMELOT_KEYS: { /* a key wheel: two rings and four spokes (Camelot Keys) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float cx = X + S * .50f, cy = Y + S * .50f, R = S * .36f, r = S * .16f;
+        struct aa_shape sh[6] = {
+            {1, cx, cy, R, 0, w},
+            {1, cx, cy, r, 0, w},
+            {0, cx, cy - R, cx, cy - r, w},
+            {0, cx, cy + r, cx, cy + R, w},
+            {0, cx - R, cy, cx - r, cy, w},
+            {0, cx + r, cy, cx + R, cy, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 6, c);
         break;
     }
     case AZF_PHASE_METER: { /* two rulers with ticks, offset (Phase Meter) */

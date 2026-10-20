@@ -6,12 +6,16 @@
 # real FAT image with the stock read-only mount: migration from the deck copy (and the old
 # community switch files), the stick winning over the deck copy, no stick using the deck
 # copy, a malformed file refused without touching either copy, the kill switches read before
-# anything is staged, and the watcher's debounced write-back, which never leaves a partial
-# file. azmod's side (taking the hand-over) is the core's unit test (cfg_test.c); here the
+# anything is staged, the watcher's debounced write-back (tracks loaded or not), which never
+# leaves a partial file, the hand-over as a merge (a key the stick's file lacks keeps the deck's
+# value), and a deck whose hand-over was taken but never written back keeping its own copy.
+# The deck's busybox has no stat, so it is removed here: a loader that needs it fails here
+# as it does on the deck. azmod's side (taking the hand-over) is the core's unit test (cfg_test.c); here the
 # hand-over file is checked and azmod's save is played by hand. Run by test/run.sh.
 set -u
 . /stub/devflag
 apk add -q dosfstools >/dev/null 2>&1 || { echo NO_DOSFSTOOLS; exit 1; }
+while _p=$(command -v stat); do rm -f "$_p"; done
 export PATH=/stub:$PATH AZ_ACTIVE_WAIT=2 AZ_MODUPDATE_AUTOCHECK=100000 AZ_CFG_DEBOUNCE=1 AZ_CFG_RETRY=1 AZ_DECKS_FRESH=100000
 . /stub/fake-ep147
 for f in az-usbload az-usbpick; do cp /p/usr/sbin/$f /usr/sbin/$f; done; chmod +x /usr/sbin/az-usbload
@@ -59,7 +63,7 @@ echo "== s1 the stick wins: the same file next boot hands over nothing (CONTROL)
 i0=$(sum /img); boot
 chk "s1 CONTROL: unchanged stick -> no hand-over, stick untouched" '[ ! -e $IM ] && [ "$i0" = "$(sum /img)" ]'
 st 'sed -i "s/^stems = off/stems = on/" MODS/azmods.cfg'; d0=$(sum $D); boot
-chk "s1 the edited stick file is handed to azmod" '[ "$(key $IM stems)" = on ] && lg "handed to azmod (the stick wins)"'
+chk "s1 the edited stick file is handed to azmod" '[ "$(key $IM stems)" = on ] && lg "handed to azmod (the stick.s keys win)"'
 chk "s1 the deck copy is left to azmod" '[ "$d0" = "$(sum $D)" ]'
 cp $IM $D; rm -f $IM
 
@@ -83,7 +87,9 @@ chk "k1 community-mods = off -> the stage has no community mods" '[ ! -e $P7/com
 st 'cp /keep.cfg MODS/azmods.cfg'; boot >/dev/null
 chk "k1 back to the deck copy's settings: the hand-over azmod never took is dropped" '[ ! -e $IM ]'
 
-echo "== w1 write-back: a Mod Menu change reaches the stick once every deck is empty, whole"
+chk "CONTROL: no stat in this container, as on the deck" '! command -v stat >/dev/null 2>&1'
+
+echo "== w1 write-back: a Mod Menu change reaches the stick with a track loaded, whole"
 printf 'azdecks 1\npid %s\nup %s\ndecks ELEE\n' "$(cat /tmp/stub.ep147pid)" "$(cut -d' ' -f1 /proc/uptime)" > /tmp/az-decks
 st 'printf "junk from a pulled stick" > MODS/.azmods.cfg.new'
 devflag; rm -f /tmp/az-usbload.log; AZ_NOWATCH='' /usr/sbin/az-usbload >/dev/null 2>&1 & W=$!
@@ -91,13 +97,39 @@ waitfor() { i=0; while [ $i -lt "${2:-150}" ]; do eval "$1" && return 0; sleep 0
 waitfor 'grep -q "watching" /tmp/az-usbload.log 2>/dev/null' 450
 chk "w1 CONTROL: a leftover .new is never read (the stick's file was taken whole)" '! lg "not a settings file" && [ ! -e $IM ]'
 sed 's/^stems = on/stems = off/' $D > $D.new && mv $D.new $D
-sleep 3; chk "w1 a track loaded -> not written yet" '[ "$(key $SC stems)" = on ] && lg "once every deck is empty"'
-st 'rm -f MODS/.azmods.cfg.new; dd if=/dev/zero of=MODS/fill bs=1k count=99999 2>/dev/null; true'   # the stick is full: the write fails
-printf 'azdecks 1\npid %s\nup %s\ndecks EEEE\n' "$(cat /tmp/stub.ep147pid)" "$(cut -d' ' -f1 /proc/uptime)" > /tmp/az-decks
-waitfor 'lg "could not write the stick"' 100
-chk "w1 a failed write keeps the old file whole, no .new left" '[ "$(key $SC stems)" = on ] && [ "$(key $SC version)" = 1 ] && [ ! -e /media/usb/sda1/MODS/.azmods.cfg.new ]'
-st 'rm -f MODS/fill'
 waitfor '[ "$(key $SC stems)" = off ]' 100
-chk "w1 retried once there is room: the stick holds the deck copy byte for byte" 'cmp -s $D $SC && lg "written to the stick"'
+chk "w1 a track loaded: written anyway, the stick holds the deck copy byte for byte" 'cmp -s $D $SC && lg "written to the stick"'
+cmp -s $D $SC && lg "written to the stick" || { sed 's/^/== LOG /' /tmp/az-usbload.log; echo "== SYNC $(tr '\n' ' ' < $P7/cfg.sync) D=$(sum $D) SC=$(sum $SC) IM=$(ls $IM* 2>&1)"; }
+st 'rm -f MODS/.azmods.cfg.new; dd if=/dev/zero of=MODS/fill bs=1k count=99999 2>/dev/null; true'   # the stick is full: the write fails
+sed 's/^stems = off/stems = on/' $D > $D.new && mv $D.new $D
+waitfor 'lg "could not write the stick"' 100
+chk "w1 a failed write keeps the old file whole, no .new left" '[ "$(key $SC stems)" = off ] && [ "$(key $SC version)" = 1 ] && [ ! -e /media/usb/sda1/MODS/.azmods.cfg.new ]'
+st 'rm -f MODS/fill'
+waitfor '[ "$(key $SC stems)" = on ]' 150
+chk "w1 retried once there is room: the stick holds the deck copy byte for byte" 'cmp -s $D $SC'
 chk "w1 the stick is read-only again" 'grep " /media/usb/sda1 " /proc/mounts | grep -q "[ ,]ro[ ,]"'
 kill $W 2>/dev/null; sleep 0.3
+
+echo "== m2 the hand-over is a merge: a stick file holding one key keeps the deck's other settings"
+st 'printf "# azmods.cfg: AZ-MODS settings\nversion = 1\ncommunity-mods.x-mod = off\n" > MODS/azmods.cfg'
+d0=$(sum $D); boot
+chk "m2 CONTROL: the stick's file has no stems key, the deck copy has x-mod on" '[ -z "$(key $SC stems)" ] && [ -n "$(key $D stems)" ] && [ "$(key $D community-mods.x-mod)" = on ]'
+chk "m2 handed over: the stick's key, the deck's stems value kept" '[ "$(key $IM community-mods.x-mod)" = off ] && [ "$(key $IM stems)" = "$(key $D stems)" ]'
+chk "m2 the deck copy is left to azmod" '[ "$d0" = "$(sum $D)" ]'
+cp $IM $D; rm -f $IM   # azmod takes it and saves the deck copy
+
+echo "== p1 a hand-over taken but never written back: the deck copy is kept (CONTROL: not taken -> handed over again)"
+sleep 1; sed 's/^community-mods.x-mod = .*/community-mods.x-mod = on/' $D > $D.new && mv $D.new $D   # a Mod Menu change after it
+chk "p1 CONTROL: the sync point still waits for the hand-over" '[ "$(sed -n 2p $P7/cfg.sync)" = pending ]'
+boot
+chk "p1 no hand-over; the change made after the import stays" '[ ! -e $IM ] && lg "taken before" && [ "$(key $D community-mods.x-mod)" = on ]'
+sleep 1; printf '%s\npending\n' "$(sum $SC)" > $P7/cfg.sync   # the deck copy is now older than the sync point
+boot
+chk "p1 CONTROL: a deck copy older than the sync point -> handed over again" '[ "$(key $IM community-mods.x-mod)" = off ] && lg "handed to azmod"'
+rm -f $IM
+
+echo "== i1 a stick file whose keys the deck copy already holds: nothing handed over, in sync"
+cp $D /keep.d; st '{ echo "# edited on a computer"; cat /keep.d; } > MODS/azmods.cfg'
+boot
+chk "i1 CONTROL: the two files differ byte for byte" '! cmp -s $D $SC'
+chk "i1 no hand-over, the sync point names both files" '[ ! -e $IM ] && [ "$(sed -n 1p $P7/cfg.sync)" = "$(sum $SC)" ] && [ "$(sed -n 2p $P7/cfg.sync)" = "$(sum $D)" ]'

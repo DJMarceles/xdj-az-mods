@@ -287,6 +287,14 @@ int ioctl(int fd, unsigned long req, ...) {
     NEXT(next_ioctl, "ioctl");
     if (g_azm_inert)
         return next_ioctl(fd, req, arg);
+    /* Deck frames on their way to the jog displays: timed in the picture style only
+     * (jog_display.c); observe-only, before the frame goes out. */
+    if (arg && ((req >> 8) & 0xffu) == 0x70u) {
+        if (fd == __atomic_load_n(&g_deckbus_fd[0], __ATOMIC_RELAXED))
+            jog_tx_note(0, arg);
+        else if (fd == __atomic_load_n(&g_deckbus_fd[1], __ATOMIC_RELAXED))
+            jog_tx_note(1, arg);
+    }
     /* ---- Panel ioctl probe (spi3.0 = g_mixer_fd) -------------------------------
      * Observe-only. Panel input, including BACK, arrives through read(); this
      * logs the mixer ioctl's buffer so that stays checkable. next_ioctl runs
@@ -407,6 +415,11 @@ int ioctl(int fd, unsigned long req, ...) {
                  * the pads act as the other. */
                 int drum_side =
                     __atomic_load_n(&g_drum_arm, __ATOMIC_RELAXED) && drum_mode_is_slip(d, ld);
+                /* The jog display shows this deck's stems exactly while its pads are the
+                 * stem toggles (jog_display.c): the same answer the pad block below uses,
+                 * published before the stems gate so a deck without stems reads 0. */
+                __atomic_store_n(&g_jog_page[ld], act && !drum_side && stems_page(d, ld),
+                                 __ATOMIC_RELAXED);
                 if (drum_side) {
                     unsigned char *pb = f + ERP_LED_PAD_OFF + d * 0x38;
                     /* Latch and selection are keyed by the logical deck, the same
@@ -969,6 +982,11 @@ static void mixer_screen_buttons(const uint8_t *b, int menu_open) {
     static uint8_t last_tab;
     uint8_t tab = b[32];
     uint8_t rise = tab & (uint8_t) ~last_tab;
+    /* Before the focus changes below: SOURCE forgets a menu to reopen, another screen button
+     * remembers what is up now (mm_resume.h). */
+    if (rise)
+        mmr_press(&g_mm_resume, rise, menu_open, __atomic_load_n(&g_srcrow_want, __ATOMIC_RELAXED),
+                  __atomic_load_n(&g_menu_focused, __ATOMIC_RELAXED));
     /* SOURCE while the full-screen Mod Menu is focused: the menu is on the SOURCE view, and
      * EP147's SOURCE-on-SOURCE goes to BROWSE. Hand the cursor back to the source list (the
      * header-back path) and swallow the press while it is held (g_src_swallow). */
@@ -980,7 +998,10 @@ static void mixer_screen_buttons(const uint8_t *b, int menu_open) {
         rise = 0;
     }
     if (rise) {
-        __atomic_store_n(&g_close_pending, 1, __ATOMIC_RELAXED);
+        /* SOURCE alone with the menu hidden is the way back to it: nothing to close, and a
+         * close still pending when SOURCE reopens a remembered menu would shut it again. */
+        if (rise != 0x80 || menu_open)
+            __atomic_store_n(&g_close_pending, 1, __ATOMIC_RELAXED);
         /* Drop the deck-view latch at once. wave_visible() is a staleness test
          * (WaveformView::paint runs 32/s while the deck view is up), so leaving the view
          * would otherwise leave the mini waveforms up for WAVE_SEEN_MS plus an overlay tick,
@@ -1244,8 +1265,8 @@ static int erp_deck_select(const uint8_t *eb, int d) {
 
 /* BEAT LOOP 1 -> BEAT LOOP 2: the second BEAT LOOP press flips azmod's page instead of
  * EP147's, so EP147 stays in mode 3 and page 2 is its genuine page 1 (loop lengths, tiles,
- * caption and actions all native). Only when EP147 is known in mode 3 on this deck; unknown
- * = native. Any other entry into BEAT LOOP passes through and lands on page 1 = stems. The
+ * caption and actions all native). Only when EP147 is known in mode 3 on this deck and the
+ * deck has stems engaged; unknown, or a deck without stems = native. Any other entry into BEAT LOOP passes through and lands on page 1 = stems. The
  * flip is on the rising edge; the swallow is level, per physical side, because EP147 acts
  * on any frame still carrying the bit. */
 static void erp_beat_loop_page(uint8_t *eb, int d, int ld, int mode_off, unsigned mrise,
@@ -1256,12 +1277,15 @@ static void erp_beat_loop_page(uint8_t *eb, int d, int ld, int mode_off, unsigne
          * screen, so a raw read can be stale and would eat a real BEAT LOOP press as a page
          * flip. Stale or uncommitted = pass the press to EP147. */
         int tm = (ld >= 0 && ld < AZMOD_STEM_DECKS) ? pad_mode_fresh(d, ld) : 0;
-        if (bl_swap() && __atomic_load_n(&g_wave_forcestems, __ATOMIC_ACQUIRE) && tm == 3 + 1) {
+        /* Only a deck whose stems page is up: without stems, BEAT LOOP's first page is EP147's
+         * own and the press must reach EP147 to move it to its second page (bl_flip.h). */
+        int st = ld >= 0 && ld < AZMOD_STEM_DECKS && __atomic_load_n(&g_erp_active[ld], __ATOMIC_RELAXED);
+        if (bl_flip_swallow(bl_swap(), __atomic_load_n(&g_wave_forcestems, __ATOMIC_ACQUIRE), st, tm)) {
             __atomic_store_n(&g_bl_vpage2[ld], !__atomic_load_n(&g_bl_vpage2[ld], __ATOMIC_RELAXED),
                              __ATOMIC_RELAXED);
             bl_hold[d] = 1;
         } else if (ld >= 0 && ld < AZMOD_STEM_DECKS)
-            __atomic_store_n(&g_bl_vpage2[ld], 0, __ATOMIC_RELAXED); /* EP147 enters page 1 */
+            __atomic_store_n(&g_bl_vpage2[ld], 0, __ATOMIC_RELAXED); /* EP147 takes the press */
     } else if ((mrise & (0x01u | 0x04u | 0x08u)) && ld >= 0 && ld < AZMOD_STEM_DECKS)
         __atomic_store_n(&g_bl_vpage2[ld], 0, __ATOMIC_RELAXED); /* left BEAT LOOP */
     if (!(eb[mode_off] & 0x02u))

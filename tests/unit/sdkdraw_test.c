@@ -126,6 +126,15 @@ int main(void) {
     sdk_press_begin(&p, 0, 0, 0);
     sdk_press_end(&p);
     CHECK("press: no LONG after a quick release", sdk_press_tick(&p, 9999) == SDK_PRESS_NONE);
+    sdk_press_begin(&p, 100, 100, 20000);
+    sdk_press_move(&p, 100 + SDK_PRESS_SLOP, 100 - SDK_PRESS_SLOP);
+    CHECK("press: a finger that stays within the slop is still a long press",
+          sdk_press_tick(&p, 20000 + SDK_LONG_PRESS_MS) == SDK_PRESS_LONG);
+    sdk_press_end(&p);
+    sdk_press_begin(&p, 100, 100, 30000);
+    sdk_press_move(&p, 100, 100 + SDK_PRESS_SLOP + 1);
+    CHECK("press: a drag is no long press", sdk_press_tick(&p, 30000 + SDK_LONG_PRESS_MS) == SDK_PRESS_NONE);
+    CHECK("press: a drag still ends with one UP", sdk_press_end(&p) == 1);
 
     /* 6. blending: premultiplied over 0x00RRGGBB, clipped */
     uint32_t fb[4 * 3];

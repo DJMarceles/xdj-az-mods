@@ -1669,7 +1669,7 @@ static void cm_load_one(cm_mod *c) {
     snprintf(dir, sizeof dir, CM_STAGE "/%s", c->id);
     snprintf(p, sizeof p, "%s/%s.off", dir, c->id);
     if (access(p, F_OK) == 0) {
-        cm_refuse(c, AZCM_DISABLED, "Turned off");
+        cm_refuse(c, AZCM_DISABLED, "Disabled");
         return;
     }
     /* manifest */
@@ -1931,7 +1931,7 @@ static void community_init(void) {
                     }
                 }
             }
-            cm_refuse(c, AZCM_DISABLED, "Turned off");
+            cm_refuse(c, AZCM_DISABLED, "Disabled");
         }
         if (dd) closedir(dd);
     }
@@ -1946,7 +1946,7 @@ static void community_init(void) {
     if (g_cm_alloff) {
         for (int i = 0; i < nen; i++) {
             cm_names(&g_cm[i]);
-            cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are turned off");
+            cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are disabled");
         }
         cm_write_status();
         return;

@@ -52,12 +52,29 @@ static int cm_off_now(void);
 static void cm_master_toggle(void);
 static void g_cm_dir_reset(void);
 static bool cm_open_row(azmod_state *s, int it); /* a mod's SCREEN row: its page (screen_community.c) */
+/* the Community Mods home page's touch gesture, decided by azmod_pane_drag (screen_community.c) */
+static bool cm_home_live(const azmod_state *s);
+static bool cm_home_scroll_to(const azmod_fb *fb, int v, int phase);
+static bool cm_home_nav(int ctl);
+static int cm_home_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty);
+static void cm_home_fire(azmod_state *s, const azmod_fb *fb, int ctl);
+/* the Clock's zone list (screen_overlays.c): back to the Clock; its rows under the finger */
+static void clock_tz_close(azmod_state *s);
+static void clock_set_close(azmod_state *s); /* Set Time Manually: back to the Clock, no change */
+static void clock_tz_pick(azmod_state *s, int row);
+static int tzl_row_at(const azmod_fb *fb, int tx, int ty);
+static int tzl_rowh(const azmod_fb *fb);
+static void tzl_set_first(const azmod_fb *fb, int f);
+static int g_tzl_first;
+/* the switch an Overlays or Clock screen belongs to; the screen such a row opens (screen_overlays.c) */
+static int sub_head(int mode);
+static int sub_screen(int it);
 /* Pad Colors opened from its Extras row: BACK returns to the Extras pane with
  * that row focused, not to the left column. AZ_COLOR_PICK -> AZ_COLORS stays its own step. */
 static bool c_back_to_extras(azmod_state *s) {
-    if ((s->mode != AZ_COLORS && s->mode != AZ_OVERLAYS) || s->left_sel != AZF_EXTRAS)
+    if ((s->mode != AZ_COLORS && s->mode != AZ_OVERLAYS && s->mode != AZ_CLOCK) || s->left_sel != AZF_EXTRAS)
         return false;
-    s->menu_sel = s->mode == AZ_OVERLAYS ? AZF_OVERLAYS : AZI_PAD_COLORS;
+    s->menu_sel = s->mode == AZ_COLORS ? AZI_PAD_COLORS : sub_head(s->mode);
     s->mode = AZ_OPEN;
     s->pane = 1;
     return true;
@@ -67,6 +84,14 @@ bool azmod_back(azmod_state *s) {
         if (s->mode == AZ_COLOR_PICK) {
             s->mode = AZ_COLORS;
             s->menu_sel = colors_sel_to_row(s->color_sel);
+            return true;
+        }
+        if (s->mode == AZ_CLOCK_TZ) { /* the zone list -> the Clock */
+            clock_tz_close(s);
+            return true;
+        }
+        if (s->mode == AZ_CLOCK_SET) { /* the time picker -> the Clock */
+            clock_set_close(s);
             return true;
         }
         if (s->mode == AZ_COMMUNITY && g_cm_full) {               /* full screen: a page -> its list -> out */
@@ -89,9 +114,16 @@ bool azmod_back(azmod_state *s) {
         s->mode = AZ_COLORS;
         s->menu_sel = colors_sel_to_row(s->color_sel);
         return true;
+    case AZ_CLOCK_TZ:
+        clock_tz_close(s);
+        return true;
+    case AZ_CLOCK_SET:
+        clock_set_close(s);
+        return true;
     case AZ_OVERLAYS:
+    case AZ_CLOCK:
+        s->menu_sel = sub_head(s->mode);
         s->mode = AZ_OPEN;
-        s->menu_sel = AZF_OVERLAYS;
         return true;
     case AZ_COLORS:
         s->mode = AZ_OPEN;

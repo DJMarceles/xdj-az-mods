@@ -382,6 +382,7 @@ static int sm_lookup(int row, const char *title, unsigned *kind, unsigned *id) {
 #define SM_Q 32
 static struct {
     unsigned cid, h, media;
+    long long at; /* queued then (ms) */
     char title[160];
 } g_smq[SM_Q]; /* media: playlists only */
 static int g_smq_n;
@@ -448,6 +449,7 @@ static int sm_status_mb(unsigned cid, const char *title, unsigned media, int *aw
             g_smq[at].cid = cid;
             g_smq[at].h = h;
             g_smq[at].media = media;
+            g_smq[at].at = drag_now_ms();
             snprintf(g_smq[at].title, sizeof g_smq[0].title, "%s", title);
             e->queued = 1;
             pthread_cond_signal(&g_sm_cv);
@@ -621,9 +623,11 @@ static void sm_db_close(struct sm_db *d, const char *why, FILE *lg) {
  * the first close is the earliest sign: from then on, for SM_HANDSOFF_MS, this worker keeps away
  * from that stick entirely (no connection, no row work, so no file of ours is open while the
  * eject script polls). A stick EP147 stopped using, or one this worker has not needed for
- * SM_IDLE_MS, also loses our connection (reopening costs a few ms). */
+ * SM_IDLE_MS, also loses our connection. Reopening is not cheap: the cipher derives the key on
+ * the first read of a new connection (~0.8 s per stick on the deck), so the connection is kept
+ * while the DJ browses; an eject is caught by EP147's own closes above, not by this timeout. */
 #define SM_HANDSOFF_MS 10000
-#define SM_IDLE_MS 2000
+#define SM_IDLE_MS 30000
 static struct sm_ejw {
     char mount[128];
     int others;                /* EP147's connections at the last look, -1 = not looked yet */
@@ -750,10 +754,18 @@ static void *sm_db_for(const char *mount, FILE *lg) {
     }
     long long t0 = drag_now_ms();
     g_smsq.key(db, ONELIBRARY_KEY_SM, (int) sizeof ONELIBRARY_KEY_SM - 1);
+    long long t1 = drag_now_ms();
+    { /* the first read: where the cipher's key derivation is paid */
+        void *st = 0;
+        if (g_sq.prepare(db, "SELECT count(*) FROM sqlite_master", -1, &st, 0) == 0 && st) {
+            g_sq.step(st);
+            g_sq.finalize(st);
+        }
+    }
     d->db = db;
     d->sig = sig;
     if (lg)
-        fprintf(lg, "DB open %s (key %lld ms)\n", dbp, drag_now_ms() - t0);
+        fprintf(lg, "DB open %s (key %lld ms, first read %lld ms)\n", dbp, t1 - t0, drag_now_ms() - t1);
     return db;
 }
 /* worker: 1 stems / 0 none / -1 unknown, over every stick holding (cid, title) */
@@ -929,6 +941,7 @@ static _Atomic long long g_sm_anim_ms; /* an animated row painted then */
 /* g_sm_mu held: take the next request, track rows before playlists, the newest first
  * (the rows on screen now, not the ones a scroll already left). tracks_only: the
  * playlist loop's call, which must not start a second playlist. */
+static long long g_sm_pop_at; /* worker only: when the request just taken was queued */
 static int sm_pop(unsigned *cid, unsigned *h, unsigned *media, char *title, size_t tsz,
                   int tracks_only) {
     int at = -1;
@@ -942,6 +955,7 @@ static int sm_pop(unsigned *cid, unsigned *h, unsigned *media, char *title, size
     *cid = g_smq[at].cid;
     *h = g_smq[at].h;
     *media = g_smq[at].media;
+    g_sm_pop_at = g_smq[at].at;
     snprintf(title, tsz, "%s", g_smq[at].title);
     memmove(&g_smq[at], &g_smq[at + 1], (size_t) (g_smq_n - 1 - at) * sizeof g_smq[0]);
     g_smq_n--;
@@ -950,6 +964,7 @@ static int sm_pop(unsigned *cid, unsigned *h, unsigned *media, char *title, size
 static int g_sm_budget = 2000; /* worker log lines */
 static void sm_serve(unsigned cid, unsigned h, unsigned media, const char *title, FILE *lg) {
     FILE *l = g_sm_budget-- > 0 ? lg : 0;
+    long long t0 = drag_now_ms(), wait = t0 - g_sm_pop_at;
     int pl = (cid & SM_PLF) != 0;
     int busy = 0, count = -1;
     int r = pl ? sm_resolve_playlist(cid & ~SM_PLF, title, media, l, &busy, &count)
@@ -971,7 +986,8 @@ static void sm_serve(unsigned cid, unsigned h, unsigned media, const char *title
     }
     sm_unlock();
     if (l)
-        fprintf(l, "RES t=%lld cid=%u \"%s\" -> %s\n", drag_now_ms() % 100000, cid, title,
+        fprintf(l, "RES t=%lld cid=%u wait=%lld res=%lld \"%s\" -> %s\n", drag_now_ms() % 100000, cid,
+                wait, drag_now_ms() - t0, title,
                 pl ? (r == 3   ? "ALL"
                       : r == 2 ? "SOME"
                       : r == 1 ? "none"
@@ -983,6 +999,12 @@ static void sm_serve(unsigned cid, unsigned h, unsigned media, const char *title
      * event a row that was evicted from a full queue may get */
     __atomic_store_n(&g_sm_dirty, 1, __ATOMIC_RELEASE);
 }
+/* Preview Hot Cues (preview_hotcues.c, included at the end) ride this worker */
+static int ph_queued(void);
+static int ph_serve_one(FILE *lg);
+static void ph_world_changed(void);
+/* The rows on screen, between the steps of a playlist scan: track rows' stems, then their hot
+ * cues. Both belong to rows being painted now; a playlist row's scan takes seconds. */
 static void sm_serve_tracks(FILE *lg) {
     for (;;) {
         unsigned cid = 0, h = 0, media = 0;
@@ -990,10 +1012,34 @@ static void sm_serve_tracks(FILE *lg) {
         sm_lock();
         int got = sm_pop(&cid, &h, &media, title, sizeof title, 1);
         sm_unlock();
-        if (!got)
+        if (got) {
+            sm_serve(cid, h, media, title, lg);
+            continue;
+        }
+        if (!ph_serve_one(lg))
             return;
-        sm_serve(cid, h, media, title, lg);
     }
+}
+/* worker: one request, the rows on screen first: a track row's stems, then a track row's hot
+ * cues, and only then a playlist row (whose scan takes seconds and serves the other two
+ * between its steps, sm_serve_tracks). 1 = served one */
+static int sm_work_one(FILE *lg) {
+    unsigned cid = 0, h = 0, media = 0;
+    char title[160] = "";
+    sm_lock();
+    int got = g_smq_n && sm_pop(&cid, &h, &media, title, sizeof title, 1);
+    sm_unlock();
+    if (!got) {
+        if (ph_serve_one(lg))
+            return 1;
+        sm_lock();
+        got = g_smq_n && sm_pop(&cid, &h, &media, title, sizeof title, 0);
+        sm_unlock();
+    }
+    if (!got)
+        return 0;
+    sm_serve(cid, h, media, title, lg);
+    return 1;
 }
 static void *sm_worker(void *arg) {
     (void) arg;
@@ -1005,17 +1051,13 @@ static void *sm_worker(void *arg) {
         setvbuf(lg, NULL, _IOLBF, 0);
     long long sig = sm_world_sig(), sig_at = drag_now_ms(), ssig = sm_stems_sig();
     for (;;) {
-        unsigned cid = 0, h = 0, media = 0;
-        char title[160] = "";
         sm_lock();
-        if (!g_smq_n) {
+        if (!g_smq_n && !ph_queued()) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_sec += 1;
             pthread_cond_timedwait(&g_sm_cv, &g_sm_mu, &ts);
         }
-        if (g_smq_n)
-            sm_pop(&cid, &h, &media, title, sizeof title, 0);
         sm_unlock();
         {
             static long long pend_at;
@@ -1038,6 +1080,7 @@ static void *sm_worker(void *arg) {
                 for (int i = 0; i < SM_CACHE; i++)
                     if (g_smc[i].st)
                         g_smc[i].stale = 1;
+                ph_world_changed();
                 sm_unlock();
                 __atomic_store_n(&g_sm_world, 1, __ATOMIC_RELEASE);
                 __atomic_store_n(&g_sm_dirty, 1, __ATOMIC_RELEASE);
@@ -1046,9 +1089,7 @@ static void *sm_worker(void *arg) {
             }
         }
         sm_db_release_unused(lg);
-        if (!cid)
-            continue;
-        sm_serve(cid, h, media, title, lg);
+        sm_work_one(lg);
     }
     return 0;
 }
@@ -1603,3 +1644,4 @@ static void install_stemsmark(void) {
         fclose(f);
     }
 }
+#include "preview_hotcues.c"

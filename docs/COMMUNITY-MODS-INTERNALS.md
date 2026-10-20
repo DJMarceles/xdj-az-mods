@@ -280,7 +280,7 @@ line per repository and one per mod, fields separated by `|`:
 ```
 v1
 repo|<repo>|<name>|<ok>|<listed>|<error>
-mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>
+mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>|<updated>
 more|<n>
 ```
 
@@ -288,7 +288,7 @@ more|<n>
 file and one data folder, so two repositories offering the same id cannot both be
 installed. The catalog shows the line from, in order of preference:
 
-1. the repository the installed copy came from (its `.origin`), so its updates, Turn off and
+1. the repository the installed copy came from (its `.origin`), so its updates, Disable and
    Remove stay reachable;
 2. a repository in the Mod Index, over one the user added;
 3. the earlier repository in the set.
@@ -312,7 +312,7 @@ Repository line:
 | 5 | listed | | `1` when the repository is on the curated list |
 | 6 | error | 111 | why it could not be read (`not read yet` before the first fetch); empty when ok |
 
-Mod line (19 fields):
+Mod line (20 fields):
 
 | # | Field | Cap | Meaning |
 |---|---|---|---|
@@ -335,6 +335,7 @@ Mod line (19 fields):
 | 17 | held | 256 | the id is installed from another repository (its short address), or `-` for a folder copied by hand; empty otherwise. Install is refused until that mod is removed |
 | 18 | also | 256 | the first other repository offering the same id, as in its `repo` line; empty when none |
 | 19 | nalso | | how many other repositories offer the same id |
+| 20 | updated | | the repository file's `updated` date, `YYYY-MM-DD`, or empty |
 
 Fields are only ever added at the end. A reader accepts a `mod` line with 13 or more fields
 (a `repo` line with 6 or more) and treats missing trailing fields as empty; the Mod Menu
@@ -343,6 +344,23 @@ does, and reads lines of up to 4095 bytes.
 The Mod Menu decides "works on this deck" itself: the firmware field is `any`, or it holds
 the running firmware's tag. It offers Install only when the mod works on this deck and its
 `min_core` is not above the core's `AZ_CORE_VERSION`. Browse lists those mods first.
+
+**Browse controls.** Above the grid, a search field and three orders sit beside Refresh, and a
+row of category buttons follows: All, Visual, Controls, Audio, Tools and Other, each with the
+number of mods it holds under the search. Other holds the mods with no category. The search
+matches when every word typed (split on spaces) appears in the name, the author, the summary or
+the description, ignoring the case of ASCII letters; a tap on the field opens the keyboard,
+which shows the matches as they are typed. The orders:
+
+| Order | Mods |
+|---|---|
+| A-Z | by name, ignoring the case of ASCII letters |
+| Updated | by the `updated` date, newest first; mods without a valid date after the dated ones |
+| Installed | installed mods first, then by name |
+
+In every order the mods that cannot be installed here follow the ones that can, except that
+Installed keeps every installed mod first; mods that compare equal keep the catalog's order.
+The category, order and search last until EP147 restarts.
 
 ### The status file
 
@@ -376,7 +394,7 @@ starts "No internet" (refresh) or "Could not download <name>: no internet connec
 (install).
 
 The Mod Menu treats `done` after `install` or `remove` as "what loads has changed" and offers
-Reload; after `enable` or `disable` it shows the pending state ("Turns on after Reload.")
+Reload; after `enable` or `disable` it shows the pending state ("Enabled after Reload.")
 until the next start.
 
 ### The request file
@@ -442,8 +460,8 @@ not done here (the deck has no `readelf`); the core does them before it loads th
 
 | Result | Message |
 |---|---|
-| installed, turned on | `<name> <version> installed. Press Reload now to start it.` |
-| installed, was turned off | `<name> <version> installed. It stays turned off, as before.` |
+| installed, enabled | `<name> <version> installed. Press Reload now to start it.` |
+| installed, was disabled | `<name> <version> installed. It stays disabled, as before.` |
 | installed, approval not written | `<name> <version> installed. After Reload, open it under Installed and press Allow.` |
 
 ### Interrupted installs
@@ -569,7 +587,7 @@ The core loads only from the stage, never from the USB.
 
 > Before you install <name>, your first community mod:
 >
-> Community mods are made by other people, not by AZ-MODS. AZ-MODS does not check them. They
+> Community mods are made by other developers, not by AZ-MODS. AZ-MODS does not check them. They
 > run inside the deck software with full access to your deck, and a faulty one can stop the
 > music.
 >
@@ -890,7 +908,7 @@ that mod at the next start. A freeze after `init` is not attributed.
 | Resume (quarantine banner) | deletes `.starting` and `.crashes`; mods load after the next reload |
 | Keep off (quarantine banner) | switches community mods off (writes the deck's `off` file) |
 | Try again (a suspended mod's page) | deletes `<id>.crashed`; the mod loads after the next reload |
-| Turn on / Turn off | sends `enable` / `disable` |
+| Enable / Disable | sends `enable` / `disable` |
 | the master switch | writes or deletes the deck's `off` file |
 
 ## What the Mod Menu shows
@@ -900,7 +918,7 @@ On an installed mod (`cm_state_text` in `screen_community.c`):
 | Core state | Shown |
 |---|---|
 | loaded | Running |
-| turned off | Turned off, or Community mods are turned off |
+| turned off | Disabled, or Community mods are disabled |
 | refused | Not loaded: `<reason>` |
 | failed | Failed: Its init() returned N |
 | suspended, blamed | Turned off: it crashed the deck |
@@ -908,11 +926,11 @@ On an installed mod (`cm_state_text` in `screen_community.c`):
 | suspended by the quarantine | Held back (see above), under the banner "Community mods were held back this time." with Resume and Keep off; after Keep off, "Turned off (all community mods kept off)" |
 | not approved on this deck | New mod found: allow? (after Allow: "Allowed. Loads after Reload.") |
 
-Pending changes are shown until the reload that applies them: "Turns on after Reload.",
-"Turns off after Reload.", "Loads again after Reload.", "Removed. Unloads after Reload."
+Pending changes are shown until the reload that applies them: "Enabled after Reload.",
+"Disabled after Reload.", "Loads again after Reload.", "Removed. Unloads after Reload."
 ("Removed." for a mod that was not running). When a mod was suspended on its own, the home
-page says "<name> stopped the deck, so it was turned off. Your other mods were not affected."
-("N mods stopped the deck, so they were turned off. ..." for several).
+page says "<name> stopped the deck, so it was disabled. Your other mods were not affected."
+("N mods stopped the deck, so they were disabled. ..." for several).
 
 **Browse badges**, at most one per tile, the first that applies:
 
@@ -921,7 +939,7 @@ page says "<name> stopped the deck, so it was turned off. Your other mods were n
 | Removed | installed from this repository and removed this start |
 | Update available | a newer version that works on this deck and this core |
 | Needs newer AZ-MODS | a newer version whose `min_core` is above this core |
-| Installed, turned off | installed, and turned off or not running |
+| Installed, disabled | installed, and disabled or not running |
 | Installed | installed from this repository |
 | Its ID is in use | another mod holds the id (`held`) |
 | Not for this deck | the firmware field does not match |

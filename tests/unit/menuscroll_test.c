@@ -203,8 +203,15 @@ int main(void) {
     draw(&s);
     s.menu_focused = 1;
     int more0 = 0;
-    for (int i = 0; i < g_ntxt; i++) more0 |= g_txt[i].s[0] == '+';
-    CHECK("no mod rows: the preview card has no \"more\" line", !more0);
+    const char *mt0 = "";
+    for (int i = 0; i < g_ntxt; i++)
+        if (g_txt[i].s[0] == '+') {
+            more0++;
+            mt0 = g_txt[i].s;
+        }
+    /* the official rows alone run two past the card (Extended Lead-In, Camelot Keys) */
+    CHECK("no mod rows: the preview card's one \"more\" line counts the official rows past it",
+          more0 == 1 && strcmp(mt0, "+2 more") == 0);
 
     /* ---- 20 registered rows: 16 from one mod (one with an icon), 4 from "testmod" (a SCREEN) ---- */
     memset(g_icon, 255, sizeof g_icon);

@@ -241,8 +241,9 @@ static pid_t sdk_spawn_clean(char *const argv[], const char *log) {
 
 static void *sdk_proc_waiter(void *arg) {
     struct sdk_proc *p = arg;
+    pid_t pid = p->pid; /* set before this thread was created; the slot is not reused until running is 0 */
     int st;
-    while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
     }
     atomic_store(&p->running, 0); /* exited (or already reaped: SIGCHLD ignored) */
     return NULL;
@@ -372,11 +373,19 @@ struct sdk_stop {
     struct sdk_proc *p;
     pid_t pid;
 };
+/* the slot still holds that program: running, and not reused by a new launch (pid is written
+ * under the lock) */
+static int sdk_still_running(const struct sdk_stop *s) {
+    pthread_mutex_lock(&g_sdk_proc_mu);
+    int same = atomic_load(&s->p->running) && s->p->pid == s->pid;
+    pthread_mutex_unlock(&g_sdk_proc_mu);
+    return same;
+}
 /* SIGKILL after the 2 s grace period, unless it exited: and only if the slot still holds the
  * same program (a slot freed by the exit may be reused by a new launch meanwhile). */
 static void *sdk_stop_later(void *arg) {
     struct sdk_stop *s = arg;
-    for (int i = 0; i < 20 && atomic_load(&s->p->running) && s->p->pid == s->pid; i++)
+    for (int i = 0; i < 20 && sdk_still_running(s); i++)
         usleep(100000);
     pthread_mutex_lock(&g_sdk_proc_mu);
     if (atomic_load(&s->p->running) && s->p->pid == s->pid)

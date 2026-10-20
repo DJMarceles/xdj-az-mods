@@ -706,7 +706,7 @@ static struct {
     unsigned char *snap, *scaled;
 } g_ovi[OVINST_MAX];
 static _Atomic int g_ovi_n = 0;
-static _Atomic int g_ov_refresh = 0; /* set when a deck's curve changed */
+static _Atomic int g_ov_refresh = 0; /* bit d: deck d's overview tiles need a re-render */
 static _Atomic long g_ov_calls = 0;
 static _Atomic long g_ov_applied = 0;
 /* ErP (deck-bus) frames by CRC on arrival. Single writer (the bus read), read
@@ -1426,12 +1426,12 @@ void azm_wp_scale(long self, int idx, unsigned char *out, int band, int kind) {
         b = 0;
     else if (b >= ATT_N)
         b = ATT_N - 1;
-    out[0] = (unsigned char) ((out[0] * g_att[deck][b]) >> 8);
+    out[0] = (unsigned char) ((out[0] * __atomic_load_n(&g_att[deck][b], __ATOMIC_RELAXED)) >> 8);
     /* out+1 is a juce::Colour, 4 bytes B,G,R,A (ctor 0x23a5080), unaligned, so
      * write bytewise. Zero-height columns (the flat center line beside the
      * track) keep EP147's own color. */
     if (out[0] && g_wave_color) {
-        unsigned c = g_col[deck][b];
+        unsigned c = __atomic_load_n(&g_col[deck][b], __ATOMIC_RELAXED);
         if (c) {
             out[1] = (unsigned char) c;
             out[2] = (unsigned char) (c >> 8);
@@ -1674,7 +1674,7 @@ static void wsc_scale(int kind, const unsigned short *att, const unsigned char *
             b = 0;
         else if (b >= ATT_N)
             b = ATT_N - 1;
-        unsigned a = att[b];
+        unsigned a = __atomic_load_n(&att[b], __ATOMIC_RELAXED); /* rebuilt concurrently, see build_atten */
         if (kind == WSK_RGB) {
             unsigned v = s[2 * i + 1], h = (((v >> 1) & 0x1f) * a) >> 8;
             d[2 * i] = s[2 * i];
@@ -1953,17 +1953,18 @@ static void wave_prov_report(void) {
     }
 }
 
-/* Per track position, the fraction of the four stems' energy still audible.
- * It scales the native waveform height, so muting drums flattens the drum hits
- * where they are. Broadband: one factor for all bands (per-band would need
+/* Per track position, the fraction of the four stems' peak still audible, each
+ * stem at its pad toggle and its Stem Volume gain (wave_att.h). It scales the
+ * native waveform height, so muting drums or turning their knob down flattens
+ * the drum hits where they are. Broadband: one factor for all bands (per-band would need
  * 3-band envelopes from azstem). */
 /* VOCAL / INST / BASS / DRUMS in azstem's order; same palette as the pad LEDs
  * and the overlay's stem strip (stem_overlay.c). */
 static const unsigned STEM_RGB[AZMOD_STEM_COUNT] = AZMOD_STEM_PALETTE;
 static int g_attzero = 0; /* azmod-attzero.on: diagnostic, see below */
 static _Atomic int g_att_log = 40;
-static void build_atten(int deck) {
-    const int blend = 0; /* Tint Blend: retired slot 2, forced off (features.def) */
+/* Returns 1 when the deck's curve changed (rebuilt, or dropped because the stems went away). */
+static int build_atten(int deck, const int gq[AZMOD_STEM_COUNT]) {
     const unsigned char *env = 0;
     int n = 0, nst = 0;
     float pos = 0;
@@ -1972,76 +1973,51 @@ static void build_atten(int deck) {
         /* The curve going away must repaint too, or a stemless track loaded
          * after a muted one keeps the old muted shape in its cached preview. */
         int had = __atomic_exchange_n(&g_att_have[deck], 0, __ATOMIC_ACQ_REL);
-        memset(g_col[deck], 0, sizeof g_col[deck]);
-        if (had) {
-            __atomic_fetch_add(&g_att_gen[deck], 1, __ATOMIC_RELEASE);
-            __atomic_store_n(&g_ov_refresh, 1, __ATOMIC_RELEASE);
-            __atomic_store_n(&g_wave_dirty[deck], 1, __ATOMIC_RELEASE);
-        }
-        return;
+        if (!had)
+            return 0; /* nothing to publish: the retry while azstem builds the envelope */
+        for (int i = 0; i < ATT_N; i++)
+            __atomic_store_n(&g_col[deck][i], 0u, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_att_gen[deck], 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_wave_dirty[deck], 1, __ATOMIC_RELEASE);
+        return 1;
     }
+    unsigned on = 0;
+    for (int k = 0; k < AZMOD_STEM_COUNT; k++)
+        if (g_state.stem_on[deck][k])
+            on |= 1u << k;
+    /* Height: the audible share of the stems' peak, each stem at its Stem Volume gain
+     * (wave_att.h). Color: the loudest audible stem; a muted or silenced stem colors
+     * nothing. Element stores are atomic: the message thread reads these curves while
+     * they are rebuilt, and g_att_gen tells it to read them again. */
     for (int i = 0; i < ATT_N; i++) {
         int b = (int) ((long) i * n / ATT_N);
-        unsigned on = 0, all = 0;
-        for (int k = 0; k < AZMOD_STEM_COUNT; k++) {
-            unsigned v = env[(size_t) k * n + b];
-            all += v;
-            if (g_state.stem_on[deck][k])
-                on += v;
-        }
-        g_att[deck][i] = all ? (unsigned short) ((on * 256u + all / 2) / all) : 256;
+        unsigned v[AZMOD_STEM_COUNT];
+        for (int k = 0; k < AZMOD_STEM_COUNT; k++)
+            v[k] = env[(size_t) k * n + b];
         /* Diagnostic (azmod-attzero.on, a test aid): force the curve to zero
          * to prove the height writes reach the visible waveform. */
-        if (g_attzero)
-            g_att[deck][i] = 0;
-        /* Color by the loudest audible stem (winner-takes-all; the optional
-         * energy blend is smoother but muddy on dense material). A muted stem
-         * colors nothing. */
-        unsigned best = 0, bestv = 0, wsum = 0, r = 0, gg = 0, bb = 0;
-        for (int k = 0; k < AZMOD_STEM_COUNT; k++) {
-            if (!g_state.stem_on[deck][k])
-                continue;
-            unsigned v = env[(size_t) k * n + b];
-            if (v > bestv) {
-                bestv = v;
-                best = STEM_RGB[k];
-            }
-            wsum += v;
-            r += v * ((STEM_RGB[k] >> 16) & 0xff);
-            gg += v * ((STEM_RGB[k] >> 8) & 0xff);
-            bb += v * (STEM_RGB[k] & 0xff);
-        }
-        if (bestv <= 8)
-            g_col[deck][i] = 0; /* near-silence keeps EP147's own color */
-        else if (blend && wsum)
-            g_col[deck][i] = ((r / wsum) << 16) | ((gg / wsum) << 8) | (bb / wsum);
-        else
-            g_col[deck][i] = best;
+        unsigned short a = g_attzero ? 0 : watt_value(v, on, gq);
+        __atomic_store_n(&g_att[deck][i], a, __ATOMIC_RELAXED);
+        int ck = watt_color_stem(v, on, gq);
+        __atomic_store_n(&g_col[deck][i], ck < 0 ? 0u : STEM_RGB[ck], __ATOMIC_RELAXED);
     }
-    /* Diagnostic: mask and sample curve values per rebuild. Budgeted;
-     * message thread only. */
-    if (__atomic_fetch_sub(&g_att_log, 1, __ATOMIC_RELAXED) > 0) {
-        unsigned m = 0;
-        for (int k = 0; k < AZMOD_STEM_COUNT; k++)
-            if (g_state.stem_on[deck][k])
-                m |= 1u << k;
-        wwb_log("atten: d%d mask=%x att[64]=%u att[512]=%u att[900]=%u", deck, m, g_att[deck][64],
-                g_att[deck][512], g_att[deck][900]);
-    }
-    {
-        int ident = !g_attzero;
-        for (int k = 0; k < AZMOD_STEM_COUNT; k++)
-            if (!g_state.stem_on[deck][k])
-                ident = 0;
-        __atomic_store_n(&g_att_ident[deck], ident, __ATOMIC_RELAXED);
-    }
+    /* Diagnostic: mask, gains and sample curve values per rebuild. Budgeted;
+     * overlay thread only. */
+    if (__atomic_fetch_sub(&g_att_log, 1, __ATOMIC_RELAXED) > 0)
+        wwb_log("atten: d%d mask=%x gq=%d/%d/%d/%d att[64]=%u att[512]=%u att[900]=%u", deck, on,
+                gq[0], gq[1], gq[2], gq[3], __atomic_load_n(&g_att[deck][64], __ATOMIC_RELAXED),
+                __atomic_load_n(&g_att[deck][512], __ATOMIC_RELAXED),
+                __atomic_load_n(&g_att[deck][900], __ATOMIC_RELAXED));
+    __atomic_store_n(&g_att_ident[deck], !g_attzero && watt_identity(on, gq), __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_att_gen[deck], 1, __ATOMIC_RELEASE); /* scaled copies rebuild */
     __atomic_store_n(&g_att_have[deck], 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_ov_refresh, 1, __ATOMIC_RELEASE);
+    /* The overview tiles are refreshed by the caller (ov_rebuild_attenuation), on their own
+     * cadence: EP147 re-renders each tile. */
     /* ...and the main waveform, which otherwise shows new heights only when
      * EP147 re-renders on its own schedule (seconds later).
      * wave_repaint_if_needed() handles it on the message thread. */
     __atomic_store_n(&g_wave_dirty[deck], 1, __ATOMIC_RELEASE);
+    return 1;
 }
 
 /* Re-run EP147's own "overview changed" path (setOverview with the object it
@@ -2095,13 +2071,13 @@ static unsigned char *ov_scaled_for(int i, const unsigned char *arr, int cnt) {
         memcpy(g_ovi[i].snap, arr, len);
         for (int k = 0; k < cnt; k++) {
             long b = (long) k * ATT_N / cnt;
-            unsigned a = g_att[deck][b];
+            unsigned a = __atomic_load_n(&g_att[deck][b], __ATOMIC_RELAXED);
             const unsigned char *p = g_ovi[i].snap + (size_t) k * OV_STRIDE;
             unsigned char *e = g_ovi[i].scaled + (size_t) k * OV_STRIDE;
             memcpy(e, p, OV_STRIDE);
             e[OV_HGT_A] = (unsigned char) ((p[OV_HGT_A] * a) >> 8);
             e[OV_HGT_B] = (unsigned char) ((p[OV_HGT_B] * a) >> 8);
-            unsigned c = color ? g_col[deck][b] : 0;
+            unsigned c = color ? __atomic_load_n(&g_col[deck][b], __ATOMIC_RELAXED) : 0;
             if (c) {
                 e[OV_COL_A + 0] = (unsigned char) (c >> 16);
                 e[OV_COL_A + 1] = (unsigned char) (c >> 8);
@@ -2337,7 +2313,8 @@ static void wave_repaint_if_needed(void) {
  * load into a cached image, so earlier-loaded decks never draw again. Content
  * pointers are re-read live, so track changes are picked up too. */
 static void ov_refresh_if_needed(void) {
-    if (!__atomic_exchange_n(&g_ov_refresh, 0, __ATOMIC_ACQ_REL))
+    int decks = __atomic_exchange_n(&g_ov_refresh, 0, __ATOMIC_ACQ_REL);
+    if (!decks)
         return;
     int nt = __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED);
     for (int t = 0; t < nt; t++) {
@@ -2345,7 +2322,7 @@ static void ov_refresh_if_needed(void) {
          * wref slot, so a non-zero slot here (message thread) is a live widget. */
         long self = (long) wref_get(&g_ovtile_w[t]);
         int deck = g_ovtile[t].deck;
-        if (!self || deck < 0)
+        if (!self || deck < 0 || deck >= AZMOD_STEM_DECKS || !(decks & (1 << deck)))
             continue;
         {
             unsigned vt = 0;

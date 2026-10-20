@@ -115,12 +115,20 @@ AZ_FEATURE( EXTRAS,            "extras",                     "Extras",          
 /* the deck-screen readouts: a switch whose rows live on their own screen (Overlays >) */
 AZ_FEATURE( OVERLAYS,          "overlays",                   "Overlays",                   EXTRAS,       AZ_ROW_TOGGLE,  0,                              14,
             .screen = AZ_OVERLAYS,
-            .d.help = "FPS, CPU, clock, RAM and temperature on screen.")
+            .d.help = "FPS, CPU, RAM and temperature on screen.")
 AZ_FEATURE( OVERLAY_FPS,       "overlay-fps",                "FPS",                        OVERLAYS,     AZ_ROW_TOGGLE,  0,                              5)
 AZ_FEATURE( OVERLAY_CPU_TEMP,  "overlay-cpu-temp",           "CPU Temp",                   OVERLAYS,     AZ_ROW_TOGGLE,  0,                              13)
 AZ_FEATURE( OVERLAY_CPU_USAGE, "overlay-cpu-usage",          "CPU Usage",                  OVERLAYS,     AZ_ROW_TOGGLE,  0,                              15)
 AZ_FEATURE( OVERLAY_CPU_CLOCK, "overlay-cpu-clock",          "CPU Clock",                  OVERLAYS,     AZ_ROW_TOGGLE,  0,                              16)
 AZ_FEATURE( OVERLAY_RAM,       "overlay-ram",                "RAM Usage",                  OVERLAYS,     AZ_ROW_TOGGLE,  0,                              17)
+/* the time of day in the place of EP147's status bar readout while it is not recording, once the
+ * system clock is synchronized (clock_native.c, screen_overlays.c): a switch whose rows live on
+ * their own screen (Clock >); the time zone is azmod.conf's "clock.tz" key, picked there. */
+AZ_FEATURE( CLOCK,             "overlay-clock",              "Clock",                      EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
+            .screen = AZ_CLOCK,
+            .d.help = "The time of day, top right, while not recording.")
+AZ_FEATURE( CLOCK_24H,         "overlay-clock-24h",          "Time Format",                CLOCK,        AZ_ROW_CHOICE,  0,                              -1,
+            .d.choices = AZ_CHOICES("12-hour", "24-hour"))
 /*          ENUM               label                         parent        kind            flags                          screen */
 AZ_ACTION(  PAD_COLORS,        "Pad Colors",                 EXTRAS,       AZ_ROW_SCREEN,  0,                             AZ_COLORS,
             .d.help = "Choose the colors of the pad mode buttons.")
@@ -144,6 +152,17 @@ AZ_FEATURE( HIDE_TRACK_TITLE,  "hide-track-title",           "Hide Track Title",
  * usecase::phase_meter */
 AZ_FEATURE( PHASE_METER,       "phase-meter",                "Phase Meter",                EXTRAS,       AZ_ROW_TOGGLE,  0,                              36,
             .d.help = "Shows how the two decks line up, above their waveforms.")
+/* hot cue marks on the Browse TRACK list's PREVIEW waveforms, from each track's analysis
+ * file (preview_hotcues.c) */
+AZ_FEATURE( PREVIEW_HOT_CUES,  "preview-hot-cues",           "Preview Hot Cues",           EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
+            .d.help = "Hot cue marks on the track list's PREVIEW waveforms.")
+/* the jog spins a track back far past its start, not only 2 s (spin_back.c) */
+AZ_FEATURE( EXTENDED_LEAD_IN, "extended-lead-in",      "Extended Lead-In",        EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
+            .d.help = "Spin a track back as far as you like before its start.")
+/* streaming services' keys (and the KEY lists) in Camelot: EP147's own key text, asked for
+ * in Camelot (streaming_key.c) */
+AZ_FEATURE( CAMELOT_KEYS,      "camelot-keys",               "Camelot Keys",               EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
+            .d.help = "Streaming tracks' keys in Camelot, like 8A.")
 
 AZ_REGISTERED_ROWS()
 

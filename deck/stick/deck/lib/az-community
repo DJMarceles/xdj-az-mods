@@ -67,21 +67,25 @@
 #   msg     one user-facing line, at most 111 bytes (always last)
 # catalog: /tmp/az-community/catalog, rewritten whole (tmp + mv): "v1", then one
 #   repo|<repo>|<name>|<ok>|<listed>|<error>  line per repository and one
-#   mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>
+#   mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>|<updated>
 #   (one mod line per listed id, see build_catalog; min_core: MAJOR.MINOR.PATCH or empty;
 #   description: one line, at most 599 bytes; assets_kb: files the mod keeps on the USB, 0 =
-#   none or not said; held/also/nalso: the same id elsewhere, see build_catalog. Later fields
+#   none or not said; held/also/nalso: the same id elsewhere, see build_catalog; updated: the
+#   index's YYYY-MM-DD release date, or empty. Later fields
 #   are appended last, so a reader of fewer fields still works.) | CR LF are stripped from
 #   every value, and byte caps keep UTF-8 whole.
 #   At most CAT_MODS mod lines (installed ones first when there are more); then, only when
 #   some were left out, one closing  more|<n>  line with how many.
-# icons: /tmp/az-community/icons/<hash>.png, PNG-signature checked, 256 KB cap.
+# icons: /tmp/az-community/icons/<hash>.png, PNG-signature checked, 256 KB cap; <hash> covers the
+# icon's URL and the mod's version. A copy is kept on the stick (MODS/community-mods/.icons) so
+# the first refresh after a reboot copies them back instead of downloading each again.
 set -u
 umask 022
 ST=/tmp/az-community; STATUS=$ST/status; LOG=$ST/log; CACHE=$ST/cache; ICONS=$ST/icons
 CAT=$ST/catalog; WORK=$ST/work
 MNT=${AZ_MNT:-}; MODS=${AZ_MODS:-}
 COMM=""; [ -n "$MODS" ] && COMM=$MODS/community-mods
+SICONS=""; [ -n "$COMM" ] && SICONS=$COMM/.icons
 P7=${AZ_STAGE:-/home/root/settings/az-usbload}
 # core's per-mod state beside the stage (azmod community.c CM_STATE): the approved list
 CSTATE=${P7%/*}/azmod-community; APPROVED=$CSTATE/approved; APPROVED_MAX=64
@@ -335,7 +339,9 @@ parse_index(){
     # .mods fields: 1-14 as parsed, 15 the icon's hash, 16 min_core, 17 description, 18 assets_kb
     # (each appended last: nothing moves)
     grep "^MOD${TAB}" "$CACHE/$2.parsed.new" | cut -f2- | while IFS= read -r ml; do
-        iu=$(printf '%s\n' "$ml" | cut -f7); ih=""; [ -n "$iu" ] && ih=$(hash16 "$iu")
+        # the icon's name: its URL and the mod's version, so a new version fetches its icon again
+        iu=$(printf '%s\n' "$ml" | cut -f7); ih=""; [ -n "$iu" ] && ih=$(hash16 "$iu
+$(printf '%s\n' "$ml" | cut -f3)")
         printf '%s\t%s\t%s\n' "$(printf '%s\n' "$ml" | cut -f1-14)" "$ih" "$(printf '%s\n' "$ml" | cut -f15-17)"
     done > "$CACHE/$2.mods.new"
     grep "^META${TAB}" "$CACHE/$2.parsed.new" | cut -f2-4 > "$CACHE/$2.meta.new"
@@ -372,7 +378,7 @@ is_off(){ case "$(cfg_get "$CFG" "community-mods.$1")" in [Oo][Ff][Ff]|0|[Ff][Aa
 # One mod line per id. An id is one folder on the stick, one settings file and one data folder,
 # so two repositories offering the same id cannot both be installed: the catalog shows the one
 # this deck would install and counts the rest. It is, in order: the repository the installed
-# copy came from (its updates, Turn off and Remove stay reachable), a repository on the
+# copy came from (its updates, Disable and Remove stay reachable), a repository on the
 # Mod Index over one the DJ added, the earlier one in the repository order. The chosen
 # repository per id is written to $CACHE/winners (id TAB url), and install refuses any other.
 # installed: the installed version, only on the line from the repository it came from.
@@ -404,8 +410,8 @@ build_catalog(){
           if(out>=MAXC){ more++; continue }
           ic=""; if(a[15]!=""){ if((getline z < (I "/" a[15] ".png"))>=0) ic=I "/" a[15] ".png"; close(I "/" a[15] ".png") }
           fw=a[11]; gsub(/ /,",",fw)
-          printf "mod|%s|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%s|%s|%s|%d|%s|%s|%d\n", cap(tx[r],256), id, cap(a[2],47), cap(a[3],23), cap(a[4],47), \
-            cap(a[5],119), a[6], a[12], fw, a[10], ic, cap(inst,23), a[16], cap(a[17],599), a[18]+0, cap(held,256), cap(AL[id],256), NA[id]+0
+          printf "mod|%s|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%s|%s|%s|%d|%s|%s|%d|%s\n", cap(tx[r],256), id, cap(a[2],47), cap(a[3],23), cap(a[4],47), \
+            cap(a[5],119), a[6], a[12], fw, a[10], ic, cap(inst,23), a[16], cap(a[17],599), a[18]+0, cap(held,256), cap(AL[id],256), NA[id]+0, a[14]
           out++
         } close(f)
       }
@@ -490,14 +496,24 @@ fetch_icons(){
     for f in "$ICONS"/* "$ICONS"/.[!.]*; do
         [ -e "$f" ] || continue; grep -qxF "${f##*/}" "$CACHE/icons.keep" || rm -rf "$f"
     done
-    TOTAL=$(wc -l < "$CACHE/icons.want" | tr -cd 0-9); DONE=0
+    TOTAL=$(wc -l < "$CACHE/icons.want" | tr -cd 0-9); DONE=0; spent=""
+    have=$(icons_bytes)   # kept up to date below: summing every icon each time is O(n^2) reads
     while IFS="$TAB" read -r iu ih; do
         DONE=$((DONE + 1))
         [ -n "$ih" ] || continue; [ -f "$ICONS/$ih.png" ] && continue
-        [ "$(upt)" -lt "$dl" ] || { log "icons: time budget spent, the rest next refresh"; break; }
-        [ $(($(icons_bytes) + CAP_ICON)) -le "$ICON_CAP" ] || { log "icons: $ICON_CAP bytes kept, the rest not fetched"; break; }
+        [ $((have + CAP_ICON)) -le "$ICON_CAP" ] || { log "icons: $ICON_CAP bytes kept, the rest not fetched"; break; }
+        # kept on the stick by an earlier refresh: copied, not downloaded (and not timed)
+        if [ -n "$SICONS" ] && [ -f "$SICONS/$ih.png" ] && [ "$(fsize "$SICONS/$ih.png")" -le "$CAP_ICON" ] &&
+            is_png "$SICONS/$ih.png" && cp "$SICONS/$ih.png" "$ICONS/$ih.part" 2>/dev/null; then
+            mv -f "$ICONS/$ih.part" "$ICONS/$ih.png"; have=$((have + $(fsize "$ICONS/$ih.png"))); continue
+        fi
+        rm -f "$ICONS/$ih.part"
+        # past the time budget: no more downloads, but the stick's copies still come back
+        [ -n "$spent" ] && continue
+        [ "$(upt)" -lt "$dl" ] || { spent=1; log "icons: time budget spent, the rest next refresh"; continue; }
         status refreshing "icons $DONE/$TOTAL"
-        if get "$iu" "$ICONS/$ih.part" "$CAP_ICON" && is_png "$ICONS/$ih.part"; then mv -f "$ICONS/$ih.part" "$ICONS/$ih.png"
+        if get "$iu" "$ICONS/$ih.part" "$CAP_ICON" && is_png "$ICONS/$ih.part"; then
+            mv -f "$ICONS/$ih.part" "$ICONS/$ih.png"; have=$((have + $(fsize "$ICONS/$ih.png")))
         else rm -f "$ICONS/$ih.part"; log "icon refused or failed: $iu"; fi
     done < "$CACHE/icons.want"
     # the cap holds whatever happened above: oldest first (the names are <hash>.png, written here)
@@ -506,8 +522,39 @@ fetch_icons(){
         [ "$(icons_bytes)" -le "$ICON_CAP" ] && break
         rm -f "$ICONS/$f"; log "icons: over $ICON_CAP bytes, dropped $f"
     done
+    keep_icons
     rm -f "$CACHE/icons.keep"
     return 0
+}
+# The icons on the stick (MODS/community-mods/.icons, a name no mod id can take): what /tmp
+# holds, which a reboot clears, is copied there; the stick keeps only icons the catalog shows,
+# at most ICON_CAP bytes (oldest first out). It is written only when that changes something,
+# in one rw window.
+keep_icons(){
+    [ -n "$SICONS" ] && [ -d "$MODS" ] || return 0
+    [ -L "$COMM" ] || [ -L "$SICONS" ] && return 0
+    add=""; del=""
+    for f in "$ICONS"/*.png; do [ -f "$f" ] && [ ! -f "$SICONS/${f##*/}" ] && add=1 && break; done
+    for f in "$SICONS"/* "$SICONS"/.[!.]*; do
+        [ -e "$f" ] && ! grep -qxF "${f##*/}" "$CACHE/icons.keep" && del=1 && break
+    done
+    [ -n "$add$del" ] || return 0
+    stick_rw || { log "icons: the stick is not writable, not kept"; return 0; }
+    mkdir -p "$SICONS" 2>>"$LOG"
+    for f in "$SICONS"/* "$SICONS"/.[!.]*; do
+        [ -e "$f" ] || continue; grep -qxF "${f##*/}" "$CACHE/icons.keep" || rm -rf "$f"
+    done
+    for f in "$ICONS"/*.png; do
+        [ -f "$f" ] || continue; n=${f##*/}; [ -f "$SICONS/$n" ] && continue
+        cp "$f" "$SICONS/.$n.part" 2>>"$LOG" && mv -f "$SICONS/.$n.part" "$SICONS/$n" 2>>"$LOG" ||
+            { rm -f "$SICONS/.$n.part"; log "icons: could not keep $n on the stick"; break; }
+    done
+    # shellcheck disable=SC2012
+    ls -1tr "$SICONS" 2>/dev/null | while IFS= read -r f; do
+        n=$(cat "$SICONS"/* 2>/dev/null | wc -c | tr -cd 0-9); [ "${n:-0}" -le "$ICON_CAP" ] && break
+        rm -f "$SICONS/$f"; log "icons: over $ICON_CAP bytes on the stick, dropped $f"
+    done
+    stick_restore; return 0
 }
 icons_bytes(){ n=$(cat "$ICONS"/* 2>/dev/null | wc -c | tr -cd 0-9); echo "${n:-0}"; }
 refresh(){
@@ -735,7 +782,7 @@ install_mod(){   # $1 repo, $2 id
     [ "$APPR" = 1 ] && log "approved $2 $sosha"
     build_catalog
     if [ "$APPR" = 0 ]; then status "done" "$name $ver installed. After Reload, open it under Installed and press Allow."
-    elif [ "$was_off" = 1 ]; then status "done" "$name $ver installed. It stays turned off, as before."
+    elif [ "$was_off" = 1 ]; then status "done" "$name $ver installed. It stays disabled, as before."
     else status "done" "$name $ver installed. Press Reload now to start it."; fi
 }
 # the approved list on p7 (see Safety, at the top): $1 id, $2 the sha256 of its .so, or "" to drop the id.

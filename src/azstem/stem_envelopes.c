@@ -413,6 +413,14 @@ void azstem_stem_eq(int deck, int hi10, int mid10, int low10) {
     for (int k = 0; k < NSTEM; k++)
         atomic_store_explicit(&g_sgain_k[deck][k], g[k], memory_order_relaxed);
 }
+/* The Stem Volume gain one stem of this deck plays at, x1000 (1000 = unity, also for
+ * an unknown deck or stem). azmod scales that stem's share of the waveform by it. */
+int azstem_stem_gain(int deck, int stem);
+int azstem_stem_gain(int deck, int stem) {
+    if (deck < 0 || deck >= NDECK || stem < 0 || stem >= NSTEM)
+        return 1000;
+    return atomic_load_explicit(&g_sgain_k[deck][stem], memory_order_relaxed);
+}
 
 /* Sum the enabled stems at a fractional source position (linear interpolation).
  * Separate so the declicker can evaluate two trajectories per sample. */

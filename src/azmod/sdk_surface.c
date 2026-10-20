@@ -615,8 +615,10 @@ static int sdk_any_redraw(void) {
 }
 
 /* A press, release or Expose on one of the surfaces' windows: 1 = it was ours. Coordinates are
- * screen pixels, as the mod draws. */
-static int sdk_overlay_x_event(struct overlay_ctx *c, XEvent *ev) {
+ * screen pixels, as the mod draws. touch = what the event is in the touch sequence (touch_seq.h):
+ * a press that is the finger moving delivers nothing, and once it moves past the slop the touch
+ * is no long press. */
+static int sdk_overlay_x_event(struct overlay_ctx *c, XEvent *ev, int touch) {
     (void) c;
     for (int i = 0; i < SDK_SURF_ALL; i++) {
         struct az_surface *p = &g_sdk_surf[i];
@@ -628,7 +630,9 @@ static int sdk_overlay_x_event(struct overlay_ctx *c, XEvent *ev) {
         }
         if (!sdk_mod_live(p->mod) || !p->d.on_input)
             return 1;
-        if (ev->type == ButtonPress) {
+        if (ev->type == ButtonPress && touch == TOUCH_MOVE) {
+            sdk_press_move(&p->press, ev->xbutton.x_root, ev->xbutton.y_root);
+        } else if (ev->type == ButtonPress) {
             int x = ev->xbutton.x_root, y = ev->xbutton.y_root;
             sdk_press_begin(&p->press, x, y, now_ms());
             az_event down = {AZ_EV_DOWN, 0, x, y}, tap = {AZ_EV_TAP, 0, x, y};

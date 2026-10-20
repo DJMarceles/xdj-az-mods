@@ -45,6 +45,7 @@ static void (*g_stem_eq_fn)(int, int, int,
                             int); /* channel 3/4 EQ -> azstem_stem_eq (deck, hi, mid, low) */
 static int (*g_deck_has_track_fn)(
     int); /* azstem_deck_has_track: deck 3/4 in use -> CH3/4 are deck channels */
+static int (*g_stem_gain_fn)(int, int); /* azstem_stem_gain: what Stem Volume plays, x1000 */
 static _Atomic int g_stemeq_knobs[2] = {
     -1, -1}; /* bus thread: (hi << 20) | (mid << 10) | low, -1 = not moved since start */
 static _Atomic int g_stemeq_tlm[2] = {
@@ -1268,8 +1269,11 @@ static int g_wave_color = 0; /* per-column color (STEM COLOR) */
 static _Atomic int g_att_ident[AZMOD_STEM_DECKS];
 static _Atomic int g_wavemute = 0;
 static _Atomic int g_wavecolor = 0; /* STEM COLOR mod */
-/* Per-deck attenuation curve, rebuilt off the paint path when the stem mask or
- * the track changes. 0..256 fixed point (256 = untouched). */
+/* Per-deck attenuation curve, rebuilt off the paint path (overlay thread) when the
+ * stem mask, the track or a Stem Volume gain changes. 0..256 fixed point (256 =
+ * untouched). Elements are read and written with relaxed __atomic accesses: the
+ * message thread reads a curve while it may be rebuilt, and g_att_gen tells it to
+ * read the whole curve again. Same for g_col. */
 #define ATT_N 16384
 static unsigned short g_att[AZMOD_STEM_DECKS][ATT_N];
 /* Color of the loudest enabled stem at that point in the track, 0x00RRGGBB,

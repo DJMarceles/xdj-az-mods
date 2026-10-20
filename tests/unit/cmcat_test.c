@@ -8,7 +8,10 @@
  *     tile and the "Not in the Mod Index" note on its page; a listed one carries neither;
  *   - the same id elsewhere (fields 17-19): a line whose id another installed copy holds says so
  *     on its tile and page and offers no Install; a line others also offer says so; the name of
- *     an installed id never comes from another author's line.
+ *     an installed id never comes from another author's line;
+ *   - Browse (field 20 and cm_browse.h through the real screen): the category buttons and their
+ *     counts, the orders, the search field and its keyboard page, the clear square, and Add
+ *     repository's keyboard still typing the address.
  * menu.c is #included (MENU_C) so its statics are visible; CM_CATALOG points at a temp file.
  * Text is captured through azmod_ttf_menu, which every c_text call goes through first. */
 #include <stdlib.h>
@@ -110,6 +113,12 @@ static int ctl_of(int kind, int idx) {
         if (g_ctl[i].kind == kind && g_ctl[i].idx == idx) return i;
     return -1;
 }
+/* the control itself; one off the screen when there is none (a check on it then fails) */
+static const cm_ctl *ctl_p(int kind, int idx) {
+    static const cm_ctl none = {-1, -1, -1000, -1000, 1, 1};
+    int i = ctl_of(kind, idx);
+    return i < 0 ? &none : &g_ctl[i];
+}
 
 int main(void) {
     ut_suite = "catalog";
@@ -160,6 +169,93 @@ int main(void) {
     write_raw("mod|https://example.com/r0/azmods-repo.json|beat-tool|Beat Tool|1.0.0|alice|s|tools|0|any|1000|||||0\n");
     layout(CMV_CAT, 0, 0);
     CHECK("CONTROL: a 16-field line (an older fetcher) still reads, with no notes", g_ncc == 1 && !g_cc[0].held[0] && g_cc[0].nalso == 0 && !seen("this ID"));
+
+    /* Browse: field 20 (updated), the category row, the orders and the search (cm_browse.h) */
+    write_raw("mod|https://example.com/r0/azmods-repo.json|echo-out|Echo Out|1.0.0|dubwise|s|audio|0|any|1000|||||0||||2019-09-14\n"
+              "mod|https://example.com/r0/azmods-repo.json|big-clock|Big Clock|1.0.0|nightowl|s|visual|0|any|1000|||||0||||2019-10-12\n"
+              "mod|https://example.com/r0/azmods-repo.json|old-date|Aged|1.0.0|dubwise|s|tools|0|any|1000|||||0||||20191008\n");
+    CHECK("field 20 is read; a malformed date is dropped", !strcmp(g_cc[0].upd, "2019-09-14") && !strcmp(g_cc[1].upd, "2019-10-12") && !g_cc[2].upd[0]);
+    layout(CMV_HOME, 1, -1);
+    CHECK("Browse: a search field, three orders and six category buttons", nkind(CMC_SEARCH) == 1 && nkind(CMC_SORT) == 3 && nkind(CMC_FCAT) == 6 && nkind(CMC_QCLEAR) == 0);
+    CHECK("Browse: the buttons count the mods", seen("All  3") && seen("Audio  1") && seen("Visual  1") && seen("Tools  1") && seen("Other  0"));
+    CHECK("A-Z: Aged, Big Clock, Echo Out", ctl_p(CMC_TILE, 2)->x < ctl_p(CMC_TILE, 1)->x && ctl_p(CMC_TILE, 1)->x < ctl_p(CMC_TILE, 0)->x);
+    cm_fire(ctl_p(CMC_SORT, CMB_SORT_UPDATED));
+    layout(CMV_HOME, 1, -1);
+    CHECK("Updated: the newest first, the undated last", g_cm_sort == CMB_SORT_UPDATED && ctl_p(CMC_TILE, 1)->x < ctl_p(CMC_TILE, 0)->x &&
+                                                             ctl_p(CMC_TILE, 0)->x < ctl_p(CMC_TILE, 2)->x);
+    g_cm_scroll = 300;
+    cm_fire(ctl_p(CMC_FCAT, 0));
+    CHECK("a category button picks it and goes back to the top", g_cm_fcat == 0 && g_cm_scroll == 0);
+    layout(CMV_HOME, 1, -1);
+    CHECK("Visual: only its mod", nkind(CMC_TILE) == 1 && ctl_of(CMC_TILE, 1) >= 0);
+    cm_fire(ctl_p(CMC_SEARCH, 0));
+    CHECK("the search field opens the keyboard for the search", g_cm_view == CMV_KBD && g_cm_kbsearch);
+    for (const char *k = "dub"; *k; k++) cm_fire(&(cm_ctl) {CMC_KEY, (unsigned char) *k, 0, 0, 1, 1});
+    CHECK("keys go into the search, not the repository address", !strcmp(g_cm_q, "dub") && !g_cm_kb[0]);
+    g_cm_fcat = CMB_ALL;
+    layout(CMV_KBD, 1, -1);
+    CHECK("the keyboard page shows the matches as they are typed", seen("2 mods match: Echo Out, Aged") && seen("Done") && seen("Clear") && !seen("github.com/"));
+    layout(CMV_HOME, 1, -1);
+    CHECK("the search narrows the grid and the counts; the field can be cleared", nkind(CMC_TILE) == 2 && seen("All  2") && seen("Visual  0") && nkind(CMC_QCLEAR) == 1);
+    snprintf(g_cm_q, sizeof g_cm_q, "zzz");
+    layout(CMV_HOME, 1, -1);
+    CHECK("nothing found: said", nkind(CMC_TILE) == 0 && seen("No mods match the search here. Try All, or clear the search."));
+    cm_fire(ctl_p(CMC_QCLEAR, 0));
+    CHECK("the clear square empties the search", !g_cm_q[0]);
+    snprintf(g_cm_q, sizeof g_cm_q, "dub");
+    g_cm_view = CMV_KBD;
+    cm_fire(&(cm_ctl) {CMC_KB_NO, 0, 0, 0, 1, 1});
+    CHECK("Clear on the keyboard empties the search and stays", !g_cm_q[0] && g_cm_view == CMV_KBD);
+    cm_fire(&(cm_ctl) {CMC_KB_OK, 0, 0, 0, 1, 1});
+    CHECK("Done goes back to the grid", g_cm_view == CMV_HOME);
+    cm_fire(&(cm_ctl) {CMC_ADDREPO, 0, 0, 0, 1, 1});
+    cm_fire(&(cm_ctl) {CMC_KEY, 'a', 0, 0, 1, 1});
+    CHECK("CONTROL: Add repository's keyboard still types the address", !g_cm_kbsearch && !strcmp(g_cm_kb, "a") && !g_cm_q[0]);
+    g_cm_kb[0] = 0;
+    g_cm_sort = CMB_SORT_NAME;
     unlink(CM_CATALOG);
+    /* the header: the breadcrumb on every page, the trust note on the Installed tab only */
+    layout(CMV_HOME, 0, -1);
+    CHECK("Installed: \"Community Mods  >  Installed\" and the trust note",
+          seen("Community Mods  >  Installed") && seen(CM_TRUST_NOTE));
+    layout(CMV_HOME, 1, -1);
+    CHECK("Browse: its breadcrumb, no trust note", seen("Community Mods  >  Browse") && !seen("Made by other"));
+    layout(CMV_HOME, 2, -1);
+    CHECK("Repositories: its breadcrumb, no trust note", seen("Community Mods  >  Repositories") && !seen("Made by other"));
+    if (g_ncc > 0) {
+        char want[256];
+        snprintf(want, sizeof want, "Community Mods  >  Browse  >  %s", g_cc[0].name);
+        layout(CMV_CAT, 1, 0);
+        CHECK("a mod's card opened from Browse: \"Community Mods  >  Browse  >  <name>\"", seen(want));
+        snprintf(want, sizeof want, "Community Mods  >  Installed  >  %s", g_cc[0].name);
+        layout(CMV_CAT, 0, 0);
+        CHECK("... from Installed: \"Community Mods  >  Installed  >  <name>\"", seen(want) && !seen("Made by other"));
+        snprintf(want, sizeof want, "Community Mods  >  Browse  >  %s  >  Install", g_cc[0].name);
+        layout(CMV_TRUST, 1, 0);
+        CHECK("its install confirmation: \"...  >  <name>  >  Install\"", seen(want));
+    } else
+        CHECK("the catalog has a mod for the breadcrumb checks", 0);
+    g_cm_kbsearch = 1;
+    layout(CMV_KBD, 1, -1);
+    CHECK("the search keyboard: \"Community Mods  >  Browse  >  Search\"", seen("Community Mods  >  Browse  >  Search"));
+    g_cm_kbsearch = 0;
+    layout(CMV_KBD, 2, -1);
+    CHECK("Add repository: \"Community Mods  >  Repositories  >  Add repository\"",
+          seen("Community Mods  >  Repositories  >  Add repository"));
+    {
+        char t[CM_CRUMB_MAX];
+        g_cm_view = CMV_KBD;
+        g_cm_tab = 1;
+        g_cm_kbsearch = 1;
+        cm_crumbs(t, sizeof t, 0, 20);
+        CHECK("room: the whole path", !strcmp(t, "Community Mods  >  Browse  >  Search"));
+        cm_crumbs(t, sizeof t, cm_tw("Community Mods  >  Search", 20) + 2, 20);
+        CHECK("too narrow for the tab: the tab left out, the page kept", !strcmp(t, "Community Mods  >  Search"));
+        g_cm_view = CMV_RELOAD;
+        cm_crumbs(t, sizeof t, 0, 20);
+        CHECK("the reload page: \"Community Mods  >  Reload\"", !strcmp(t, "Community Mods  >  Reload"));
+        g_cm_view = CMV_HOME;
+        g_cm_kbsearch = 0;
+    }
     return ut_summary();
 }

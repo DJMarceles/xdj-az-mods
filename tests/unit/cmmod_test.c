@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* An installed community mod's page (menu.c, CMV_MOD) for each load state:
- *   - a mod that loaded offers Turn off; one turned off offers Turn on;
+ *   - a mod that loaded offers Disable; one disabled offers Enable;
  *   - a mod REFUSED at load (here: it needs a newer AZ-MODS) or whose init() FAILED is still
- *     turned on (the core reads the Turn off mark first), so its page shows the reason and
- *     offers Turn off, never a Turn on that would only send "enable" for a mod already enabled;
- *   - once Turn off is pressed on a refused mod its page says "Turns off after Reload.";
- *   - a reload is asked for only when a Turn on/off differs from what is set.
+ *     enabled (the core reads the Disable mark first), so its page shows the reason and
+ *     offers Disable, never an Enable that would only send "enable" for a mod already enabled;
+ *   - once Disable is pressed on a refused mod its page says "Disabled after Reload.";
+ *   - a reload is asked for only when an Enable / Disable differs from what is set.
  * menu.c is #included (MENU_C) so its statics are visible; azcm_count / azcm_info are this
  * file's, so each case sets the one installed mod's state. */
 #include <stdlib.h>
@@ -42,6 +42,13 @@ int azmod_ttf_menu2(const azmod_fb *fb, int x, int y, int w, int h, const char *
     return azmod_ttf_menu(fb, x, y, w, h, s, px, track, bold, c);
 }
 static int seen(const char *s) { return strstr(g_seen, s) != NULL; }
+/* a whole drawn text (a button's label), not a part of a longer one ("Disable" in "Disabled") */
+static int seen_line(const char *s) {
+    char k[128];
+    size_t n = strlen(s);
+    snprintf(k, sizeof k, "\n%s\n", s);
+    return (!strncmp(g_seen, s, n) && g_seen[n] == '\n') || strstr(g_seen, k) != NULL;
+}
 
 static azcm_info_t g_mod;
 int azcm_count(void) { return 1; }
@@ -77,7 +84,7 @@ static void page(int state, const char *reason) {
     g_cm_scroll = 0;
     g_nctl = cm_layout(&g_s, &g_fb, g_ctl, 1);
 }
-static int toggle(void) {   /* the Turn on/off control's action, 0 = none */
+static int toggle(void) {   /* the Enable / Disable control's action, 0 = none */
     for (int i = 0; i < g_nctl; i++)
         if (g_ctl[i].kind == CMC_MODACT && (g_ctl[i].idx == CMA_ENABLE || g_ctl[i].idx == CMA_DISABLE)) return g_ctl[i].idx;
     return 0;
@@ -86,23 +93,23 @@ static int toggle(void) {   /* the Turn on/off control's action, 0 = none */
 int main(void) {
     ut_suite = "installed mod page";
     page(AZCM_LOADED, "");
-    CHECK("CONTROL: a mod that loaded offers Turn off", seen("Turn off") && !seen("Turn on") && toggle() == CMA_DISABLE);
-    page(AZCM_DISABLED, "Turned off");
-    CHECK("CONTROL: a mod turned off offers Turn on", seen("Turn on") && !seen("Turn off") && toggle() == CMA_ENABLE);
+    CHECK("CONTROL: a mod that loaded offers Disable", seen_line("Disable") && !seen_line("Enable") && toggle() == CMA_DISABLE);
+    page(AZCM_DISABLED, "Disabled");
+    CHECK("CONTROL: a disabled mod offers Enable", seen_line("Enable") && !seen_line("Disable") && toggle() == CMA_ENABLE);
     page(AZCM_REFUSED, "Needs AZ-MODS 9.9.9 or newer");
     CHECK("a refused mod's page shows why it did not load", seen("Not loaded: Needs AZ-MODS 9.9.9 or newer"));
-    CHECK("a refused mod is turned on: it offers Turn off, not Turn on", seen("Turn off") && !seen("Turn on") && toggle() == CMA_DISABLE);
+    CHECK("a refused mod is enabled: it offers Disable, not Enable", seen_line("Disable") && !seen_line("Enable") && toggle() == CMA_DISABLE);
     CHECK("a refused mod with nothing pressed needs no reload", !cm_need_reload());
     page(AZCM_FAILED, "Its init() returned -1");
-    CHECK("a mod whose init() failed offers Turn off, not Turn on", seen("Turn off") && !seen("Turn on") && toggle() == CMA_DISABLE);
+    CHECK("a mod whose init() failed offers Disable, not Enable", seen_line("Disable") && !seen_line("Enable") && toggle() == CMA_DISABLE);
     cm_pend_set("testmod", 0);
     page(AZCM_REFUSED, "Needs AZ-MODS 9.9.9 or newer");
-    CHECK("Turn off pressed on a refused mod: \"Turns off after Reload.\" and Turn on offered", seen("Turns off after Reload.") && toggle() == CMA_ENABLE);
-    CHECK("Turn off pressed on a refused mod asks for a reload", cm_need_reload());
+    CHECK("Disable pressed on a refused mod: \"Disabled after Reload.\" and Enable offered", seen("Disabled after Reload.") && toggle() == CMA_ENABLE);
+    CHECK("Disable pressed on a refused mod asks for a reload", cm_need_reload());
     cm_pend_set("testmod", 1);
     page(AZCM_REFUSED, "Needs AZ-MODS 9.9.9 or newer");
     CHECK("turned back on before a reload: nothing left to reload, reason shown again", !cm_need_reload() && seen("Not loaded: Needs AZ-MODS"));
-    page(AZCM_DISABLED, "Turned off");
-    CHECK("CONTROL: Turn on pressed on a mod that is off asks for a reload", cm_need_reload() && seen("Turns on after Reload."));
+    page(AZCM_DISABLED, "Disabled");
+    CHECK("CONTROL: Enable pressed on a disabled mod asks for a reload", cm_need_reload() && seen("Enabled after Reload."));
     return ut_summary();
 }

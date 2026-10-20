@@ -743,11 +743,12 @@ community_mirror() {
 # ---- MODS/azmods.cfg: every setting, on the stick (deck/lib/az-conf.sh has the rules) ----
 # The stick's file is the source of truth; azmod keeps the deck copy (CFG_DECK) and never
 # writes the stick. At boot (and after a request that changed the stick) a stick file that
-# changed since the last sync is handed to azmod (CFG_IMPORT), which takes it over the deck
-# copy. The watcher writes the deck copy back to the stick AZ_CFG_DEBOUNCE s after the last
-# Mod Menu change, once every deck is empty. A stick file that is not a settings file is
-# refused: never imported, never overwritten. No stick: the deck copy is used, and it goes to
-# the stick the next time one is in.
+# changed since the last sync is handed to azmod (CFG_IMPORT): the deck copy with every key
+# the stick's file sets, so a key the stick's file lacks keeps the deck's value. The watcher
+# writes the deck copy back to the stick AZ_CFG_DEBOUNCE s after the last Mod Menu change,
+# tracks loaded or not (the stock mount is rw; the write is one small file). A stick file that
+# is not a settings file is refused: never imported, never overwritten. No stick: the deck
+# copy is used, and it goes to the stick the next time one is in.
 CFG_LIB=""; CFG_EFF=""; CFG_BAD=""; CFG_SYNC="$STAGE/cfg.sync"; CFG_SIG=""; CFG_T=0; CFG_SAID=""
 cfg_lib() {
     [ -f "$DECK/lib/az-conf.sh" ] && cached_ok "$DECK" lib/az-conf.sh || return 0
@@ -767,12 +768,25 @@ cfg_sync_set() { mkdir -p "$STAGE" 2>/dev/null; printf '%s\n%s\n' "$1" "$2" > "$
 cfg_check() {
     _s=$(cfg_md5 "$1"); _ls=$(sed -n 1p "$CFG_SYNC" 2>/dev/null); _ld=$(sed -n 2p "$CFG_SYNC" 2>/dev/null)
     [ "$_s" = "$_ls" ] && [ "$_ld" != pending ] && return 0
-    # the deck copy already holds it: in sync, and an older hand-over azmod has not taken is void
-    [ "$(cfg_md5 "$CFG_DECK")" = "$_s" ] && { rm -f "$CFG_IMPORT" 2>/dev/null; cfg_sync_set "$_s" "$_s"; return 0; }
+    # the same stick file, handed over before and no longer waiting: azmod took it and saved the
+    # deck copy after the sync point, so that copy holds the stick's settings and every change
+    # since. It is kept; the watcher writes it to the stick.
+    if [ "$_s" = "$_ls" ] && [ ! -e "$CFG_IMPORT" ] && [ ! -e "$CFG_IMPORT.bad" ] \
+        && [ -n "$(find "$CFG_DECK" -newer "$CFG_SYNC" 2>/dev/null)" ]; then
+        log "azmods.cfg: the stick's settings were taken before; the deck copy is newer and is kept"
+        return 0
+    fi
     rm -f "$CFG_IMPORT.bad" 2>/dev/null
-    if cp -f "$1" "$CFG_IMPORT.new" 2>/dev/null && mv -f "$CFG_IMPORT.new" "$CFG_IMPORT"; then
+    if cfg_valid "$CFG_DECK"; then cfg_merge "$CFG_DECK" "$1" > "$CFG_IMPORT.new" 2>/dev/null
+    else cp -f "$1" "$CFG_IMPORT.new" 2>/dev/null; fi
+    # the deck copy already holds every key the stick's file sets: in sync, and an older
+    # hand-over azmod has not taken is void
+    if [ -s "$CFG_IMPORT.new" ] && cmp -s "$CFG_IMPORT.new" "$CFG_DECK"; then
+        rm -f "$CFG_IMPORT.new" "$CFG_IMPORT" 2>/dev/null; cfg_sync_set "$_s" "$(cfg_md5 "$CFG_DECK")"; return 0
+    fi
+    if [ -s "$CFG_IMPORT.new" ] && mv -f "$CFG_IMPORT.new" "$CFG_IMPORT"; then
         cfg_sync_set "$_s" pending
-        log "azmods.cfg: the stick's settings differ from the deck copy -> handed to azmod (the stick wins)"
+        log "azmods.cfg: the stick's settings differ from the deck copy -> handed to azmod (the stick's keys win)"
     else rm -f "$CFG_IMPORT.new" 2>/dev/null; log "azmods.cfg: FAILED handing the stick's settings to azmod"; fi
     return 0
 }
@@ -825,25 +839,23 @@ cfg_boot() {
     else cfg_check "$CFG_EFF"; fi
     return 0
 }
-# watcher, every second. $1 = now: no debounce and no empty-decks wait (a request that writes
-# the stick anyway first takes the Mod Menu's changes along)
+# watcher, every second. $1 = now: no debounce (a request that writes the stick anyway first
+# takes the Mod Menu's changes along). The deck copy's md5 is its change signal: the deck's
+# busybox has no stat.
 cfg_tick() {
     [ -n "$CFG_LIB" ] && [ -z "$CFG_BAD" ] || return 0
     { [ -e "$CFG_IMPORT" ] || [ -e "$CFG_IMPORT.bad" ]; } && return 0   # azmod has not taken the stick's file
-    _sig=$(stat -c '%Y %s %i' "$CFG_DECK" 2>/dev/null); [ -n "$_sig" ] || return 0
+    _d=$(cfg_md5 "$CFG_DECK"); [ -n "$_d" ] || return 0
     _now=$(upt | cut -d. -f1)
-    if [ "$_sig" != "$CFG_SIG" ]; then CFG_SIG=$_sig; CFG_T=$_now; [ -n "${1:-}" ] || return 0; fi
+    if [ "$_d" != "$CFG_SIG" ]; then CFG_SIG=$_d; CFG_T=$_now; [ -n "${1:-}" ] || return 0; fi
     [ -n "${1:-}" ] || [ $((_now - CFG_T)) -ge "${AZ_CFG_DEBOUNCE:-5}" ] || return 0
-    _d=$(cfg_md5 "$CFG_DECK"); _ls=$(sed -n 1p "$CFG_SYNC" 2>/dev/null)
+    _ls=$(sed -n 1p "$CFG_SYNC" 2>/dev/null)
     [ "$_d" = "$(sed -n 2p "$CFG_SYNC" 2>/dev/null)" ] && return 0
     [ "$_d" = "$_ls" ] && { cfg_sync_set "$_d" "$_d"; return 0; }
     cfg_valid "$CFG_DECK" || return 0
-    if [ -z "${1:-}" ] && [ "$(decks_state)" != empty ]; then
-        [ "$CFG_SAID" = wait ] || { CFG_SAID="wait"; log "azmods.cfg: settings changed; written to the stick once every deck is empty"; }
-        return 0
-    fi
     repick
-    [ -n "$MODS" ] && [ -d "$MODS" ] || return 0
+    # no stick: looked for again after the retry interval, not every second
+    [ -n "$MODS" ] && [ -d "$MODS" ] || { CFG_T=$((_now + ${AZ_CFG_RETRY:-30})); return 0; }
     _s=$(cfg_md5 "$MODS/$CFG_NAME")
     if [ -n "$_s" ] && [ "$_s" != "$_ls" ]; then   # the stick's file changed since the sync: it wins
         cfg_valid "$MODS/$CFG_NAME" && cfg_check "$MODS/$CFG_NAME"

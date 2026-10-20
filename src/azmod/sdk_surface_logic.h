@@ -149,6 +149,7 @@ static inline int sdk_xwin_admit(const struct sdk_xw_ent *t, int n, int mod, uns
  * The deck's X server sees EP147's re-posted touches, and their releases do not always arrive,
  * so a TAP is delivered on the press (as the Mod Menu does), DOWN with it, UP when a release
  * comes, and LONG once a press has been held SDK_LONG_PRESS_MS without one. */
+#define SDK_PRESS_SLOP 12 /* px a finger may move and still be a long press */
 struct sdk_press {
     int down;          /* a press is in progress */
     int long_sent;     /* LONG went out for it */
@@ -165,6 +166,13 @@ static inline void sdk_press_begin(struct sdk_press *p, int x, int y, long long 
     p->x = x;
     p->y = y;
     p->t_ms = now;
+}
+/* The finger moved to (x, y) during the press: past SDK_PRESS_SLOP of where it landed, the
+ * touch is a drag and no LONG goes out for it. */
+static inline void sdk_press_move(struct sdk_press *p, int x, int y) {
+    int dx = x - p->x, dy = y - p->y;
+    if (p->down && (dx < -SDK_PRESS_SLOP || dx > SDK_PRESS_SLOP || dy < -SDK_PRESS_SLOP || dy > SDK_PRESS_SLOP))
+        p->long_sent = 1;
 }
 /* 1 = a release ended a press that was in progress */
 static inline int sdk_press_end(struct sdk_press *p) {

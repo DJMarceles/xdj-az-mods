@@ -5,6 +5,12 @@
 #   ep147build   build identification (guest/common/ep147build.h)
 #   addr_init    ep147_addr_init "inert unless complete" (azmod + azstem headers)
 #   crc16_x25    panel bus frame CRC (guest/azmod/bus_interpose.c)
+#   clock native the Clock in the place of EP147's status bar readout, only while it is not
+#                recording (guest/azmod/clock_native.h)
+#   clock_tz     the Clock readout: zone file parsing, offset at a time, 12/24-hour text; unknown,
+#                never guessed, past a zone file's last transition (guest/azmod/clock_tz.h)
+#   clock set    Set Time Manually: fields wrap without carrying, local time to UTC through a zone
+#                (the skipped hour), shown only when synchronized or set (guest/azmod/clock_set.h)
 #   fd tracking  a bus fd that is closed or dup2'd over is forgotten before its number is
 #                reused, and nothing is tracked outside EP147 (guest/azmod/bus_interpose.c)
 #   azmod.cfg    load_config / save_config / settings_write (guest/azmod/azmod.c)
@@ -22,11 +28,26 @@
 #   drum feed    an empty deck rolls at the master deck's BPM, else 120 (guest/azmod/stems_display.c)
 #   deckid       a tile deckstate or pad container maps to a deck only through the per-deck
 #                table; before it is filled, or for any other pointer, -1 (deckid_test.c)
+#   wave att     the stem waveform curve follows the pad toggles and the Stem Volume gains,
+#                capped at unity, rate limited per deck, overview tiles per deck on their own
+#                cadence (wave_att.h, waveform.c build_atten)
+#   folder copy  the FOLDER-view copy plan: names from the stick checked before they become paths,
+#                litter never copied, nothing overwritten, folders before their contents, caps
+#                (folder_copy.h)
+#   stem volume link  CH3/CH4 EQ sets stem volumes only while both channels are free: not while
+#                deck 3/4 has a track or a PRO DJ LINK player holds number 3/4, and not when unknown
+#                (link_members.h, link_members.c, mod_menu_overlay.c ov_sync_stem_volume)
 #   wave identity  waveform stem scaling and the stem-lane zoom model keyed by the rendering deck
 #                (update() or the Content table): unknown = drawn stock and no model, never another
 #                deck's; two decks' providers at one address keep separate models (waveform.c)
 #   drumtile8    the DRUM ROLL tile-8 index is written only through a chain re-proven at use, and
 #                never for an unknown deck (drum_roll_display.c drum8_index_apply)
+#   bjjog        BEAT JUMP 2 First: the jog display's pad page is swapped BEAT JUMP <-> BEAT JUMP 2
+#                on a copy handed to PlayerInfoData's store, never in EP147's staging area, and only
+#                for the object's own staging area with the expected vtable (beat_jump.c bj_joginfo_hook)
+#   jog stems    the stem state on the jog display: the HOT CUE pad page and its pad table per deck by
+#                identity, only with Pad Info Display On, EP147's table restored (jog_stems_logic.h,
+#                jog_display.c)
 #   lifetime     LoadState / DjPlayerUnit: published after the ctor, unpublished by a dtor hook that
 #                waits for ls_enter/ls_leave readers; the FGPR read inside the unit's ctor
 #                (stem_playback.c, deck_track_map.c hooks)
@@ -60,7 +81,11 @@
 #   cpspool      a playlist pasted onto another stick keeps every entry, repeats included;
 #                a track pasted onto an existing list is not doubled; a pasted track the
 #                target already has shows the copied art when its own file is gone, and keeps
-#                its own when it is there (library_edits.c cp_track_sql, ls_art_fix)
+#                its own when it is there (library_edits.c cp_track_sql, ls_art_fix); a folder
+#                pasted onto another stick arrives with the same tree, ids from 16385, no marks
+#                left, and a gone destination writes nothing (cp_folder_sql); PASTE onto the
+#                other stick's row with the copied row's id is not "onto itself"
+#                (playlist_actions.c pl_paste_is_self)
 #   pdbart       export.pdb after a paste onto a stick that lists the tracks: a track whose own
 #                art file is gone points at the paste's copy, one artwork row per copy; own art
 #                on the stick and OneLibrary's rekordbox art left alone (pdb_sync.c ps_paste_art)
@@ -76,10 +101,14 @@
 #   pdb_stock    export.pdb after EP147's own playlist writes: one sync per burst, whether or not
 #                Playlist Editing is on, none for an unknown stick (guest/azmod/pdb_stock.c)
 #   catalog      the Mod Menu's community catalog: caps, "Showing the first", the unlisted note
-#   cmmod        an installed mod's page: a mod refused at load is turned on (Turn off, its reason)
+#   cmmod        an installed mod's page: a mod refused at load is enabled (Disable, its reason)
 #   screenrow    a mod's SCREEN row opens its page by Community's path; BACK returns to the row (screenrow_test.c)
+#   clocktzlist  the Clock's time zone list: zones by region, knob and touch pick, drag scrolls, BACK; the
+#                Set Time Manually picker: knob editing, plus and minus, Set Time, BACK (clocktzlist_test.c)
 #   menuscroll   rows registered past the screen: fixed row height, the lists scroll (knob, drag, tap) with
 #                EP147's own scroll bar; icons clipped to the list; a mod's page keeps the offset (menuscroll_test.c)
+#   cmtouch      Community Mods home page by touch: a drag scrolls and never fires, a tap fires on release at the
+#                scrolled position, the knob scrolls with no focus, EP147's scroll bar while it overflows (cmtouch_test.c)
 #   drumroll     WAV formats + length cap, stick re-discovery, bank swap vs the audio thread,
 #                Beat Sync on a paused / empty / playing deck, the grid's sample rate measured
 #                from its tempo field and converted to the playhead base, its grid never read
@@ -135,6 +164,33 @@
 #   trackgen     a deck's generation moves on load and eject, before the publish (stem_playback.c)
 #   aztap        the audio tap ring: never waits, drops whole blocks and counts them, in order
 #                (guest/common/aztap.h)
+#   htgest       Hide Track Title toggles only on a whole one-finger tap (guest/azmod/ht_tap.h)
+#   fontsize     Remember Font Size: the Browse size is saved when set and applied to the
+#                registered FontManager only (guest/azmod/font_size.c)
+#   skey         Camelot Keys: row off = EP147's flag as asked; row on = every valid key id in
+#                Camelot, into the caller's own string; kill switch = no hook (streaming_key.c)
+#   hcanlz       a track's hot cues from its analysis file, and where they sit on a preview
+#                (guest/azmod/hc_anlz.h)
+#   smorder      the stem marks worker's order: the rows on screen first (stem_marks.c,
+#                preview_hotcues.c)
+#   blflip       the BEAT LOOP page flip is azmod's only on a deck with stems engaged; elsewhere
+#                the press reaches EP147, as stock (guest/azmod/bl_flip.h, bus_interpose.c)
+#   spinback     Extended Lead-In: the PlayerCore pre-roll is the cap (row on) or stock (off)
+#                before EP147's jog clamp runs; other values and other classes untouched
+#                (guest/azmod/spin_back.c)
+#   brem         EP147's PREVIEW button and sub column choice remembered across restarts, through
+#                its own setters; the header's layout left as EP147's (guest/azmod/browse_remember.c)
+#   htcover      Hide Track Title takes a press only when JUCE's hit test gives it to that deck's
+#                bar, never one on a popup over it (guest/azmod/ht_cover.h)
+#   cmbrowse     Community Mods > Browse: the category of a manifest value, the updated date, the
+#                every-word search and the three orders
+#                (guest/azmod/cm_browse.h)
+#   mm resume    the Mod Menu shows again when SOURCE comes back, as it was when SOURCE was left;
+#                SOURCE with the menu up or a real source picked forgets it (guest/azmod/mm_resume.h)
+#   glide        a scrolled list stays under the finger (no lag), flings on a moving lift, stops at
+#                the ends and on a finger, glides a knob step (guest/azmod/scroll_glide.h)
+#   inputmem     Channel Input Select Memory at start: the SETTINGS.DAT reader, and a channel left
+#                at DECK set to its saved input once, never the DJ's own choice (input_memory.h)
 #   sdk*         community mod services: audio_tap's deck channels and closed-stream guard; launch
 #                only the mod's own files, without LD_PRELOAD, its
 #                own pids only; handoff's guards; reload refused with a track loaded; the library
@@ -552,10 +608,53 @@ for v in real ctl-poly ctl-xorout ctl-init; do
 done
 suite "crc16_x25" "$d/real"
 
+# ---------------------------------------------------------------- clock_tz (the Clock readout's zone)
+# guest/azmod/clock_tz.h natively against the deck's zone files, and copies with one rule broken.
+d="$OUT/clocktz"
+for v in real ctl-edge ctl-rule ctl-order ctl-12h ctl-half; do mkdir -p "$d/$v"; done
+cp guest/azmod/clock_tz.h "$d/real/"
+mutate "$d/real/clock_tz.h" "$d/ctl-edge/clock_tz.h"  's/if \(z->at\[mid\] <= t\)/if (z->at[mid] < t)/'
+mutate "$d/real/clock_tz.h" "$d/ctl-rule/clock_tz.h"  's/    return i != n;\n/    return 0;\n/'
+mutate "$d/real/clock_tz.h" "$d/ctl-order/clock_tz.h" 's/ \|\| \(i > 0 && t <= z->at\[i - 1\]\)//'
+mutate "$d/real/clock_tz.h" "$d/ctl-12h/clock_tz.h"   's/tm.tm_hour % 12 \? tm.tm_hour % 12 : 12/tm.tm_hour % 12/'
+mutate "$d/real/clock_tz.h" "$d/ctl-half/clock_tz.h"  's/    if \(m\)\n        snprintf/    if (0)\n        snprintf/'
+for v in real ctl-edge ctl-rule ctl-order ctl-12h ctl-half; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/clocktz_test.c
+done
+suite "clock_tz" "$d/real/t" $T/fixtures/zoneinfo
+
+# the Clock in the place of EP147's status bar readout: guest/azmod/clock_native.h, and copies
+# with one rule broken
+d="$OUT/clocknative"
+for v in real ctl-rec ctl-unknown ctl-label ctl-origin; do mkdir -p "$d/$v"; done
+cp guest/azmod/clock_native.h "$d/real/"
+mutate "$d/real/clock_native.h" "$d/ctl-rec/clock_native.h"     's/return clock_on && label_ok && icon == 0;/return clock_on \&\& label_ok \&\& icon != -1;/'
+mutate "$d/real/clock_native.h" "$d/ctl-unknown/clock_native.h" 's/return clock_on && label_ok && icon == 0;/return clock_on \&\& label_ok \&\& icon < 1;/'
+mutate "$d/real/clock_native.h" "$d/ctl-label/clock_native.h"   's/return clock_on && label_ok && icon == 0;/return clock_on \&\& icon == 0;/'
+mutate "$d/real/clock_native.h" "$d/ctl-origin/clock_native.h"  's/    if \(x < 0 \|\| y < 0 \|\| w <= 0/    if (x <= 0 || y <= 0 || w <= 0/'
+for v in real ctl-rec ctl-unknown ctl-label ctl-origin; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/clocknative_test.c
+done
+suite "clock native" "$d/real/t"
+
+# Set Time Manually, the pure part: guest/azmod/clock_set.h (with clock_tz.h), and copies with one
+# rule broken
+d="$OUT/clockset"
+for v in real ctl-carry ctl-leap ctl-gap ctl-valid; do mkdir -p "$d/$v"; cp guest/azmod/clock_tz.h "$d/$v/"; done
+cp guest/azmod/clock_set.h "$d/real/"
+mutate "$d/real/clock_set.h" "$d/ctl-carry/clock_set.h" 's/int n = hi - lo \+ 1, r = \(f->v\[k\] - lo \+ d % n \+ n\) % n;/int n = hi - lo + 1, r = f->v[k] - lo + d; (void) n;/'
+mutate "$d/real/clock_set.h" "$d/ctl-leap/clock_set.h"  's/ \|\| y % 400 == 0;/;/'
+mutate "$d/real/clock_set.h" "$d/ctl-gap/clock_set.h"   's/\*t = l - \(o3 != o2 \? o3 : o2\);/*t = l - o2;/'
+mutate "$d/real/clock_set.h" "$d/ctl-valid/clock_set.h" 's/now >= marker - CS_SLACK\)/1)/'
+for v in real ctl-carry ctl-leap ctl-gap ctl-valid; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/clockset_test.c
+done
+suite "clock set" "$d/real/t" $T/fixtures/zoneinfo
+
 # ---------------------------------------------------------------- sdk drawing logic
 # guest/azmod/sdk_surface_logic.h natively, and against copies with one rule broken each.
 d="$OUT/sdkdraw"
-for v in real ctl-limit ctl-blend ctl-view ctl-long ctl-drop ctl-xwinsize ctl-blendwrap ctl-xwinowned; do mkdir -p "$d/$v"; done
+for v in real ctl-limit ctl-blend ctl-view ctl-long ctl-drop ctl-xwinsize ctl-blendwrap ctl-xwinowned ctl-draglong; do mkdir -p "$d/$v"; done
 cp guest/azmod/sdk_surface_logic.h "$d/real/"
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-limit/sdk_surface_logic.h" 's/if \(mine >= SDK_SURF_PER_MOD\)/if (mine > SDK_SURF_PER_MOD)/'
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-blend/sdk_surface_logic.h" 's/unsigned ia = 255u - a;/unsigned ia = 255u;/'
@@ -565,7 +664,8 @@ mutate "$d/real/sdk_surface_logic.h" "$d/ctl-drop/sdk_surface_logic.h" 's/__atom
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-xwinsize/sdk_surface_logic.h" 's/\*keep = r\.w <= 0 \|\| r\.h <= 0;/*keep = 0;/'
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-blendwrap/sdk_surface_logic.h" 's/long long x1 = X \+ w > fw \? fw - X : w, y1 = Y \+ h > fh \? fh - Y : h;/long long x1 = (int) (x + w) > fw ? fw - X : w, y1 = (int) (y + h) > fh ? fh - Y : h;/'
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-xwinowned/sdk_surface_logic.h" 's/    if \(!owned\)\n        return SDK_XW_NOTOWNED;[^\n]*\n//'
-for v in real ctl-limit ctl-blend ctl-view ctl-long ctl-drop ctl-xwinsize ctl-blendwrap ctl-xwinowned; do
+mutate "$d/real/sdk_surface_logic.h" "$d/ctl-draglong/sdk_surface_logic.h" 's/        p->long_sent = 1;\n\}/        (void) 0;\n}/'
+for v in real ctl-limit ctl-blend ctl-view ctl-long ctl-drop ctl-xwinsize ctl-blendwrap ctl-xwinowned ctl-draglong; do
     $CC "${CFLAGS[@]}" -fwrapv -pthread -I"$d/$v" -Iguest/azmod -I$T -o "$d/$v/t" $T/sdkdraw_test.c
 done
 suite "sdk drawing" "$d/real/t"
@@ -1020,6 +1120,140 @@ for v in real ctl-guess ctl-deck0 ctl-onekey; do
     $CC "${CFLAGS[@]}" -I$T -DWZ_INC="\"$d/$v.inc\"" -o "$d/$v" $T/wavezoom_test.c
 done
 suite "wave identity" "$d/real"
+# ---------------------------------------------------------------- stem waveform curve: toggles and Stem Volume
+# guest/azmod/wave_att.h natively, with build_atten (waveform.c) and ov_rebuild_attenuation
+# (mod_menu_overlay.c) extracted; each control breaks one rule (waveatt_test.c)
+d="$OUT/waveatt"
+for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do mkdir -p "$d/$v"; done
+{ region guest/azmod/waveform.c '^/\* Per track position, the fraction of the four stems' '^/\* Re-run EP147.s own "overview changed" path'
+  extract guest/azmod/mod_menu_overlay.c '^static void ov_rebuild_attenuation\('; } |
+    sed 's/_Atomic //' > "$d/real/watt.inc" # clang: __atomic_* on plain ints
+grep -q '^static int build_atten(int deck, const int gq' "$d/real/watt.inc" &&
+    grep -q '^static void ov_rebuild_attenuation(void)' "$d/real/watt.inc" ||
+    { echo "extraction of build_atten / ov_rebuild_attenuation failed"; exit 2; }
+cp guest/azmod/wave_att.h "$d/real/"
+for v in ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do
+    cp "$d/real/watt.inc" "$d/real/wave_att.h" "$d/$v/"
+done
+# control 1: gains ignored, the curve follows the pad toggles only (the behavior before)
+mutate "$d/real/watt.inc" "$d/ctl-nogain/watt.inc" 's/gq\[k\] = g_stem_gain_fn \? watt_gain_q\(g_stem_gain_fn\(d, k\)\) : WATT_GQ_ONE;/gq[k] = WATT_GQ_ONE;/'
+# control 2: a boosted stem pushes the factor above unity
+mutate "$d/real/wave_att.h" "$d/ctl-nocap/wave_att.h" 's/return \(unsigned short\) \(a > WATT_UNITY \? WATT_UNITY : a\);/return (unsigned short) a;/'
+# control 3: every gain change rebuilds at once
+mutate "$d/real/wave_att.h" "$d/ctl-norate/wave_att.h" 's/return now_ms - last_ms >= WATT_GAIN_MIN_MS;/return 1;/'
+# control 4: deck 1's gains used for every deck
+mutate "$d/real/watt.inc" "$d/ctl-deck0/watt.inc" 's/g_stem_gain_fn\(d, k\)/g_stem_gain_fn(0, k)/'
+# control 5: the coarse 1/64 gain step
+mutate "$d/real/wave_att.h" "$d/ctl-coarse/wave_att.h" 's/#define WATT_GQ_ONE 256 /#define WATT_GQ_ONE 64 /; s/#define WATT_GQ_MAX 512 /#define WATT_GQ_MAX 128 /'
+# control 6: the overview tiles refreshed on every gain rebuild (EP147 re-renders each one)
+mutate "$d/real/wave_att.h" "$d/ctl-ovevery/wave_att.h" 's/if \(built && keyed\) \{/if (built) {/'
+# control 7: one deck's change refreshes every deck's tiles
+mutate "$d/real/watt.inc" "$d/ctl-ovall/watt.inc" 's/__atomic_fetch_or\(&g_ov_refresh, 1 << d, /__atomic_fetch_or(&g_ov_refresh, (1 << AZMOD_STEM_DECKS) - 1, /'
+# control 8: the every-tick retry while the envelope is built publishes a curve each time
+mutate "$d/real/watt.inc" "$d/ctl-retry/watt.inc" 's/        if \(!had\)\n            return 0;[^\n]*\n//'
+for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do
+    $CC "${CFLAGS[@]}" -pthread -I"$d/$v" -I$T -DWATT_INC="\"$d/$v/watt.inc\"" -o "$d/$v/t" $T/waveatt_test.c
+done
+suite "wave att" "$d/real/t"
+# ---------------------------------------------------------------- folder copy: the FOLDER-view copy plan
+# guest/azmod/folder_copy.h natively on a fake file system (foldercopy_test.c)
+d="$OUT/foldercopy"
+for v in real ctl-dotdot ctl-junk ctl-overwrite ctl-merge ctl-depth ctl-room; do
+    mkdir -p "$d/$v"; cp guest/azmod/folder_copy.h "$d/$v/"
+done
+mutate guest/azmod/folder_copy.h "$d/ctl-dotdot/folder_copy.h" 's/ \|\| !strcmp\(nm, "\.\."\)\)/)/'
+mutate guest/azmod/folder_copy.h "$d/ctl-junk/folder_copy.h" 's/    if \(!strncmp\(nm, "\._", 2\)\)\n        return 1;\n//'
+mutate guest/azmod/folder_copy.h "$d/ctl-overwrite/folder_copy.h" 's/        if \(st == 0\) \{/        if (st == 0 || (!is_dir \&\& st == 1 \&\& have != size)) {/'
+mutate guest/azmod/folder_copy.h "$d/ctl-merge/folder_copy.h" 's/        if \(st == 0\) \{/        if (st == 0 || is_dir) {/'
+mutate guest/azmod/folder_copy.h "$d/ctl-depth/folder_copy.h" 's/if \(depth > FC_MAX_DEPTH\) \{/if (0) {/'
+mutate guest/azmod/folder_copy.h "$d/ctl-room/folder_copy.h" 's/    if \(p->n >= p->cap\) \{\n        p->err = FC_E_FULL;\n        return 1;\n    \}\n//'
+for v in real ctl-dotdot ctl-junk ctl-overwrite ctl-merge ctl-depth ctl-room; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/foldercopy_test.c
+done
+suite "folder copy" "$d/real/t"
+# fcopy_wiring: EP147's folder re-read is called only on an object whose vtable is checked, then
+# the cached lists are dropped; PASTE of copied files goes to fc_request; the FOLDER menu has no
+# UNDO; the library thread services the refresh and every mount cleans an interrupted copy.
+fcopy_wiring() { # $1 folder_copy.c $2 playlist_actions.c $3 menu_popup.c $4 playlist_editor.c
+    local body
+    body=$(extract "$1" '^static void fc_refresh_service\(')
+    grep -q 'fc_vt_is(dig, FC_DIGGER_VT))$' <<<"$body" && grep -q 'FC_DIGGER_REREAD' <<<"$body" &&
+        grep -q 'FC_DROP_FOLDER' <<<"$body" ||
+        { echo "FAIL  folder copy: the re-read is not guarded by the digger's vtable, or the list is not dropped"; return 1; }
+    extract "$2" '^static int pl_request_paste\(' | grep -q 'fc_request(g_clip.media' ||
+        { echo "FAIL  folder copy: PASTE does not route copied files to fc_request"; return 1; }
+    grep -q 'if (w && type != MP_TYPE_FOLDER) {' "$3" ||
+        { echo "FAIL  folder copy: the FOLDER menu shows UNDO"; return 1; }
+    extract "$4" '^static void mlserver_onmsg_hook\(' | grep -q 'fc_refresh_service(server);' &&
+        extract "$4" '^static void mm_note\(' | grep -q 'fc_mount_cleanup(mnt);' ||
+        { echo "FAIL  folder copy: the library thread or the mount does not call folder copy"; return 1; }
+}
+A="guest/azmod"
+echo "=== folder copy wiring ==="
+if ! plain_only "folder copy wiring"; then :
+elif fcopy_wiring $A/folder_copy.c $A/playlist_actions.c $A/menu_popup.c $A/playlist_editor.c; then
+    echo "PASS  folder copy: guarded re-read, PASTE route, no UNDO, refresh and cleanup wired"
+else failures=$((failures + 1)); fi
+mutate $A/folder_copy.c "$d/ctl-noguard.c" 's/ && dig && fc_vt_is\(dig, FC_DIGGER_VT\)\)\n/ \&\& dig)\n/'
+mutate $A/playlist_actions.c "$d/ctl-noroute.c" 's/        fc_request\(g_clip\.media, g_clip\.path,[^;]*;\n//'
+mutate $A/menu_popup.c "$d/ctl-undo.c" 's/if \(w && type != MP_TYPE_FOLDER\) \{/if (w) {/'
+mutate $A/playlist_editor.c "$d/ctl-norefresh.c" 's/\n    fc_refresh_service\(server\);[^\n]*//'
+# ---------------------------------------------------------------- Stem Volume vs PRO DJ LINK players 3/4
+# guest/azmod/link_members.h natively: the stand-down rule and the member set (two threads);
+# stemvol_wiring: ov_sync_stem_volume decides through stemvol_stand_down with the member set,
+# and install_static_hooks installs the member watch.
+d="$OUT/stemvol"
+for v in real ctl-nolink ctl-nowatch ctl-off1; do mkdir -p "$d/$v"; cp guest/azmod/link_members.h "$d/$v/"; done
+# control 1: link players ignored (the behavior before)
+mutate guest/azmod/link_members.h "$d/ctl-nolink/link_members.h" 's/return \(players & \(\(1ull << 3\) \| \(1ull << 4\)\)\) != 0;/return 0;/'
+# control 2: an uninstalled member watch read as "no players"
+mutate guest/azmod/link_members.h "$d/ctl-nowatch/link_members.h" 's/if \(!have_track_fn \|\| !watch_ok\)/if (!have_track_fn)/'
+# control 3: player numbers off by one (2 and 3)
+mutate guest/azmod/link_members.h "$d/ctl-off1/link_members.h" 's/\(1ull << 3\) \| \(1ull << 4\)/(1ull << 2) | (1ull << 3)/'
+for v in real ctl-nolink ctl-nowatch ctl-off1; do
+    $CC "${CFLAGS[@]}" -pthread -I"$d/$v" -I$T -o "$d/$v/t" $T/stemvol_test.c
+done
+suite "stem volume link" "$d/real/t"
+stemvol_wiring() { # $1 = mod_menu_overlay.c -> 0 when Stem Volume decides through the rule
+    local body
+    body=$(extract "$1" '^static void ov_sync_stem_volume\(')
+    grep -q 'stemvol_stand_down(' <<<"$body" && grep -q 'lm_players()' <<<"$body" && grep -q 'lm_watch_ok()' <<<"$body" ||
+        { echo "FAIL  stem volume link: ov_sync_stem_volume does not use stemvol_stand_down with the member set"; return 1; }
+    extract "$1" '^static void install_static_hooks\(' | grep -q 'install_link_members();' ||
+        { echo "FAIL  stem volume link: install_static_hooks does not install the member watch"; return 1; }
+}
+echo "=== stem volume link wiring ==="
+if ! plain_only "stem volume link wiring"; then :
+elif stemvol_wiring guest/azmod/mod_menu_overlay.c; then
+    echo "PASS  stem volume link: ov_sync_stem_volume uses the rule; the member watch is installed"
+else failures=$((failures + 1)); fi
+mutate guest/azmod/mod_menu_overlay.c "$d/ctl-oldrule.c" 's/int busy = stemvol_stand_down\(.*?lm_players\(\)\);/int busy = !g_deck_has_track_fn || g_deck_has_track_fn(2) || g_deck_has_track_fn(3);/s'
+mutate guest/azmod/mod_menu_overlay.c "$d/ctl-noinstall.c" 's/\n    install_link_members\(\);[^\n]*//'
+# ---------------------------------------------------------------- MENU panel: which first button is refused
+# guest/azmod/menu_popup_gate.h natively: only the PLAYLIST list refuses stock ALL DELETE; HISTORY keeps it.
+# mpgate_wiring: mp_click_hook refuses the first button only through mp_b1_refused(type).
+d="$OUT/mpgate"
+for v in real ctl-history; do mkdir -p "$d/$v"; cp guest/azmod/menu_popup_gate.h "$d/$v/"; done
+# control 1: HISTORY refused too (the behavior before)
+mutate guest/azmod/menu_popup_gate.h "$d/ctl-history/menu_popup_gate.h" 's/return type == 1;/return type == 0 || type == 1;/'
+for v in real ctl-history; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/mpgate_test.c
+done
+suite "menu first button" "$d/real/t"
+mpgate_wiring() { # $1 = menu_popup.c -> 0 when the first-button refusal goes through the gate
+    local body
+    body=$(extract "$1" '^static void mp_click_hook\(')
+    grep -q 'clicked == k1 && mp_b1_refused(type)' <<<"$body" ||
+        { echo "FAIL  menu first button: mp_click_hook refuses the first button without mp_b1_refused"; return 1; }
+    grep -q '^#include "menu_popup_gate.h"' "$1" ||
+        { echo "FAIL  menu first button: menu_popup.c does not include menu_popup_gate.h"; return 1; }
+}
+echo "=== menu first button wiring ==="
+if ! plain_only "menu first button wiring"; then :
+elif mpgate_wiring guest/azmod/menu_popup.c; then
+    echo "PASS  menu first button: mp_click_hook refuses through mp_b1_refused"
+else failures=$((failures + 1)); fi
+mutate guest/azmod/menu_popup.c "$d/ctl-nogate.c" 's/clicked == k1 && mp_b1_refused\(type\)/clicked == k1/'
 # ---------------------------------------------------------------- drum roll tile 8 (validated chain)
 d="$OUT/drumtile8"; mkdir -p "$d"
 extract guest/azmod/drum_roll_display.c '^static void drum8_index_apply\(void\) \{' > "$d/real.inc"
@@ -1032,6 +1266,21 @@ for v in real ctl-notilevt ctl-nocap ctl-nocompvt ctl-anydeck; do
     $CC "${CFLAGS[@]}" -I$T -DTILE_INC="\"$d/$v.inc\"" -o "$d/$v" $T/drumtile8_test.c
 done
 suite "drum tile 8" "$d/real"
+# ---------------------------------------------------------------- BEAT JUMP 2 First jog display
+d="$OUT/bjjog"; mkdir -p "$d"
+region guest/azmod/beat_jump.c '^/\* ---- Jog display ---- \*/' '^#### never' > "$d/real.inc"
+grep -q 'static void bj_joginfo_hook(long data' "$d/real.inc" && grep -q 'static uint8_t bj_jog_case(' "$d/real.inc" ||
+    { echo "extraction of bj_joginfo_hook failed"; exit 2; }
+mutate "$d/real.inc" "$d/ctl-noswap.inc" 's/if \(sw != c\) \{/if (0) {/'                         # the store sees EP147's page (the bug)
+mutate "$d/real.inc" "$d/ctl-casewrite.inc" 's/memcpy\(info, copy, BJ_JOG_CASE\)/memcpy(info, copy, sizeof copy)/'  # staging left swapped
+mutate "$d/real.inc" "$d/ctl-nocopyback.inc" 's/\n\s*memcpy\(info, copy, BJ_JOG_CASE\);[^\n]*//'  # what the store filled in is lost
+mutate "$d/real.inc" "$d/ctl-novt.inc" 's/ &&\s*v == BJ_PLAYERINFODATA_VT\)/)/'                   # the vtable not checked
+mutate "$d/real.inc" "$d/ctl-nostaging.inc" 's/\(uintptr_t\) info == \(uintptr_t\) data \+ BJ_JOG_STAGING &&//'  # any pointer taken as the staging area
+mutate "$d/real.inc" "$d/ctl-novariant.inc" 's/if \(variant != 1\)\n\s*return jcase;\n//'      # every layout variant swapped
+for v in real ctl-noswap ctl-casewrite ctl-nocopyback ctl-novt ctl-nostaging ctl-novariant; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -DBJ_INC="\"$d/$v.inc\"" -o "$d/$v" $T/bjjog_test.c
+done
+suite "beat jump jog" "$d/real"
 # ---------------------------------------------------------------- ls_tick (library spool)
 # ---------------------------------------------------------------- Mod Menu Remove asks first (cm_ask)
 d="$OUT/cmask"; mkdir -p "$d"
@@ -1214,13 +1463,13 @@ suite "spool apply" "$d/real" "$d/scratch-real"
 d="$OUT/cpspool"; mkdir -p "$d"
 extract_cp() {   # $1 = library_edits.c variant -> the spool builder and what it needs
     awk '/^enum \{$/ {e=1; buf=$0; next}
-         e==1 { buf=buf"\n"$0; if ($0 ~ /^    CPF_TITLE,$/) e=2; else if ($0 !~ /^    CPF_TITLE/) {e=0; buf=""}; if (e==2) {print buf; e=3}; next }
+         e==1 { buf=buf"\n"$0; if ($0 ~ /^    (CPF_TITLE|CPK_TRACK),$/) e=2; else {e=0; buf=""}; if (e==2) {print buf; e=3}; next }
          e==3 { print; if ($0 ~ /^};$/) e=0; next }
-         /^struct cp_trk \{/ {p=1}
+         /^struct cp_trk \{|^struct cp_node \{/ {p=1}
          /^static struct \{$/ {g=1; gb=""}
          g { gb=gb $0 "\n"; if ($0 ~ /^\} g_cp;$/) {printf "%s", gb; g=0} else if ($0 ~ /^\}/) g=0; next }
-         /^#define LS_ART_TAG / {print; next}
-         /^static void cp_lit\(|^static void cp_put\(|^static char \*cp_track_sql\(|^static int cp_build_spool\(/ {p=1}
+         /^#define LS_ART_TAG |^#define CP_NEW_PLID / {print; next}
+         /^static void cp_lit\(|^static void cp_put\(|^static char \*cp_track_sql\(|^static char \*cp_folder_sql\(|^static int cp_build_spool\(/ {p=1}
          p { print; if ($0 ~ /^\};?$/) p=0 }' "$1"
 }
 cp guest/azmod/library_edits.c "$d/real.c"
@@ -1235,6 +1484,27 @@ for v in real ctl-dedupe ctl-ctlbyte; do
     $CC "${CFLAGS[@]}" -I$T -DCP_INC="\"$d/$v.inc\"" -o "$d/$v" $T/cpspool_test.c -lsqlite3
 done
 suite "cross-stick spool" "$d/real"
+# a FOLDER onto the other stick (cpfolder_test.c), with the PASTE router's "onto itself" test
+cp guest/azmod/playlist_actions.c "$d/pa-real.c"
+# control: every row of the tree hung directly under the new folder (nesting lost)
+mutate "$d/real.c" "$d/ctl-flat.c" 's/, mark - nd->parent\);/, mark);/'
+# control: new ids from max + 1 alone (below the 16385 EP147's own playlists start at)
+mutate "$d/real.c" "$d/ctl-nofloor.c" 's/MAX\(16384,COALESCE\(MAX\(playlist_id\),0\)\)\+1/COALESCE(MAX(playlist_id),0)+1/'
+# control: only the new folder's own mark cleared (the rows inside keep negative image_ids)
+mutate "$d/real.c" "$d/ctl-onemark.c" 's/mark - \(g_cp\.nnode - 1\), mark\);/mark, mark);/'
+# control: the same id on the other stick taken as the copied row itself
+mutate "$d/pa-real.c" "$d/pa-ctl-selfany.c" 's/return same_stick && dest_row == clip_id;/return (void) same_stick, dest_row == clip_id;/'
+for v in real ctl-flat ctl-nofloor ctl-onemark selfany; do
+    src=$v; pa=real
+    [ "$v" = selfany ] && { src=real; pa=ctl-selfany; }
+    extract_cp "$d/$src.c" > "$d/fd-$v.inc"
+    extract "$d/pa-$pa.c" '^static int pl_paste_is_self\(' > "$d/fd-pa-$v.inc"
+    grep -q 'cp_folder_sql' "$d/fd-$v.inc" && grep -q 'struct cp_node' "$d/fd-$v.inc" && grep -q 'CPK_FOLDER' "$d/fd-$v.inc" \
+        && grep -q 'pl_paste_is_self' "$d/fd-pa-$v.inc" \
+        || { echo "extraction of the cross-stick folder copy failed ($v)"; exit 2; }
+    $CC "${CFLAGS[@]}" -I$T -DCP_INC="\"$d/fd-$v.inc\"" -DPASTE_INC="\"$d/fd-pa-$v.inc\"" -o "$d/fd-$v" $T/cpfolder_test.c -lsqlite3
+done
+suite "cross-stick folder copy" "$d/fd-real"
 # the pasted art for a track the target already has: the spool's art lines + ls_art_fix
 # control 1: the spool without its art lines (a reused row keeps the target's broken art)
 mutate "$d/real.c" "$d/ctl-noartline.c" 's/if \(img_dst\[0\] && !strpbrk\(t->f\[CPF_PATH\]/if (0 \&\& img_dst[0] \&\& !strpbrk(t->f[CPF_PATH]/'
@@ -1622,7 +1892,7 @@ suite "draw" "$d/real"
 
 # ---------------------------------------------------------------- community catalog (Mod Menu)
 d="$OUT/cmcat"; mkdir -p "$d"
-for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname; do menu_variant "$d/src-$v" screen_community.c; done
+for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab; do menu_variant "$d/src-$v" screen_community.c; done
 # control 1: the old caps (16 repositories, 64 mods, 96 controls)
 mutate guest/azmod/screen_community.c "$d/src-ctl-oldcaps/screen_community.c" 's/#define CM_NREPO 96/#define CM_NREPO 16/; s/#define CM_NCAT  128/#define CM_NCAT  64/; s/#define CM_MAXCTL 256/#define CM_MAXCTL 96/'
 # control 2: mod lines past the array dropped without counting them (the old behavior)
@@ -1635,9 +1905,15 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-listed/screen_community.c" 's/
 mutate guest/azmod/screen_community.c "$d/src-ctl-noheld/screen_community.c" 's/cm_cpy\(m->held, sizeof m->held, n >= 17 \? fl\[16\] : ""\);/cm_cpy(m->held, sizeof m->held, "");/; s/m->nalso = n >= 19 \? atoi\(fl\[18\]\) : 0;/m->nalso = 0;/'
 # control 6: an installed id named from any line with that id (the other author's too)
 mutate guest/azmod/screen_community.c "$d/src-ctl-anyname/screen_community.c" 's/ && g_cc\[i\]\.name\[0\] && !g_cc\[i\]\.held\[0\]\) return g_cc\[i\]\.name;/ \&\& g_cc[i].name[0]) return g_cc[i].name;/'
+# control 8: the trust note drawn on every tab, not the Installed tab alone
+mutate guest/azmod/screen_community.c "$d/src-ctl-noteall/screen_community.c" 's/if \(g_cm_view == CMV_HOME && g_cm_tab == 0 && draw\)/if (g_cm_view == CMV_HOME \&\& draw)/'
+# control 9: the breadcrumb never names the tab a page was opened from
+mutate guest/azmod/screen_community.c "$d/src-ctl-notab/screen_community.c" 's/for \(int with_tab = 1; with_tab >= 0; with_tab--\)/for (int with_tab = 0; with_tab >= 0; with_tab--)/'
+# control 7: field 20 (updated) never read: the Updated order has no dates
+mutate guest/azmod/screen_community.c "$d/src-ctl-noupd/screen_community.c" 's/cm_cpy\(m->upd, sizeof m->upd, n >= 20 && cmb_date_ok\(fl\[19\]\) \? fl\[19\] : ""\);/cm_cpy(m->upd, sizeof m->upd, "");/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -c -o "$d/stubs.o" guest/azmod/lanetest.c
-for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname; do
+for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab; do
     $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
         -o "$d/$v" $T/cmcat_test.c "$d/stubs.o"
 done
@@ -1646,7 +1922,7 @@ suite "catalog" "$d/real"
 # ---------------------------------------------------------------- an installed mod's page (Mod Menu)
 d="$OUT/cmmod"; mkdir -p "$d"
 for v in real ctl-loaded; do menu_variant "$d/src-$v" screen_community.c; done
-# control: the toggle and the reload check read "on" as "loaded" (a refused mod offered Turn on)
+# control: the toggle and the reload check read "on" as "loaded" (a refused mod offered Enable)
 mutate guest/azmod/screen_community.c "$d/src-ctl-loaded/screen_community.c" 's/return m->state == AZCM_LOADED \|\| m->state == AZCM_REFUSED \|\| m->state == AZCM_FAILED;/return m->state == AZCM_LOADED;/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -Dazcm_count=lanetest_azcm_count -Dazcm_info=lanetest_azcm_info -c -o "$d/stubs.o" guest/azmod/lanetest.c
@@ -1710,6 +1986,60 @@ for v in real ctl-shrink ctl-shrinkc ctl-footer ctl-offscreen ctl-dragtoggle; do
 done
 suite "menu scroll" "$d/real"
 
+# clocktzlist_test.c: the Clock's time zone list (screen_overlays.c AZ_CLOCK_TZ)
+d="$OUT/clocktzlist"; mkdir -p "$d"
+for v in real ctl-cycle ctl-noskip ctl-noshow ctl-dragpick ctl-headpick ctl-noscreen ctl-setnoreq ctl-noedit; do menu_variant "$d/src-$v" screen_overlays.c menu_input.c menu_full.c; done
+# control 1: the row does not open the list (the zone stays as it was)
+mutate guest/azmod/menu_input.c "$d/src-ctl-cycle/menu_input.c" 's/            clock_tz_open\(s, fb\);\n/            (void) fb;\n/'
+# control 2: the knob lands on headings too
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-noskip/screen_overlays.c" 's/            if \(row\[r\] >= 0\)\n                break;/            break;/'
+# control 3: the knob does not scroll the list, so the selection walks off the screen
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-noshow/screen_overlays.c" 's/        s->menu_sel = r;\n        tzl_show\(fb, r\);/        s->menu_sel = r;/'
+# control 4: a release after a drag still picks the zone under it
+mutate guest/azmod/menu_full.c "$d/src-ctl-dragpick/menu_full.c" 's/    if \(g_rdrag\.moved\) \{\n        g_mhit = "release:drag";/    if (0) {\n        g_mhit = "release:drag";/'
+# control 5: a heading picks (a region's index stored as a zone)
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-headpick/screen_overlays.c" 's/    if \(row < 0 \|\| row >= n \|\| rows\[row\] < 0\)\n        return; \/\* a heading or nothing: no zone \*\//    if (row < 0 || row >= n)\n        return;/'
+# control 6: the Clock row opens no screen of its own
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-noscreen/screen_overlays.c" 's/    return it == AZF_CLOCK \? AZ_CLOCK : it/    return it/'
+# control 7: Set Time hands nothing over
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-setnoreq/screen_overlays.c" 's/    __atomic_store_n\(&g_azmod_clock_set_req, t, __ATOMIC_RELEASE\);\n//'
+# control 8: the knob always moves between rows (no editing)
+mutate guest/azmod/screen_overlays.c "$d/src-ctl-noedit/screen_overlays.c" 's/        if \(g_cset_edit && s->menu_sel < CS_SET_ROWN\)/        if (0)/'
+for v in real ctl-cycle ctl-noskip ctl-noshow ctl-dragpick ctl-headpick ctl-noscreen ctl-setnoreq ctl-noedit; do
+    $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
+        -o "$d/$v" $T/clocktzlist_test.c "$OUT/menuscroll/stubs.o"
+done
+suite "clock zone list" "$d/real"
+
+# ---------------------------------------------------------------- Community Mods home page by touch
+# cmtouch_test.c: the home page's press is decided on its release (menu_full.c azmod_pane_drag), so a
+# drag scrolls it; the knob scrolls it with no focus; EP147's own scroll bar while it overflows.
+d="$OUT/cmtouch"; mkdir -p "$d"
+for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag; do menu_variant "$d/src-$v" screen_community.c menu_full.c; done
+# control 1: the home page is handled like the other pages again (knob focus, a press fires at once)
+mutate guest/azmod/screen_community.c "$d/src-ctl-knobfocus/screen_community.c" 's/    if \(g_cm_view == CMV_HOME\) \{\n        \/\* The home page works by touch/    if (0) {\n        \/* The home page works by touch/'
+# control 2: a drag on the page moves nothing
+mutate guest/azmod/menu_full.c "$d/src-ctl-noscroll/menu_full.c" 's/        cmoved = cm_home_scroll_to\(fb, g_rdrag\.s0 - dy, phase\);/        cmoved = false;/'
+# control 3: no scroll bar
+mutate guest/azmod/screen_community.c "$d/src-ctl-nobar/screen_community.c" 's/        if \(draw\) draw_vsb\(fb, bx \+ bw \+ pad, by, bh, content, bh, g_cm_scroll\);\n//'
+# control 4: a press on the header hits the page's control scrolled up under it
+mutate guest/azmod/screen_community.c "$d/src-ctl-header/screen_community.c" 's/    if \(ty < dock_y\(fb\) \+ menu_hdrh\(fb\) \|\| ty >= dock_y\(fb\) \+ dock_h\(fb\)\)\n        return -1;\n//'
+# control 5: the knob scrolls past the ends
+mutate guest/azmod/screen_community.c "$d/src-ctl-noclamp/screen_community.c" 's/\(float\) cm_scroll_clamp\(\(int\) \(from \+ 0\.5f\) \+ d \* c_rrowh\(fb\), g_cm_smax\)/(float) ((int) (from + 0.5f) + d * c_rrowh(fb))/; s/glide_step\(&g_cm_gl, cm_ms\(\), \(float\) g_cm_smax\);/glide_step(\&g_cm_gl, cm_ms(), 1e9f);/'
+# control 6: every home control counts as navigation (a slow press on an order button picks it)
+mutate guest/azmod/screen_community.c "$d/src-ctl-slow/screen_community.c" 's/    return k == CMC_TAB \|\| k == CMC_TILE \|\| k == CMC_MOD \|\| k == CMC_INSTCAT \|\| k == CMC_BACK;/    return k >= 0;/'
+# control 8: the glide forgets that it took over an offset set from outside, so it cancels every later drag
+mutate guest/azmod/screen_community.c "$d/src-ctl-staleglide/screen_community.c" 's/    g_cm_glpx = g_cm_scroll;\n}/}/'
+# control 9: a drag eases toward the finger instead of being at it (the page trails the finger)
+mutate guest/azmod/screen_community.c "$d/src-ctl-lag/screen_community.c" 's/    else glide_drag\(&g_cm_gl, \(float\) v, cm_ms\(\)\);/    else glide_to(\&g_cm_gl, (float) v, cm_ms());/'
+$CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
+    -c -o "$d/stubs.o" guest/azmod/lanetest.c
+for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag; do
+    $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
+        -o "$d/$v" $T/cmtouch_test.c "$d/stubs.o"
+done
+suite "community touch" "$d/real"
+
 # ---------------------------------------------------------------- community icons (PNG gate)
 d="$OUT/png"; mkdir -p "$d"
 awk '/^static uint32_t cmi_crc/ {p=1} p {print} p && /no IEND/ {q=1} q && /^}$/ {exit}' guest/azmod/community_icons.c > "$d/real.inc"
@@ -1744,6 +2074,45 @@ for v in real ctl-nocrc; do
     $CC "${CFLAGS[@]}" -I$T -DPNG_INC="\"$d/$v.inc\"" -o "$d/$v" $T/png_test.c
 done
 suite "png" "$d/real" "$d"
+
+# ---------------------------------------------------------------- jog stems (the jog display)
+# jog_stems_logic.h whole and the hook bodies of jog_display.c
+d="$OUT/jogstems"; mkdir -p "$d"
+cp guest/azmod/jog_stems_logic.h "$d/logic-real.h"
+region guest/azmod/jog_display.c '^#define JOG_PADINFO_FILL ' '^/\* Constructor phase' > "$d/hooks-real.inc"
+region guest/azmod/jog_display.c '^/\* Message thread \(rtick_hook\), diagnostics on' '^@@never@@' >> "$d/hooks-real.inc"
+grep -q 'jogstems_tick' "$d/hooks-real.inc" || { echo "extraction of the jog log tick failed"; exit 2; }
+grep -q 'jog_cue_slot_hook' "$d/hooks-real.inc" && grep -q 'jog_padinfo_hook' "$d/hooks-real.inc" &&
+    grep -q 'jog_cues_build' "$d/logic-real.h" || { echo "extraction of the jog display code failed"; exit 2; }
+# controls in the logic: the user's Pad Info Display setting ignored; Pad Info turned off (the
+# artwork page, which has no waveform preview); a stem that is off shown as set
+mutate "$d/logic-real.h" "$d/logic-ctl-nosetting.h" 's/if \(!\(word & JOG_ON\) \|\| \*d4 != 1\)/if (!(word \& JOG_ON))/'
+mutate "$d/logic-real.h" "$d/logic-ctl-artpage.h" 's/    \*d5 = 0;\n    return word;/    *(unsigned char *) d4 = 0;\n    *d5 = 0;\n    return word;/'
+mutate "$d/logic-real.h" "$d/logic-ctl-offset.h" 's/p < 4 \? \(int\) \(\(mask >> s\) & 1u\) : s == solo/p < 4 ? 1 : s == solo/'
+# controls in the hooks: EP147's own table not replaced inside the update; EP147's table not
+# sent back when stems stop; the queue's vtable not checked; a default deck in the record; the
+# deck left set after the collector's update
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-nosubst.inc" 's/        if \(active & JOG_ON\) \{\n            struct jog_cue cues/        if (0) {\n            struct jog_cue cues/'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-norestore.inc" 's/        g_orig_jog_pads\(view, \(const void \*\) \(self \+ JOG_CUE_TABLE\), hdr\);\n//'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-noviewvt.inc" 's/ \|\| \*\(const uintptr_t \*\) view != \(uintptr_t\) JOG_TIQ_VT\)/)/'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-deck0.inc" 's/unsigned d = \*\(const unsigned char \*\) \(pid \+ JOG_PID_DECK\);/unsigned d = 0;/'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-tlsleak.inc" 's/    g_orig_jog_cue_update\(self, changed, reset\);\n    t_jog_deck = -1;/    g_orig_jog_cue_update(self, changed, reset);/'
+# preview-strip controls: off stems drawn tall; EP147's strip not kept (restores a stale one);
+# no restore when stems stop; the deck of any queue taken as deck 2
+mutate "$d/logic-real.h" "$d/logic-ctl-stripoff.h" 's/c\.h = \(uint8_t\) \(on \? JOG_PREV_ON_H : JOG_PREV_OFF_H\);/c.h = (uint8_t) JOG_PREV_ON_H;/'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-stripkeep.inc" 's/    memcpy\(g_jp\[d\]\.ep, v->begin, sizeof\(struct jog_prev_col\) \* \(size_t\) n\);\n//'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-striprestore.inc" 's/            g_orig_jog_prev\(view, &v, g_jp\[d\]\.a, g_jp\[d\]\.b, g_jp\[d\]\.c\);\n//'
+mutate "$d/logic-real.h" "$d/logic-ctl-stripfull.h" 's/    return n > JOG_PREV_SENT \? JOG_PREV_SENT : n;/    return n;/'
+mutate "$d/hooks-real.inc" "$d/hooks-ctl-stripdeck.inc" 's/            d = i;\n/            d = i;\n    if (d < 0)\n        d = 1;\n/'
+mutate "$d/logic-real.h" "$d/logic-ctl-xferseq.h" 's/    if \(x->have_seq && m->seq == x->seq\)\n        return 0;\n//'
+for v in real ctl-nosetting ctl-artpage ctl-offset ctl-nosubst ctl-norestore ctl-noviewvt ctl-deck0 ctl-tlsleak ctl-xferseq ctl-stripoff ctl-stripkeep ctl-striprestore ctl-stripdeck ctl-stripfull; do
+    lg="$d/logic-real.h"; hk="$d/hooks-real.inc"
+    [ -f "$d/logic-$v.h" ] && lg="$d/logic-$v.h"
+    [ -f "$d/hooks-$v.inc" ] && hk="$d/hooks-$v.inc"
+    $CC "${CFLAGS[@]}" -pthread -I$T -DJOG_LOGIC_INC="\"$lg\"" -DJOG_HOOK_INC="\"$hk\"" \
+        -o "$d/$v" $T/jogstems_test.c
+done
+suite "jog stems" "$d/real"
 
 # ---------------------------------------------------------------- community icons (while decoding)
 # azcm_icon: a queued decode draws nothing, a refused or overdue one the placeholder, a decoded
@@ -2214,6 +2583,206 @@ for v in real ctl-overwrite ctl-nowant; do
 done
 suite "audio tap ring" "$d/real"
 
+# Hide Track Title's tap rule: only a whole one-finger tap toggles a title
+d="$OUT/htgest"; mkdir -p "$d"
+cp guest/azmod/ht_tap.h "$d/real.h"; cp guest/azmod/touch_seq.h "$d/"
+mutate "$d/real.h" "$d/ctl-press.h" 's/(        g->t = ms;\n)        return 0;/$1        *tx = x;\n        *ty = y;\n        return 1;/'
+mutate "$d/real.h" "$d/ctl-slop.h"  's/    if \(dx < -HT_TAP_SLOP \|\| dx > HT_TAP_SLOP \|\| dy < -HT_TAP_SLOP \|\| dy > HT_TAP_SLOP\)\n        return 0;\n//'
+mutate "$d/real.h" "$d/ctl-hold.h"  's/ \|\| ms - g->t > HT_TAP_MAX_MS//'
+mutate "$d/real.h" "$d/ctl-multi.h" 's/if \(g->moved \|\| g->multi \|\| /if (g->moved || /'
+mutate "$d/real.h" "$d/ctl-held.h"  's/g->multi = g->held != 0;/g->multi = 0;/'
+mutate "$d/real.h" "$d/ctl-repeat.h" 's/== TOUCH_MOVE\) \{/== -1) {/'
+for v in real ctl-press ctl-slop ctl-hold ctl-multi ctl-held ctl-repeat; do
+    $CC "${CFLAGS[@]}" -I$T -DHTTAP_HDR="\"$d/$v.h\"" -o "$d/$v" $T/htgest_test.c
+done
+suite "hide title tap" "$d/real"
+
+# Remember Font Size: what is saved, and which FontManager gets the saved size
+d="$OUT/fontsize"; mkdir -p "$d"
+cp guest/azmod/font_size.c "$d/real.c"
+mutate "$d/real.c" "$d/ctl-anyctor.c"   's/if \(!FS_REG_RET \|\| ret != FS_REG_RET\)/if (!FS_REG_RET)/'
+mutate "$d/real.c" "$d/ctl-badsize.c"   's/if \(size < 0 \|\| size >= FS_N \|\| !fs_on\(\)\)/if (!fs_on())/'
+mutate "$d/real.c" "$d/ctl-range.c"     's/return n >= 0 && n < FS_N \? n : -1;/return n;/'
+mutate "$d/real.c" "$d/ctl-rewrite.c"   's/if \(__atomic_exchange_n\(&g_fs_saved, size, __ATOMIC_ACQ_REL\) == size\)\n\s*return;/__atomic_store_n(\&g_fs_saved, size, __ATOMIC_RELEASE);/'
+mutate "$d/real.c" "$d/ctl-rowoff.c"    's/int v = fs_on\(\) \? fs_load_file\(\) : -1;/int v = fs_load_file();/'
+mutate "$d/real.c" "$d/ctl-anyfm.c"     's/own_q\(fm, &vt\) && vt == FS_VT \? fm : 0;/own_q(fm, \&vt) ? fm : 0;/'
+mutate "$d/real.c" "$d/ctl-anybar.c"    's/ \|\| !own_q\(\(uintptr_t\) bar, &vt\) \|\| vt != FS_BAR_VT\)/)/'
+for v in real ctl-anyctor ctl-badsize ctl-range ctl-rewrite ctl-rowoff ctl-anyfm ctl-anybar; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -DFS_SRC="\"$d/$v.c\"" -o "$d/$v" $T/fontsize_test.c
+done
+suite "remember font size" "$d/real"
+
+# Streaming keys in Camelot: the notation EP147's key text function is asked for
+d="$OUT/skey"; mkdir -p "$d"
+cp guest/azmod/streaming_key.c "$d/real.c"
+mutate "$d/real.c" "$d/ctl-noforce.c" 's/        return 1;\n    return flag & 0xff;/        return flag & 0xff;\n    return flag & 0xff;/'
+mutate "$d/real.c" "$d/ctl-range.c"   's/ && key && \*key >= 1 && \*key <= SK_IDS\)/ \&\& key)/'
+mutate "$d/real.c" "$d/ctl-x8.c"      's/ldr x8, \[sp, #80\]/add x8, sp, #16/'
+mutate "$d/real.c" "$d/ctl-nokill.c"  's/if \(access\(SK_OFF_PATH, F_OK\) == 0\)/if (0)/'
+mutate "$d/real.c" "$d/ctl-norow.c"   's/if \(az_value\(AZF_CAMELOT_KEYS\) && key && /if (key \&\& /'
+mutate "$d/real.c" "$d/ctl-retest.c"  's/__ATOMIC_ACQ_REL\) == row\)/__ATOMIC_ACQ_REL) != -1)/'
+for v in real ctl-noforce ctl-range ctl-x8 ctl-nokill ctl-norow ctl-retest; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -DSK_SRC="\"$d/$v.c\"" -o "$d/$v" $T/skey_test.c
+done
+suite "streaming key" "$d/real"
+
+# Preview Hot Cues: a track's hot cues from its analysis file
+d="$OUT/hcanlz"; mkdir -p "$d"
+cp guest/azmod/hc_anlz.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-nopco2.h"   's/    if \(have_co2\)\n        return nco2;\n//'
+mutate "$d/real.h" "$d/ctl-seclen.h"   's/if \(len < 12 \|\| len > n - o \|\| /if (len < 12 || /'
+mutate "$d/real.h" "$d/ctl-entrylen.h" 's/if \(en > end - e \|\| /if (/'
+mutate "$d/real.h" "$d/ctl-comment.h"  's/const uint8_t \*c = b \+ e \+ 0x2c \+ lc;/const uint8_t *c = b + e + 0x2c;/'
+mutate "$d/real.h" "$d/ctl-pastend.h"  's/if \(w <= 0 \|\| !len_ms \|\| ms >= len_ms\)/if (w <= 0 || !len_ms)/'
+mutate "$d/real.h" "$d/ctl-pickco2.h"  's/\(t\[3\] == .2. \|\| t\[3\] == .B.\)/t[3] == '"'"'B'"'"'/'
+for v in real ctl-nopco2 ctl-seclen ctl-entrylen ctl-comment ctl-pastend ctl-pickco2; do
+    $CC "${CFLAGS[@]}" -I$T -DHCANLZ_HDR="\"$d/$v.h\"" -o "$d/$v" $T/hcanlz_test.c
+done
+suite "hot cues from analysis files" "$d/real"
+
+# The stem marks worker's order: track rows' stems, then the hot cues of the rows on screen,
+# then playlist rows (stem_marks.c sm_pop / sm_serve_tracks / sm_work_one, preview_hotcues.c)
+d="$OUT/smorder"; mkdir -p "$d"
+{ extract guest/azmod/stem_marks.c '^static int sm_pop\(unsigned'
+  extract guest/azmod/stem_marks.c '^static void sm_serve_tracks\(.*\{$'
+  extract guest/azmod/stem_marks.c '^static int sm_work_one\(.*\{$'; } > "$d/sm.inc"
+{ extract guest/azmod/preview_hotcues.c '^static struct ph_ent \*ph_ent\(.*\{'
+  extract guest/azmod/preview_hotcues.c '^static int ph_get\(.*\{$'
+  extract guest/azmod/preview_hotcues.c '^static int ph_queued\(.*\{'
+  extract guest/azmod/preview_hotcues.c '^static int ph_serve_one\(.*\{$'; } > "$d/ph.inc"
+# each function's definition, once (a forward declaration must not start an extract)
+grep -q '^static int sm_pop(unsigned' "$d/sm.inc" || { echo "extraction of sm_pop failed"; exit 2; }
+for f in 'void sm_serve_tracks' 'int sm_work_one'; do
+    [ "$(grep -c "^static $f(.*{" "$d/sm.inc")" = 1 ] || { echo "extraction of $f failed"; exit 2; }
+done
+for f in 'struct ph_ent \*ph_ent' 'int ph_get' 'int ph_queued' 'int ph_serve_one'; do
+    [ "$(grep -c "^static $f(.*{" "$d/ph.inc")" = 1 ] || { echo "extraction of $f failed"; exit 2; }
+done
+mutate "$d/sm.inc" "$d/ctl-phlast.inc" 's/int got = g_smq_n && sm_pop\(&cid, &h, &media, title, sizeof title, 1\);/int got = g_smq_n \&\& sm_pop(\&cid, \&h, \&media, title, sizeof title, 0);/'
+mutate "$d/sm.inc" "$d/ctl-stepnohc.inc" 's/        if \(!ph_serve_one\(lg\)\)\n            return;/        return;/'
+mutate "$d/ph.inc" "$d/ctl-fifo.inc" 's/int k = g_phq_n - 1;\n(.*\n)*?        g_phq_n--;/int k = 0;\n        cid = g_phq[k].cid;\n        h = g_phq[k].h;\n        at = g_phq[k].at;\n        qn = g_phq_n;\n        sqn = g_smq_n;\n        snprintf(title, sizeof title, "%s", g_phq[k].title);\n        memmove(\&g_phq[0], \&g_phq[1], (size_t) (g_phq_n - 1) * sizeof g_phq[0]);\n        g_phq_n--;/'
+mutate "$d/ph.inc" "$d/ctl-noevict.inc" 's/if \(ask && g_phq_n == PH_Q\) \{/if (0) {/; s/    if \(ask\) \{/    if (ask \&\& g_phq_n < PH_Q) {/'
+$CC "${CFLAGS[@]}" -I$T -DSM_SRC="\"$d/sm.inc\"" -DPH_SRC="\"$d/ph.inc\"" -o "$d/real" $T/smorder_test.c -lpthread
+$CC "${CFLAGS[@]}" -I$T -DSM_SRC="\"$d/ctl-phlast.inc\"" -DPH_SRC="\"$d/ph.inc\"" -o "$d/ctl-phlast" $T/smorder_test.c -lpthread
+$CC "${CFLAGS[@]}" -I$T -DSM_SRC="\"$d/ctl-stepnohc.inc\"" -DPH_SRC="\"$d/ph.inc\"" -o "$d/ctl-stepnohc" $T/smorder_test.c -lpthread
+$CC "${CFLAGS[@]}" -I$T -DSM_SRC="\"$d/sm.inc\"" -DPH_SRC="\"$d/ctl-fifo.inc\"" -o "$d/ctl-fifo" $T/smorder_test.c -lpthread
+$CC "${CFLAGS[@]}" -I$T -DSM_SRC="\"$d/sm.inc\"" -DPH_SRC="\"$d/ctl-noevict.inc\"" -o "$d/ctl-noevict" $T/smorder_test.c -lpthread
+suite "stem marks worker order" "$d/real"
+
+# Extended Lead-In: which pre-roll the jog clamp sees, and on what
+d="$OUT/spinback"; mkdir -p "$d"
+cp guest/azmod/spin_back.c "$d/real.c"
+mutate "$d/real.c" "$d/ctl-anyvalue.c" 's/    if \(cur != SB_STOCK_MS && cur != SB_CAP_MS\)\n        return cur;\n//'
+mutate "$d/real.c" "$d/ctl-anycore.c"  's/ \|\| vt != SB_CORE_VT\)/)/'
+mutate "$d/real.c" "$d/ctl-after.c"    's/    sb_apply\(strategy\);\n(    g_o_sb_clamp\(strategy, a1, pos, readable, flag\);\n)/$1    sb_apply(strategy);\n/'
+mutate "$d/real.c" "$d/ctl-nooff.c"    's/return on \? SB_CAP_MS : SB_STOCK_MS;/return on ? SB_CAP_MS : cur;/'
+mutate "$d/real.c" "$d/ctl-noalign.c"  's/\(core & 7\) \|\| //'
+for v in real ctl-anyvalue ctl-anycore ctl-after ctl-nooff ctl-noalign; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -DSB_SRC="\"$d/$v.c\"" -o "$d/$v" $T/spinback_test.c
+done
+suite "extended lead-in" "$d/real"
+
+# The BEAT LOOP page flip: azmod's flip only on a deck with stems engaged (bl_flip.h)
+d="$OUT/blflip"; mkdir -p "$d"
+extract guest/azmod/bus_interpose.c '^static void erp_beat_loop_page\(' > "$d/real.inc"
+cp guest/azmod/bl_flip.h "$d/bl_flip.h"
+mutate "$d/real.inc" "$d/ctl-anydeck.inc" 's/__atomic_load_n\(&g_erp_active\[ld\], __ATOMIC_RELAXED\)/1/'
+mutate "$d/real.inc" "$d/ctl-sidedeck.inc" 's/&g_erp_active\[ld\]/&g_erp_active[d]/'
+mkdir -p "$d/anymode"; cp "$d/real.inc" "$d/anymode/real.inc"
+mutate guest/azmod/bl_flip.h "$d/anymode/bl_flip.h" 's/ && fresh_mode == 3 \+ 1;/ \&\& fresh_mode != 0;/'
+for v in real ctl-anydeck ctl-sidedeck; do
+    $CC "${CFLAGS[@]}" -I$T -I"$d" -DBLF_SRC="\"$d/$v.inc\"" -o "$d/$v" $T/blflip_test.c
+done
+$CC "${CFLAGS[@]}" -I$T -I"$d/anymode" -DBLF_SRC="\"$d/anymode/real.inc\"" -o "$d/ctl-anymode" $T/blflip_test.c
+suite "beat loop flip" "$d/real"
+
+# EP147's PREVIEW button and sub column choice remembered across restarts (browse_remember.c)
+d="$OUT/brem"; mkdir -p "$d"
+cp guest/azmod/browse_remember.c "$d/real.c"
+mutate "$d/real.c" "$d/ctl-early.c"   's/\} else if \(__atomic_load_n\(&g_sc_tries, __ATOMIC_ACQUIRE\) > 0\) \{/} else {/'
+mutate "$d/real.c" "$d/ctl-pvany.c"   's/if \(br_killed\(BR_PV_OFF, &g_pv_off\) \|\| !br_obj\(\(uintptr_t\) fb, BR_FB_VT\)\)/if (br_killed(BR_PV_OFF, \&g_pv_off))/'
+mutate "$d/real.c" "$d/ctl-compact.c" 's/return \(int\) \(m >> \(8 \* \(BR_HDR_MODE & 7\)\)\) == 0 \? h : 0;/return h;/'
+mutate "$d/real.c" "$d/ctl-scoff.c"   's/if \(!br_killed\(BR_SC_OFF, &g_sc_off\) && BR_FC_VT/if (BR_FC_VT/'
+for v in real ctl-early ctl-pvany ctl-compact ctl-scoff; do
+    $CC "${CFLAGS[@]}" -I$T -DBR_SRC="\"$d/$v.c\"" -o "$d/$v" $T/browse_remember_test.c
+done
+suite "browse remember" "$d/real"
+
+# Hide Track Title: a press counts for a deck's bar only when JUCE's hit test gives it to that
+# deck's widget, not to a popup drawn over it
+d="$OUT/htcover"; mkdir -p "$d"
+cp guest/azmod/ht_cover.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-any.h"    's/        if \(hit == owner\)\n            return 1;/        if (hit)\n            return 1;/'
+mutate "$d/real.h" "$d/ctl-direct.h" 's/i\+\+, hit = parent\(hit\)\)/i++, hit = 0)/'
+mutate "$d/real.h" "$d/ctl-every.h"  's/            m \|= 1u << d;/            m = (1u << HT_COVER_DECKS) - 1;/'
+for v in real ctl-any ctl-direct ctl-every; do
+    $CC "${CFLAGS[@]}" -I$T -DHTCOVER_HDR="\"$d/$v.h\"" -o "$d/$v" $T/htcover_test.c
+done
+suite "hide title cover" "$d/real"
+
+# Community Mods > Browse: which catalog mods show, and in what order (guest/azmod/cm_browse.h)
+d="$OUT/cmbrowse"; mkdir -p "$d"
+cp guest/azmod/cm_browse.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-unknown.h"   's/    return CMB_OTHER;\n\}/    return 0;\n}/'
+mutate "$d/real.h" "$d/ctl-date.h"      's/return mo >= 1 && mo <= 12 && d >= 1 && d <= 31;/return 1;/'
+mutate "$d/real.h" "$d/ctl-anyword.h"   's/            return 0;\n        q \+= n;/            return 0;\n        if (n)\n            return 1;\n        q += n;/'
+mutate "$d/real.h" "$d/ctl-case.h"      's/cmb_lower\(\(unsigned char\) s\[i\]\) == cmb_lower\(\(unsigned char\) w\[i\]\)/s[i] == w[i]/'
+mutate "$d/real.h" "$d/ctl-unstable.h"  's/\(c == 0 && out\[j - 1\] < i\)/(c == 0 \&\& 0)/'
+mutate "$d/real.h" "$d/ctl-undated.h"   's/            return da \? -1 : 1;/            return da ? 1 : -1;/'
+mutate "$d/real.h" "$d/ctl-usable.h"    's/if \(!a->usable != !b->usable\)/if (0)/'
+mutate "$d/real.h" "$d/ctl-installed.h" 's/if \(sort == CMB_SORT_INSTALLED && !a->installed != !b->installed\)/if (0)/'
+mutate "$d/real.h" "$d/ctl-digits.h"    's/if \(cmb_digit\(\*a\) && cmb_digit\(\*b\)\) \{/if (0) {/'
+for v in real ctl-unknown ctl-date ctl-anyword ctl-case ctl-unstable ctl-undated ctl-usable ctl-installed ctl-digits; do
+    $CC "${CFLAGS[@]}" -I$T -DCMBROWSE_HDR="\"$d/$v.h\"" -o "$d/$v" $T/cmbrowse_test.c
+done
+suite "community browse" "$d/real"
+
+# a scrolled list's motion: follow, fling, ends, catch, knob
+d="$OUT/glide"; mkdir -p "$d"
+cp guest/azmod/scroll_glide.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-nofollow.h"  's/    g->pos \+= \(g->goal - g->pos\) \* \(t \/ \(GLIDE_FOLLOW_MS \+ t\)\);/    g->pos = g->goal;/'
+mutate "$d/real.h" "$d/ctl-nofling.h"   's/        g->v = glide_clampf\(v, -GLIDE_MAX_V, GLIDE_MAX_V\);/        (void) v;/'
+mutate "$d/real.h" "$d/ctl-noend.h"     's/    if \(g->goal <= 0 \|\| g->goal >= max\) \{/    if (0) {/'
+mutate "$d/real.h" "$d/ctl-stillfling.h" 's/    float v = ms - g->sms <= GLIDE_WINDOW_MS \? g->sv : 0;/    float v = g->sv;/'
+mutate "$d/real.h" "$d/ctl-decay.h"     's/#define GLIDE_FLING_MS 200\.f/#define GLIDE_FLING_MS 325.f/'
+mutate "$d/real.h" "$d/ctl-floor.h"     's/\(dt > GLIDE_STEP_MIN_MS \? dt : GLIDE_STEP_MIN_MS\)/(dt > 0 ? dt : 1)/'
+mutate "$d/real.h" "$d/ctl-stop.h"      's/#define GLIDE_STOP_V 0\.06f/#define GLIDE_STOP_V 0.02f/'
+mutate "$d/real.h" "$d/ctl-nocatch.h"   's/(    g->goal = g->pos;\n)    g->v = 0;\n/$1/'
+mutate "$d/real.h" "$d/ctl-ease.h"      's/    g->pos = g->goal = y;\n/    g->goal = y;\n/'
+for v in real ctl-nofollow ctl-nofling ctl-noend ctl-stillfling ctl-nocatch ctl-ease ctl-decay ctl-floor ctl-stop; do
+    $CC "${CFLAGS[@]}" -I$T -DGLIDE_HDR="\"$d/$v.h\"" -o "$d/$v" $T/glide_test.c
+done
+suite "scroll glide" "$d/real"
+
+# Channel Input Select Memory at start: the SETTINGS.DAT reader and the per-channel decision
+d="$OUT/inputmem"; mkdir -p "$d"
+cp guest/azmod/input_memory.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-boundary.h" 's/        if \(i > 0 && b\[i - 1\] != 0\)\n            continue;\n//'
+mutate "$d/real.h" "$d/ctl-type.h"     's/e\[0\] != 0x01 \|\| e\[1\] != 5 \|\| e\[2\] != 0x01/e[0] != 0x01/'
+mutate "$d/real.h" "$d/ctl-settle.h"   's/return ms >= IM_SETTLE_MS \? IM_SELECT : IM_WAIT;/return IM_SELECT;/'
+mutate "$d/real.h" "$d/ctl-override.h" 's/ \|\| cur != IM_DECK \|\|/ ||/'
+mutate "$d/real.h" "$d/ctl-memory.h"   's/ \|\| s->memory != 1\)/)/'
+for v in real ctl-boundary ctl-type ctl-settle ctl-override ctl-memory; do
+    $CC "${CFLAGS[@]}" -I$T -DINPUTMEM_HDR="\"$d/$v.h\"" -o "$d/$v" $T/inputmem_test.c
+done
+suite "input memory" "$d/real"
+
+# the Mod Menu reopens when SOURCE comes back: remembered on a leave, kept on the way back,
+# forgotten by SOURCE with the menu up or a real source, taken once
+d="$OUT/mmresume"; mkdir -p "$d"
+cp guest/azmod/mm_resume.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-srcclears.h" 's/return mmr_level\(open, want, focused\) != MMR_NONE \? MMR_NONE : cur;/return MMR_NONE;/'
+mutate "$d/real.h" "$d/ctl-lower.h"     's/    return lvl > cur \? lvl : cur;/    return lvl;/'
+mutate "$d/real.h" "$d/ctl-nowant.h"    's/    if \(!open \|\| !want\)/    if (!open)/'
+mutate "$d/real.h" "$d/ctl-notake.h"    's/return __atomic_exchange_n\(lvl, MMR_NONE, __ATOMIC_RELAXED\);/return __atomic_load_n(lvl, __ATOMIC_RELAXED);/'
+# the page: an open that brings it back without a resume, and a close that forgets it
+mutate "$d/real.h" "$d/ctl-pagealways.h" 's/return __atomic_exchange_n\(armed, 0, __ATOMIC_ACQ_REL\) \? kept : MMR_PAGE_NONE;/return kept;/'
+mutate "$d/real.h" "$d/ctl-pagekeep.h"   's/return mode != MMR_PAGE_NONE \? mode : kept;/return mode;/'
+for v in real ctl-srcclears ctl-lower ctl-nowant ctl-notake ctl-pagealways ctl-pagekeep; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -DMMR_HDR="\"$d/$v.h\"" -o "$d/$v" $T/mmresume_test.c
+done
+suite "mm resume" "$d/real"
+
 d="$OUT/sdkaudio"; mkdir -p "$d"
 cp guest/azmod/sdk_audio.c "$d/real.c"
 mutate "$d/real.c" "$d/ctl-pair.c"    's/\(const int32_t \*\) buf \+ 2 \* d,/(const int32_t *) buf,/'
@@ -2551,6 +3120,7 @@ fz_revert pdbrows pdbsync pdb_sync.c 's/    if \(\(unsigned\) \(n \+ 15\) \/ 16 
 fz_revert pdbsrcstr pdbsync pdb_sync.c 's/            if \(\(loc & 0xffff\) \+ f \+ 3 > s\.pl\)\n                goto out;[^\n]*\n//'
 fz_revert pdbstr pdbsync pdb_sync.c 's/unsigned n = s\[0\] >> 1 \? \(s\[0\] >> 1\) - 1 : 0;\n        if \(n > avail - 1\)\n            n = avail - 1;/unsigned n = (s[0] >> 1) - 1;/'
 fz_revert elfalign elfcheck elfcheck.inc 's/ && off % align == 0;/;/'
+fz_revert datelen cmbrowse cm_browse.h 's/    if \(v\[10\]\)\n        return 0;\n//'
 fz_revert jsonu stemname stemname.inc 's/                if \(strnlen\(s \+ 1, 4\) < 4\)[^\n]*\n                    return 0;\n//'
 fz_prepare cmjson "$FZ/ctl-strat/src" || exit 2
 mutate "$FZ/ctl-strat/src/cmjson.inc" "$FZ/ctl-strat/cmjson.mut" 's/if \(k < n - 1\) out\[k\+\+\] = c;/if (k < n) out[k++] = c;/'
@@ -2616,6 +3186,19 @@ done
 control "crc16_x25: unreflected polynomial 0x1021"        "$OUT/crc/ctl-poly"
 control "crc16_x25: final xor dropped"                    "$OUT/crc/ctl-xorout"
 control "crc16_x25: init 0 instead of 0xFFFF"             "$OUT/crc/ctl-init"
+control "clock_tz: a transition applies one second late"    "$OUT/clocktz/ctl-edge/t" $T/fixtures/zoneinfo
+control "clock_tz: a DST footer rule read as no DST"       "$OUT/clocktz/ctl-rule/t" $T/fixtures/zoneinfo
+control "clock_tz: transition times not checked for order" "$OUT/clocktz/ctl-order/t" $T/fixtures/zoneinfo
+control "clock_tz: 12-hour noon and midnight shown as 0"   "$OUT/clocktz/ctl-12h/t" $T/fixtures/zoneinfo
+control "clock set: a field carries instead of wrapping"   "$OUT/clockset/ctl-carry/t" $T/fixtures/zoneinfo
+control "clock set: 2000 taken as a common year"           "$OUT/clockset/ctl-leap/t" $T/fixtures/zoneinfo
+control "clock set: a skipped local time lands an hour early" "$OUT/clockset/ctl-gap/t" $T/fixtures/zoneinfo
+control "clock set: a set time shown after a power-off reset" "$OUT/clockset/ctl-valid/t" $T/fixtures/zoneinfo
+control "clock_tz: half-hour offsets shown as whole hours"  "$OUT/clocktz/ctl-half/t" $T/fixtures/zoneinfo
+control "clock native: the Clock drawn while EP147 records"      "$OUT/clocknative/ctl-rec/t"
+control "clock native: an unreadable icon taken as not recording" "$OUT/clocknative/ctl-unknown/t"
+control "clock native: the Clock drawn without a checked label"  "$OUT/clocknative/ctl-label/t"
+control "clock native: a rect at the screen's edge dropped"      "$OUT/clocknative/ctl-origin/t"
 control "fd tracking: the old code (open-only tracking)"   "$FD_DIR/ctl-old"
 control "fd tracking: close does not forget"             "$FD_DIR/ctl-close"
 control "fd tracking: dup2 does not forget"              "$FD_DIR/ctl-dup2"
@@ -2625,6 +3208,20 @@ control "fd tracking: dup3 does not forget"              "$FD_DIR/ctl-dup3"
 control "fd tracking: open() does not forget a reused number" "$FD_DIR/ctl-note"
 control "fd tracking: open() tracks outside EP147"       "$FD_DIR/ctl-inert"
 control "png: CRC check removed"                          "$OUT/png/ctl-nocrc" "$OUT/png"
+control "jog stems: Pad Info Display Off overridden"        "$OUT/jogstems/ctl-nosetting"
+control "jog stems: Pad Info turned off (no waveform preview)" "$OUT/jogstems/ctl-artpage"
+control "jog stems: a stem that is off shown as set"          "$OUT/jogstems/ctl-offset"
+control "jog stems: EP147's own table not replaced"           "$OUT/jogstems/ctl-nosubst"
+control "jog stems: EP147's table not sent back"              "$OUT/jogstems/ctl-norestore"
+control "jog stems: the queue's vtable not checked"            "$OUT/jogstems/ctl-noviewvt"
+control "jog stems: a default deck instead of the record's"    "$OUT/jogstems/ctl-deck0"
+control "jog stems: the deck left set after the update"       "$OUT/jogstems/ctl-tlsleak"
+control "jog stems: timing counts a repeated frame twice"     "$OUT/jogstems/ctl-xferseq"
+control "jog stems: strip, an off stem drawn tall"           "$OUT/jogstems/ctl-stripoff"
+control "jog stems: strip, EP147's strip not kept"           "$OUT/jogstems/ctl-stripkeep"
+control "jog stems: strip, EP147's strip not put back"       "$OUT/jogstems/ctl-striprestore"
+control "jog stems: strip, an unknown queue taken as deck 2" "$OUT/jogstems/ctl-stripdeck"
+control "jog stems: strip, EP147's 1200 columns sent (145 pieces)" "$OUT/jogstems/ctl-stripfull"
 control "icon wait: a queued decode not pending (placeholder flash)" "$OUT/iconwait/ctl-nowait"
 control "icon wait: a decode that never finishes leaves the tile empty" "$OUT/iconwait/ctl-forever"
 control "draw: 32-bit clip, unclamped mod values"            "$OUT/draw/ctl"
@@ -2635,7 +3232,10 @@ control "catalog: the \"Showing the first\" note never drawn" "$OUT/cmcat/ctl-si
 control "catalog: every repository taken as listed"        "$OUT/cmcat/ctl-listed"
 control "catalog: the same-id fields never read"           "$OUT/cmcat/ctl-noheld"
 control "catalog: an installed id named from the other author's line" "$OUT/cmcat/ctl-anyname"
-control "installed mod page: \"on\" read as \"loaded\" (a refused mod offered Turn on)" "$OUT/cmmod/ctl-loaded"
+control "catalog: field 20 (updated) never read"            "$OUT/cmcat/ctl-noupd"
+control "catalog: the trust note on every tab"              "$OUT/cmcat/ctl-noteall"
+control "catalog: the breadcrumb without the tab"           "$OUT/cmcat/ctl-notab"
+control "installed mod page: \"on\" read as \"loaded\" (a refused mod offered Enable)" "$OUT/cmmod/ctl-loaded"
 control "screen row: the row keeps its old behavior (no page)" "$OUT/screenrow/ctl-flash"
 control "screen row: the row's own screen is ignored"          "$OUT/screenrow/ctl-ownscr"
 control "screen row: the preview band stays empty"             "$OUT/screenrow/ctl-band"
@@ -2644,6 +3244,22 @@ control "menu scroll: the old scale-down (the compact list's budget counts the m
 control "menu scroll: the compact list's last row ends under the version footer" "$OUT/menuscroll/ctl-footer"
 control "menu scroll: the knob does not scroll (the selection goes off-screen)" "$OUT/menuscroll/ctl-offscreen"
 control "menu scroll: a drag still fires the control under it" "$OUT/menuscroll/ctl-dragtoggle"
+control "community touch: the home page keeps knob focus and fires on the press" "$OUT/cmtouch/ctl-knobfocus"
+control "community touch: a drag does not scroll the page"   "$OUT/cmtouch/ctl-noscroll"
+control "community touch: no scroll bar"                     "$OUT/cmtouch/ctl-nobar"
+control "community touch: a drag eases behind the finger"   "$OUT/cmtouch/ctl-lag"
+control "clock zone list: the row does not open the list"    "$OUT/clocktzlist/ctl-cycle"
+control "clock zone list: the knob lands on headings"        "$OUT/clocktzlist/ctl-noskip"
+control "clock zone list: the knob does not scroll the list" "$OUT/clocktzlist/ctl-noshow"
+control "clock zone list: a drag picks the zone under it"    "$OUT/clocktzlist/ctl-dragpick"
+control "clock zone list: a heading is picked as a zone"     "$OUT/clocktzlist/ctl-headpick"
+control "clock zone list: the Clock row opens no screen"     "$OUT/clocktzlist/ctl-noscreen"
+control "clock zone list: Set Time hands nothing over"       "$OUT/clocktzlist/ctl-setnoreq"
+control "clock zone list: the time picker never edits"       "$OUT/clocktzlist/ctl-noedit"
+control "community touch: a press on the header hits a control scrolled under it" "$OUT/cmtouch/ctl-header"
+control "community touch: the knob scrolls past the ends"    "$OUT/cmtouch/ctl-noclamp"
+control "community touch: a slow press on an order button picks it" "$OUT/cmtouch/ctl-slow"
+control "community touch: a set offset leaves the glide stuck"      "$OUT/cmtouch/ctl-staleglide"
 control "stem_folder_rank: any 8-char suffix accepted"     "$OUT/stemrank/ctl-anyhex"
 control "stem_folder_rank: prefix match accepted"          "$OUT/stemrank/ctl-prefix"
 control "stem_folder_rank: case-sensitive"                 "$OUT/stemrank/ctl-case"
@@ -2715,11 +3331,43 @@ control "drum tile 8: the tile's vtable not checked"               "$OUT/drumtil
 control "drum tile 8: stem child not compared with the capture"    "$OUT/drumtile8/ctl-nocap"
 control "drum tile 8: the component's vtable not checked"          "$OUT/drumtile8/ctl-nocompvt"
 control "drum tile 8: an unknown deck falls back to deck 1"        "$OUT/drumtile8/ctl-anydeck"
+control "beat jump jog: the jog shows EP147's page (no swap)"     "$OUT/bjjog/ctl-noswap"
+control "beat jump jog: staging left swapped after the store"   "$OUT/bjjog/ctl-casewrite"
+control "beat jump jog: what the store filled in is lost"       "$OUT/bjjog/ctl-nocopyback"
+control "beat jump jog: PlayerInfoData vtable not checked"      "$OUT/bjjog/ctl-novt"
+control "beat jump jog: any pointer taken as the staging area"  "$OUT/bjjog/ctl-nostaging"
+control "beat jump jog: every layout variant swapped"           "$OUT/bjjog/ctl-novariant"
 control "deck identity: tiles claimed in order of arrival"        "$OUT/deckid/ctl-arrival"
 control "deck identity: an unknown container is deck 0"            "$OUT/deckid/ctl-default"
 control "wave identity: an unknown provider bound by its point count" "$OUT/wavezoom/ctl-guess"
 control "wave identity: an unknown deck taken as deck 0"           "$OUT/wavezoom/ctl-deck0"
 control "wave identity: one zoom model per color mode for all decks" "$OUT/wavezoom/ctl-onekey"
+control "wave att: Stem Volume gains ignored (toggles only)"       "$OUT/waveatt/ctl-nogain/t"
+control "wave att: a boosted stem above unity"                    "$OUT/waveatt/ctl-nocap/t"
+control "wave att: every gain change rebuilds at once"            "$OUT/waveatt/ctl-norate/t"
+control "wave att: deck 1's gains used for every deck"            "$OUT/waveatt/ctl-deck0/t"
+control "wave att: the coarse 1/64 gain step"                     "$OUT/waveatt/ctl-coarse/t"
+control "wave att: overview tiles refreshed on every gain rebuild" "$OUT/waveatt/ctl-ovevery/t"
+control "wave att: one deck's change refreshes every deck's tiles" "$OUT/waveatt/ctl-ovall/t"
+control "wave att: the envelope retry publishes a curve each tick" "$OUT/waveatt/ctl-retry/t"
+control "folder copy: \"..\" accepted as a name"                 "$OUT/foldercopy/ctl-dotdot/t"
+control "folder copy: AppleDouble ._ files copied"                "$OUT/foldercopy/ctl-junk/t"
+control "folder copy: a file of another size overwritten"         "$OUT/foldercopy/ctl-overwrite/t"
+control "folder copy: a taken folder merged into"                 "$OUT/foldercopy/ctl-merge/t"
+control "folder copy: no depth cap"                               "$OUT/foldercopy/ctl-depth/t"
+control "folder copy: no room check in the walk"                  "$OUT/foldercopy/ctl-room/t"
+F="guest/azmod"
+control "folder copy: the re-read without the vtable check" fcopy_wiring "$OUT/foldercopy/ctl-noguard.c" $F/playlist_actions.c $F/menu_popup.c $F/playlist_editor.c
+control "folder copy: PASTE not routed to the copy"         fcopy_wiring $F/folder_copy.c "$OUT/foldercopy/ctl-noroute.c" $F/menu_popup.c $F/playlist_editor.c
+control "folder copy: UNDO on the FOLDER menu"              fcopy_wiring $F/folder_copy.c $F/playlist_actions.c "$OUT/foldercopy/ctl-undo.c" $F/playlist_editor.c
+control "folder copy: the refresh never serviced"           fcopy_wiring $F/folder_copy.c $F/playlist_actions.c $F/menu_popup.c "$OUT/foldercopy/ctl-norefresh.c"
+control "stem volume link: link players 3/4 ignored (the old rule)"  "$OUT/stemvol/ctl-nolink/t"
+control "stem volume link: no member watch read as no players"       "$OUT/stemvol/ctl-nowatch/t"
+control "stem volume link: player numbers off by one"                "$OUT/stemvol/ctl-off1/t"
+control "stem volume link: ov_sync_stem_volume keeps the old rule"   stemvol_wiring "$OUT/stemvol/ctl-oldrule.c"
+control "stem volume link: the member watch not installed"           stemvol_wiring "$OUT/stemvol/ctl-noinstall.c"
+control "menu first button: HISTORY's ALL DELETE refused (the old gate)" "$OUT/mpgate/ctl-history/t"
+control "menu first button: mp_click_hook refuses without the gate"      mpgate_wiring "$OUT/mpgate/ctl-nogate.c"
 control "duplicate #define: a repeated definition is reported"    dupdefine_ctl
 control "cm_ask: a second press retargets the open question" "$OUT/cmask/ctl-retarget"
 control "cm_ask: the request is sent whatever the answer"   "$OUT/cmask/ctl-noyes"
@@ -2760,6 +3408,10 @@ control "spool apply: a 0x01 inside a line runs a statement pass 1 never saw" "$
 control "spool apply: a NUL byte accepted, the rest of the file dropped" "$OUT/lsapply/ctl-nul" "$OUT/lsapply/scratch-ctl-nul"
 control "cross-stick spool: a new list deduplicated (a repeated track dropped)" "$OUT/cpspool/ctl-dedupe"
 control "cross-stick spool: a control byte in a title copied into the spool" "$OUT/cpspool/ctl-ctlbyte"
+control "cross-stick folder copy: every row hung under the new folder" "$OUT/cpspool/fd-ctl-flat"
+control "cross-stick folder copy: new playlist ids below 16385" "$OUT/cpspool/fd-ctl-nofloor"
+control "cross-stick folder copy: the marks inside the copy left behind" "$OUT/cpspool/fd-ctl-onemark"
+control "paste router: the other stick's row with the same id taken as itself" "$OUT/cpspool/fd-selfany"
 control "cross-stick spool: no art lines (a reused track keeps the target's missing art)" "$OUT/cpspool/art-ctl-noartline"
 control "cross-stick spool: art that is on the target replaced" "$OUT/cpspool/art-ctl-artover"
 control "export.pdb sync: a failed copy handed to pdbs_sync as NULL" "$OUT/lspdbsync/ctl-nullrow"
@@ -2888,6 +3540,7 @@ control "sdk drawing: a 5th surface per mod allowed"              "$OUT/sdkdraw/
 control "sdk drawing: blend ignores the destination"            "$OUT/sdkdraw/ctl-blend/t"
 control "sdk drawing: search outranks the deck view"            "$OUT/sdkdraw/ctl-view/t"
 control "sdk drawing: LONG repeats for one press"               "$OUT/sdkdraw/ctl-long/t"
+control "sdk drawing: a drag still sends LONG"                  "$OUT/sdkdraw/ctl-draglong/t"
 control "sdk drawing: drops miscounted"                         "$OUT/sdkdraw/ctl-drop/t"
 control "sdk drawing: xwin_show forces a size it was not given"  "$OUT/sdkdraw/ctl-xwinsize/t"
 control "sdk drawing: blend clips in 32 bits (wraps near INT_MAX)" "$OUT/sdkdraw/ctl-blendwrap/t"
@@ -2899,6 +3552,79 @@ control "bright grid cfg: read only by the rates log (the old wiring)" brightcfg
 control "bright grid cfg: the rates log reads the file as well" brightcfg_wiring "$OUT/brightcfg/ctl-rates.c"
 control "audio tap: the producer overwrites unread frames"    "$OUT/aztap/ctl-overwrite"
 control "audio tap: stores while nobody listens"             "$OUT/aztap/ctl-nowant"
+control "hide title: toggles on the press"                     "$OUT/htgest/ctl-press"
+control "hide title: a drag counts as a tap"                   "$OUT/htgest/ctl-slop"
+control "hide title: a resting finger counts as a tap"         "$OUT/htgest/ctl-hold"
+control "hide title: a second finger is ignored"               "$OUT/htgest/ctl-multi"
+control "hide title: a finger already down is ignored"         "$OUT/htgest/ctl-held"
+control "hide title: a press at each step of a drag re-anchors it" "$OUT/htgest/ctl-repeat"
+control "font size: any FontManager gets the saved size"        "$OUT/fontsize/ctl-anyctor"
+control "font size: a refused size is saved"                     "$OUT/fontsize/ctl-badsize"
+control "font size: an out-of-range saved size is applied"        "$OUT/fontsize/ctl-range"
+control "font size: the same size is written again"               "$OUT/fontsize/ctl-rewrite"
+control "font size: applied with the kill switch"                "$OUT/fontsize/ctl-rowoff"
+control "font size: saved from a view whose FontManager is not one" "$OUT/fontsize/ctl-anyfm"
+control "font size: a selector moved on an object of another class" "$OUT/fontsize/ctl-anybar"
+control "streaming key: row on, a classic request is passed on as it is" "$OUT/skey/ctl-noforce"
+control "streaming key: an id past the table is asked for in Camelot" "$OUT/skey/ctl-range"
+control "streaming key: the string is not written in the caller's place" "$OUT/skey/ctl-x8"
+control "streaming key: installed with the kill switch"           "$OUT/skey/ctl-nokill"
+control "streaming key: Camelot with the row off"                 "$OUT/skey/ctl-norow"
+control "streaming key: no self-test after the row changes"       "$OUT/skey/ctl-retest"
+control "hot cues: the PCOB lists win over the colored PCO2 list"  "$OUT/hcanlz/ctl-nopco2"
+control "hot cues: a section longer than the file is read"        "$OUT/hcanlz/ctl-seclen"
+control "hot cues: an entry longer than its section is read"      "$OUT/hcanlz/ctl-entrylen"
+control "hot cues: the color is read before the comment"          "$OUT/hcanlz/ctl-comment"
+control "hot cues: a cue past the track's end is drawn"           "$OUT/hcanlz/ctl-pastend"
+control "hot cues: the cue-section reader skips the colored PCO2 list" "$OUT/hcanlz/ctl-pickco2"
+control "worker order: hot cues wait for every playlist row"       "$OUT/smorder/ctl-phlast"
+control "worker order: a playlist scan's step skips the hot cues"     "$OUT/smorder/ctl-stepnohc"
+control "worker order: the oldest hot cue request first"             "$OUT/smorder/ctl-fifo"
+control "worker order: a full hot cue queue drops the new row"        "$OUT/smorder/ctl-noevict"
+control "spin back: a pre-roll of any value is replaced"          "$OUT/spinback/ctl-anyvalue"
+control "spin back: a core of any class gets the cap"             "$OUT/spinback/ctl-anycore"
+control "spin back: the cap is set after the clamp ran"           "$OUT/spinback/ctl-after"
+control "spin back: row off never restores the stock 2 s"         "$OUT/spinback/ctl-nooff"
+control "spin back: a misaligned core is used"                    "$OUT/spinback/ctl-noalign"
+control "beat loop flip: a deck without stems flips azmod's page" "$OUT/blflip/ctl-anydeck"
+control "beat loop flip: the side's deck index read for the logical deck" "$OUT/blflip/ctl-sidedeck"
+control "beat loop flip: flips whatever EP147's mode"                 "$OUT/blflip/ctl-anymode"
+control "browse remember: the sub column taken as restored before an ask" "$OUT/brem/ctl-early"
+control "browse remember: PREVIEW saved from any object"                  "$OUT/brem/ctl-pvany"
+control "browse remember: a compact pane asks for the sub column"         "$OUT/brem/ctl-compact"
+control "browse remember: the sub column kill switch ignored"             "$OUT/brem/ctl-scoff"
+control "hide title: a press on a popup over the bar counts"    "$OUT/htcover/ctl-any"
+control "hide title: a press on the title's label does not count" "$OUT/htcover/ctl-direct"
+control "hide title: a press on one bar counts for every deck"  "$OUT/htcover/ctl-every"
+control "community browse: an unknown category taken as Visual"    "$OUT/cmbrowse/ctl-unknown"
+control "community browse: any digits taken as a date"             "$OUT/cmbrowse/ctl-date"
+control "community browse: one word of the search is enough"       "$OUT/cmbrowse/ctl-anyword"
+control "community browse: the search minds case"                  "$OUT/cmbrowse/ctl-case"
+control "community browse: ties not kept in catalog order"         "$OUT/cmbrowse/ctl-unstable"
+control "community browse: undated mods first"                     "$OUT/cmbrowse/ctl-undated"
+control "community browse: mods that cannot install here mixed in" "$OUT/cmbrowse/ctl-usable"
+control "community browse: Installed ignores installs"             "$OUT/cmbrowse/ctl-installed"
+control "community browse: numbers in names compared as text"      "$OUT/cmbrowse/ctl-digits"
+control "input memory: a name inside a longer name is matched" "$OUT/inputmem/ctl-boundary"
+control "input memory: a string entry read as an integer"     "$OUT/inputmem/ctl-type"
+control "input memory: applied before EP147's own apply"      "$OUT/inputmem/ctl-settle"
+control "input memory: the DJ's own choice is overridden"     "$OUT/inputmem/ctl-override"
+control "input memory: applied with Memory off"               "$OUT/inputmem/ctl-memory"
+control "scroll glide: a knob step jumps to the row"             "$OUT/glide/ctl-nofollow"
+control "scroll glide: a drag eases toward the finger (lags it)"   "$OUT/glide/ctl-ease"
+control "scroll glide: a fling slows slower than EP147's"         "$OUT/glide/ctl-decay"
+control "scroll glide: a step's speed without EP147's 5 ms floor" "$OUT/glide/ctl-floor"
+control "scroll glide: a fling runs on below EP147's stop speed"  "$OUT/glide/ctl-stop"
+control "scroll glide: a moving lift does not fling"               "$OUT/glide/ctl-nofling"
+control "scroll glide: a fling runs past the end"                  "$OUT/glide/ctl-noend"
+control "scroll glide: a finger that stopped still flings"         "$OUT/glide/ctl-stillfling"
+control "scroll glide: a finger does not catch a fling"            "$OUT/glide/ctl-nocatch"
+control "mm resume: SOURCE from another view forgets the menu"  "$OUT/mmresume/ctl-srcclears"
+control "mm resume: a weaker sample lowers the level"          "$OUT/mmresume/ctl-lower"
+control "mm resume: a real source picked still reopens"        "$OUT/mmresume/ctl-nowant"
+control "mm resume: SOURCE shown leaves the level for later"   "$OUT/mmresume/ctl-notake"
+control "mm resume: every open brings the old page back"      "$OUT/mmresume/ctl-pagealways"
+control "mm resume: a close of the closed menu forgets the page" "$OUT/mmresume/ctl-pagekeep"
 control "sdk audio_tap: every deck reads deck 1's channels"  "$OUT/sdkaudio/ctl-pair"
 control "sdk audio_tap: a closed stream's address still read" "$OUT/sdkaudio/ctl-noclose"
 control "sdk library: the connection opens read-write"       "$OUT/sdklib/ctl-rw"
@@ -2959,6 +3685,7 @@ control "fuzz replay: ps_rows takes any slot count (pdb_sync.c)" "$FZ/rev-pdbrow
 control "fuzz replay: a source string offset past its page (pdb_sync.c)" "$FZ/rev-pdbsrcstr/replay" tools/fuzz/corpus/pdbsync
 control "fuzz replay: ps_str trusts a short string's length (pdb_sync.c)" "$FZ/rev-pdbstr/replay" tools/fuzz/corpus/pdbsync
 control "fuzz replay: cm_elf_check reads misaligned section headers (community.c)" "$FZ/rev-elfalign/replay" tools/fuzz/corpus/elfcheck
+control "fuzz replay: cmb_date_ok takes a date with more after it (cm_browse.h)" "$FZ/rev-datelen/replay" tools/fuzz/corpus/cmbrowse
 control "fuzz replay: json_str copies a \\u escape past the end (stem_playback.c)" "$FZ/rev-jsonu/replay" tools/fuzz/corpus/stemname
 [ "$FZ_LIB" = 0 ] || control "fuzz: the planted off-by-one found from a harmless seed (120 s cap)" fz_planted_found
 echo

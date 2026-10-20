@@ -109,6 +109,7 @@ to the settings partition.
 | `stems_display.c` | Native stem pad grid, tile art and per-deck source-cell strips |
 | `waveform.c` | Stem-scaled native waveforms and overviews; the 60 FPS options |
 | `brightgrid.h` | Bright Grid's pixel rule for the beat ruler: brighten the ticks, never the background (used by `waveform.c`) |
+| `wave_att.h` | The stem waveform height rule: each stem's share at its pad toggle and Stem Volume gain, capped at unity, and when a deck's curve is rebuilt (used by `waveform.c` and `mod_menu_overlay.c`) |
 | `drum_roll_display.c` | Drum roll pad and x-pad state, pad tiles, caption, Beat FX rate row |
 | `beat_fx_panel.c` | Beat FX panel hooks; the X-PAD parameter row that follows the drum roll finger zone |
 | `beat_jump.c` | "Beat Jump 2 First": swaps the jump sizes of the two BEAT JUMP pad pages |
@@ -128,6 +129,7 @@ to the settings partition.
 | `track_list_rows.c` | TrackID-to-path table, touch-scroll row cache, shared paint slots |
 | `touch_accum.c` | Lets slow touch drags scroll (opt-in, `azmod-touchaccum.on`) |
 | `bluetooth.c` | Bluetooth auto-connect, remembered CH3/CH4 input, UART speed recovery |
+| `browse_remember.c` | The Browse PREVIEW button and the track list header's sub column choice remembered across restarts |
 | `crash_guards.c` | Guard for a stock QR-login fault; async-signal-safe crash reporter, run on an alternate signal stack |
 | `updates.c` | Update Mods screen: version, status and changelog readers, request writer |
 | `savelogs.c` | System Info's Save Logs to USB: request writer and status reader |
@@ -228,7 +230,7 @@ and the unit tests compare each release library's exported symbols against a fix
 | sqlite3 interposers (`onelibrary_key_emulator.c`) | `sqlite3_key`, `sqlite3_open_v2`, `sqlite3_exec`, `sqlite3_prepare_v2` |
 | Hook thunks | entry points EP147 jumps to, written in top-level assembly with `.globl`: `azm_*` in `waveform.c` (`azm_rw_shim`, `azm_upd_shim`, `azm_wp6_*`, `azm_fast6_*`, `azm_call_sret`) and `stems_display.c` (`azm_forge_*`); and the C functions those thunks call by name (`azm_wp_scale`, `azm_upd_enter` / `azm_upd_exit`, `azm_rw_enter` / `azm_rw_exit`, `azm_fast_*`). Symbols that assembly needs but must not export are hidden, with `.hidden` in the assembly (`menu_popup.c`) or `__attribute__((visibility("hidden")))` (`day_mode.c`, `stems_display.c`) |
 | The `azmod_*` interface | declared in `menu.h`, between `azmod.c`, `menu.c` and `text.c`. `menu.c` reads and writes a few files (the theme, the Community Mods catalog, status and request files) but has no dependency on EP147, so it builds and runs on a host (`test/lanetest.c`); `text.c` is separate so FreeType stays out of it. One `azmod_*` symbol is not in `menu.h`: `azmod_trackid_path` (`track_list_rows.c`), which azstem resolves at run time |
-| The `azstem_*` interface | resolved by azmod with `dlsym` at run time: drum roll control (`azstem_drum_*`), stem availability (`azstem_has_stems`, `azstem_present`, `azstem_deck_has_track`, `azstem_decks_loaded`), track generation (`azstem_trackgen`), the loaded track's name (`azstem_deck_track_name`), the decoded data behind the mini waveforms (`azstem_wave`, `azstem_frames`, `azstem_env_gen`, `azstem_env_final`), stem EQ (`azstem_stem_eq`), and for the community mod services `azstem_deck_snapshot`, `azstem_deck_beat_phase` and `azstem_play_obs`. azmod treats each pointer as absent until azstem is loaded |
+| The `azstem_*` interface | resolved by azmod with `dlsym` at run time: drum roll control (`azstem_drum_*`), stem availability (`azstem_has_stems`, `azstem_present`, `azstem_deck_has_track`, `azstem_decks_loaded`), track generation (`azstem_trackgen`), the loaded track's name (`azstem_deck_track_name`), the decoded data behind the mini waveforms (`azstem_wave`, `azstem_frames`, `azstem_env_gen`, `azstem_env_final`), stem EQ (`azstem_stem_eq`, and `azstem_stem_gain`, which the stem waveforms scale by), and for the community mod services `azstem_deck_snapshot`, `azstem_deck_beat_phase` and `azstem_play_obs`. azmod treats each pointer as absent until azstem is loaded |
 
 The vendored decoder is the one file compiled on its own (`stb_vorbis.c`, built with
 `-fvisibility=hidden`), so its functions link into azstem without being exported.

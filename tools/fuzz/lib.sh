@@ -26,7 +26,13 @@
 #   pdbsync   a destination and a source export.pdb (guest/azmod/pdb_sync.c)
 #   elfcheck  a community mod's .so before approval (guest/azmod/community.c cm_elf_check)
 #   mp4       MP3 / M4A source tracks: ID3 + Info/Xing, the MP4 box walk (guest/azstem/ofsload.c)
-FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname sdklib pdbsync elfcheck mp4"
+#   hcanlz    a track's analysis file, for its hot cues (guest/azmod/hc_anlz.h)
+#   clocktz   a time zone file for the Clock readout (guest/azmod/clock_tz.h)
+#   inputmem  the deck's settings file, for Channel Input Select Memory (guest/azmod/input_memory.h)
+#   cmbrowse  Community Mods > Browse: a mod's category and updated values, the search and the
+#             orders over them (guest/azmod/cm_browse.h)
+#   fcopy     folder and file names from a stick, for the FOLDER-view copy plan (folder_copy.h)
+FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname sdklib pdbsync elfcheck mp4 hcanlz clocktz cmbrowse inputmem fcopy"
 FZ_T=tools/fuzz
 FZ_UT=tools/unit-tests
 
@@ -62,6 +68,16 @@ fz_prepare() {
         grep -q 'static int cmi_png_ok' "$dir/png.inc" && grep -q 'no IEND' "$dir/png.inc" ;;
     pdbsync)
         cp guest/azmod/pdb_sync.c "$dir/" ;;
+    clocktz)
+        cp guest/azmod/clock_tz.h "$dir/" ;;
+    inputmem)
+        cp guest/azmod/input_memory.h "$dir/" ;;
+    fcopy)
+        cp guest/azmod/folder_copy.h "$dir/"
+        grep -q 'static inline int fc_plan_make' "$dir/folder_copy.h" ;;
+    cmbrowse)
+        cp guest/azmod/cm_browse.h "$dir/"
+        grep -q 'static inline int cmb_view' "$dir/cm_browse.h" ;;
     elfcheck)
         awk '/^static const char \*const CM_FORBIDDEN\[\]/ {p=1} p {print} p && /^static int cm_elf_check\(/ {q=1} q && /^}$/ {exit}' guest/azmod/community.c > "$dir/elfcheck.inc"
         cp guest/common/azsha256.h "$dir/"
@@ -88,6 +104,9 @@ fz_prepare() {
     sdklib)
         cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
         grep -q '^static void sdk_copy_col' "$dir/sdk_lib.c" ;;
+    hcanlz)
+        cp guest/azmod/hc_anlz.h "$dir/"
+        grep -q 'static inline int hc_anlz_hot_cues' "$dir/hc_anlz.h" ;;
     mp4)
         awk '/^static long ofs_stems_decoded\(/ {exit} {print}' guest/azstem/ofsload.c > "$dir/mp4.inc"
         cp guest/azstem/ep147rate.h "$dir/"
@@ -107,6 +126,10 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
                      -Wno-unused-parameter $FZ_T/bus_fuzz.c) ;;
     png)    FZ_ARGS=(-DPNG_INC="\"$dir/png.inc\"" $FZ_T/png_fuzz.c) ;;
     pdbsync) FZ_ARGS=(-I"$dir" $FZ_T/pdbsync_fuzz.c) ;;
+    clocktz) FZ_ARGS=(-I"$dir" $FZ_T/clocktz_fuzz.c) ;;
+    inputmem) FZ_ARGS=(-I"$dir" $FZ_T/inputmem_fuzz.c) ;;
+    fcopy) FZ_ARGS=(-I"$dir" $FZ_T/fcopy_fuzz.c) ;;
+    cmbrowse) FZ_ARGS=(-I"$dir" $FZ_T/cmbrowse_fuzz.c) ;;
     elfcheck) FZ_ARGS=(-I"$dir" -DELFCHECK_INC="\"$dir/elfcheck.inc\"" $FZ_T/elfcheck_fuzz.c) ;;
     stemname) FZ_ARGS=(-DSTEMNAME_INC="\"$dir/stemname.inc\"" $FZ_T/stemname_fuzz.c) ;;
     drumwav) FZ_ARGS=(-I"$dir" -DDRUMWAV_INC="\"$dir/drumwav.inc\"" $FZ_T/drumwav_fuzz.c) ;;
@@ -117,6 +140,7 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
                          -Dazmod_ttf_menu2=lanetest_ttf_menu2) ;;
     sdklib) FZ_ARGS=(-I"$dir" -DLIB_INC="\"$dir/sdk_lib.c\"" $FZ_T/sdklib_fuzz.c -lsqlite3 -ldl) ;;
     mp4)    FZ_ARGS=(-I"$dir" -DMP4_INC="\"$dir/mp4.inc\"" $FZ_T/mp4_fuzz.c -ldl) ;;
+    hcanlz) FZ_ARGS=(-DHCANLZ_HDR="\"$dir/hc_anlz.h\"" $FZ_T/hcanlz_fuzz.c) ;;
     cmjson) FZ_ARGS=(-I"$dir" -DCMJSON_INC="\"$dir/cmjson.inc\"" $FZ_T/cmjson_fuzz.c) ;;
     esac
 }

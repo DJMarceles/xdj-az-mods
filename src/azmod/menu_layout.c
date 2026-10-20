@@ -99,7 +99,7 @@ static void draw_menu_header(const azmod_fb *fb, int rowh, int scale, const char
     if (g_full) { /* full-screen menu: the right pane's header names the screen */
         fill_rect(fb, hx, hy, hw, hh, C_HEADER_BG);
         int tx = hx + fb->w / 40;
-        if (g_full_mode == AZ_COLOR_PICK) { /* one level deeper: BACK to Pad Colors */
+        if (g_full_mode == AZ_COLOR_PICK || g_full_mode == AZ_CLOCK_TZ || g_full_mode == AZ_CLOCK_SET) { /* one level deeper: BACK */
             int bx, by, bw, bh;
             back_rect(fb, &bx, &by, &bw, &bh);
             draw_rect_outline(fb, bx, by, bw, bh, 2, C_CHECK_BOX);

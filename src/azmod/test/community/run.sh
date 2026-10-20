@@ -369,7 +369,7 @@ ok "core crash blames no mod"      '! [ -e $W/root/azmod-community/.blame ]'
 reset; mod good-any; manifest good-any '["any"]' false; mod was-on; manifest was-on '["any"]' false
 touch $W/root/az-usbload/community/was-on/was-on.off; mod stray; manifest stray '["any"]' false; enable good-any
 $W/harness init > $W/out
-ok "disabled mod listed as off"     '[ "$(st was-on)" = 2 ] && rs was-on | grep -q "Turned off"'
+ok "disabled mod listed as off"     '[ "$(st was-on)" = 2 ] && rs was-on | grep -q "Disabled"'
 ok "disabled mod shows its azmod.json name, not its id (read at listing; same fact as below)" 'grep -q "^MOD was-on .*name=Test was-on|" $W/out'
 ok "disabled mod keeps its real name" 'grep -q "^NAME was-on Test was-on" $W/out'
 ok "control beside it loads"        '[ "$(st good-any)" = 1 ]'

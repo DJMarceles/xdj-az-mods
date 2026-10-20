@@ -138,10 +138,10 @@ static bool input_pad_colors(azmod_state *s, const azmod_fb *fb, int touch_x, in
     return true; /* consume everything while the screen is up */
 }
 
-/* Overlays: row 0 is the master, the rest are the readouts. */
+/* Overlays or the Clock: row 0 is the switch, the rest are the rows under it. */
 static bool input_overlays(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, bool touched, int enc_delta,
                            bool enc_click) {
-    int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(ovr);
+    int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(sub_head(s->mode), ovr);
     if (enc_delta) {
         s->menu_sel += (enc_delta > 0 ? 1 : -1);
         if (s->menu_sel < 0)
@@ -163,9 +163,18 @@ static bool input_overlays(azmod_state *s, const azmod_fb *fb, int touch_x, int 
     }
     if ((enc_click || hit) && s->menu_sel >= 0 && s->menu_sel < OVERLAYS_ROWS) {
         /* Every row toggles, the readouts included while the master is off:
-         * like Pad Colors, pick them first, then switch them on together. */
+         * like Pad Colors, pick them first, then switch them on together. A choice steps to
+         * its next value. */
         int m = ovr[s->menu_sel];
-        az_toggle(m);
+        if (m == C_TZ_ROW) { /* the time zone: its list */
+            clock_tz_open(s, fb);
+            return true;
+        }
+        if (m == C_SET_ROW) { /* the time: its picker */
+            clock_set_open(s);
+            return true;
+        }
+        az_toggle(m); /* a choice steps to its next value */
         s->config_dirty = true;
         s->last_action = m;
         s->pressed_item = s->menu_sel;
@@ -274,8 +283,8 @@ static bool input_main_list(azmod_state *s, const azmod_fb *fb, int touch_x, int
     }
     bool activate = enc_click || hit; /* a miss-tap navigates nothing, activates nothing */
     if (activate) {
-        if (s->menu_sel == AZF_OVERLAYS) { /* a sub-screen, like Pad Colors */
-            s->mode = AZ_OVERLAYS;
+        if (sub_screen(s->menu_sel)) { /* a sub-screen, like Pad Colors */
+            s->mode = sub_screen(s->menu_sel);
             s->menu_sel = 0;
         } else if (az_has_value(s->menu_sel)) { /* a mod toggle */
         /* A sub-setting whose parent is off is inert: it is drawn grayed,
@@ -355,7 +364,7 @@ bool azmod_input(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, b
      * same cursor-in-menu state the bus thread's depth-2 BACK sets, so the next
      * physical BACK is judged at the right depth. Padded 8px for a finger. */
     if (touched && g_docked &&
-        s->mode == AZ_COLOR_PICK) { /* full-screen: only the color grid has one */
+        (s->mode == AZ_COLOR_PICK || s->mode == AZ_CLOCK_TZ || s->mode == AZ_CLOCK_SET)) { /* full-screen: the screens one level down */
         int bx, by, bw, bh;
         back_rect(fb, &bx, &by, &bw, &bh);
         if (in_rect(touch_x, touch_y, bx - 8, by - 8, bw + 16, bh + 16)) {
@@ -374,11 +383,17 @@ bool azmod_input(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, b
     if (s->mode == AZ_COLORS)
         return input_pad_colors(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 
-    if (s->mode == AZ_OVERLAYS)
+    if (s->mode == AZ_OVERLAYS || s->mode == AZ_CLOCK)
         return input_overlays(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 
     if (s->mode == AZ_COLOR_PICK)
         return input_color_pick(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
+
+    if (s->mode == AZ_CLOCK_TZ)
+        return input_clock_tz(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
+
+    if (s->mode == AZ_CLOCK_SET)
+        return input_clock_set(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 
     return input_main_list(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 }

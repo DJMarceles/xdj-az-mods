@@ -34,7 +34,9 @@
 #define SRCROW_TRACE(...) ((void) 0)
 #define NEXT(p, name) ((void) 0)
 #include "bus_cfg.h"
+#include "bl_flip.h"
 #include "drag_handoff.h"
+#include "mm_resume.h"
 
 /* the community mods' filter chain (sdk_input.c): no mod registered, as in the shipped default */
 #define AZ_BUS_ERP_LED 1
@@ -92,6 +94,7 @@ static _Atomic unsigned g_kn_leak, g_kn_rel, g_kn_wdmax, g_kn_frames, g_mode_edg
 static _Atomic long long g_knob_press_ms;
 static _Atomic long g_mode_edge_ms[2], g_viewleave_n, g_wave_seen_ms = 99;
 static int g_last_click_bit, g_last_back_bit, g_src_swallow, g_srcrow_active;
+static int g_mm_resume; /* the Mod Menu to show again on SOURCE (mm_resume.h) */
 static struct {
     _Atomic int state;
 } g_nm;
@@ -253,6 +256,9 @@ int main(int argc, char **argv) {
         PA(g_stemeq_knobs, 2); PA(g_erp_last, 4); PA(g_erp_last8, 4); PA(g_dbg_reqraised, 4);
         /* clang-format on */
         putchar('\n');
+        /* the overlay thread drains the screen-button close: a frame's line shows whether that
+         * frame raised one, not whether any frame ever did */
+        g_close_pending = 0;
     }
     if (g_filt_unchecked) {
         fprintf(stderr, "busread-trace: %ld mixer frames without a CRC reached community filters\n",

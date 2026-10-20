@@ -165,13 +165,21 @@ static int cmi_read(const char *path, unsigned char **out, int *len) {
     *len = n;
     return 1;
 }
+/* the last decode's phases, in ms (message thread only; for the icon log line) */
+static long g_cmi_t_read, g_cmi_t_dec, g_cmi_t_scale;
 /* decode + scale one icon; 1 = ready */
 static int cmi_decode(int i) {
     unsigned char *buf = NULL;
     int len = 0;
+    long t0 = now_ms();
+    g_cmi_t_read = g_cmi_t_dec = g_cmi_t_scale = 0;
     if (!cmi_read(g_cmi[i].path, &buf, &len)) return 0;
+    long t1 = now_ms();
     uintptr_t img = mp_image_uncached(buf, len), fm = 0, wh = 0, px = 0, st = 0;
     free(buf);   /* the stream was made without a copy, and decodeImage has finished with it */
+    long t2 = now_ms();
+    g_cmi_t_read = t1 - t0;
+    g_cmi_t_dec = t2 - t1;
     int ok = 0;
     /* img: the decoded pixel data we hold a reference to until mp_release below */
     if (img && own_q(img + 0x08, &fm) && own_q(img + 0x10, &wh) && own_q(img + 0x48, &px) && own_q(img + 0x50, &st) && px) {
@@ -203,6 +211,7 @@ static int cmi_decode(int i) {
                 }
                 g_cmi[i].px = o;
                 ok = 1;
+                g_cmi_t_scale = now_ms() - t2;
             }
         }
     }
@@ -215,12 +224,15 @@ static void cm_icons_tick(void) {
         int st = __atomic_load_n(&g_cmi[i].st, __ATOMIC_ACQUIRE);
         if (st == CMI_FREE) return;
         if (st != CMI_WANTED) continue;
+        long waited = now_ms() - g_cmi[i].asked;   /* asked: published by the RELEASE store above */
         int ok = cmi_decode(i);
         __atomic_add_fetch(ok ? &g_cmi_ok : &g_cmi_bad, 1, __ATOMIC_RELAXED);
         if (access("/home/root/settings/azmod-logs.on", F_OK) == 0) {   /* logs on: one line per icon */
             FILE *lf = azlog_open("/tmp/azmod-community-icons.log", "a");
             if (lf) {
-                fprintf(lf, "icon %s at %d px: %s\n", g_cmi[i].path, g_cmi[i].sz, ok ? "decoded" : "refused or not decodable: placeholder");
+                fprintf(lf, "[%ld] icon %s at %d px: %s (queued %ld ms, read %ld, decode %ld, scale %ld)\n", now_ms(),
+                        g_cmi[i].path, g_cmi[i].sz, ok ? "decoded" : "refused or not decodable: placeholder", waited,
+                        g_cmi_t_read, g_cmi_t_dec, g_cmi_t_scale);
                 fclose(lf);
             }
         }

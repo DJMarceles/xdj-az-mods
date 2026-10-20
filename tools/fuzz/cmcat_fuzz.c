@@ -4,8 +4,9 @@
  * writes from what it downloaded, so any bytes. Every parse is followed by a layout of the
  * page the input picks, so the parsed fields reach the drawing code.
  *
- * Input: byte 0 picks the page (home tabs, a catalog mod's page), byte 1 the mod; the rest is
- * split at the first NUL into the catalog and the status file (no NUL: no status file).
+ * Input: byte 0 picks the page (home tabs, a catalog mod's page, the search keyboard), its high
+ * bits the Browse order and search; byte 1 the mod, or Browse's category; the rest is split at
+ * the first NUL into the catalog and the status file (no NUL: no status file).
  * The 250 ms re-read throttle runs on a clock this harness advances by 1 s per input, and the
  * fixed catalog and status paths are redirected into the scratch directory. The rest of azmod
  * comes from lanetest.c, compiled as its own object, as in the unit suites. */
@@ -80,7 +81,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     FZ_ASSERT(g_ncr >= 0 && g_ncr <= CM_NREPO && g_ncc >= 0 && g_ncc <= CM_NCAT && g_cc_more >= 0);
     g_cm_full = page >> 3 & 1;
     g_cm_scroll = 0;
-    if ((page & 7) < 3) {
+    g_cm_sort = (page >> 4 & 3) % CMB_NSORT;
+    g_cm_fcat = pick % (CMB_NCAT + 1) - 1;
+    snprintf(g_cm_q, sizeof g_cm_q, "%s", page & 0x40 ? "e o" : "");
+    g_cm_kbsearch = 0;
+    if ((page & 7) == 7) {
+        g_cm_view = CMV_KBD;
+        g_cm_kbsearch = 1;
+    } else if ((page & 7) < 3) {
         g_cm_view = CMV_HOME;
         g_cm_tab = page & 3;
         g_cm_cat = -1;

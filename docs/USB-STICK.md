@@ -385,7 +385,7 @@ differs. The same USB as last time costs no write and no restart.
    - the cache's `community/enabled` and `<id>/<id>.off` (what the core reads) are written
      from the `community-mods.<id>` keys;
    - `community-mods = off` removes the cache's `community/` and writes
-     `az-usbload/community-mods.off`, so the Mod Menu says "turned off" rather than "none
+     `az-usbload/community-mods.off`, so the Mod Menu says "disabled" rather than "none
      installed".
 
 6. **Write `.deck-info`** when its content would change.
@@ -757,6 +757,8 @@ also flushed before the rename. A leftover
 |---|---|---|
 | `azmod.conf`, `azmod.cfg` | azmod | [above](#azmodconf) |
 | `azmod-btchannel` | azmod | `3` or `4`: the mixer channel last set to Bluetooth (Remember Selected Channel). Absent: none. |
+| `azmod-preview` | azmod | `1` or `0`: the Browse PREVIEW button's state when it was last pressed, set again at the next start. Absent: the deck's default (on). |
+| `azmod-subcolumn` | azmod | the sub column the Browse header's sort menu button last chose, as its number in that menu (`0` = Default, no sub column), chosen again on the first track list after a start |
 | `azmod-community/` | azmod, `az-community` | community mods' state: `approved` (one `<id> <sha256 of <id>.so>` line per mod, at most 64, written under the lock `.approved.lock`; `.approved-init` marks that mods installed before the list existed were approved once), `<id>.cfg` (each mod's settings, `key=value` and `key$=text` lines), `<id>.owner` (the repository whose mod owns those settings; another repository's set-aside settings are `.<id>@<hash>.cfg`), `off` (the Mod Menu's community switch), `.trusted` (the one-time warning was confirmed), and the crash guard's `.starting`, `.crashes`, `.blame`, `.initing` and `<id>.crashed` ([COMMUNITY-MODS-INTERNALS.md](COMMUNITY-MODS-INTERNALS.md#quarantine-and-crash-blame)) |
 | `azstem.enable` | azmod | `1` or `0`: the Stems master switch, read by azstem |
 | `azstem.stems`, `azstem.stems2`, `azstem.stems3`, `azstem.stems4` | azmod | decks 1 to 4: a decimal mask, bit 7 = stems engaged (the Stems switch is on and that deck's track has stems), bits 0 to 3 = vocals, other, bass, drums on |
@@ -802,6 +804,8 @@ a rebuild; with one present, the deck behaves as stock for that piece.
 | `azmod-stemnative.off` | the native stem pad grid (the deck's own pad widget showing stems) |
 | `azmod-stemforge.off` | the forced refresh that fills the native stem pad tiles |
 | `azmod-stems4.off` | the stem strip in the 4 DECK layout's per-deck info cell |
+| `azmod-preview.off` | remembering the Browse PREVIEW button's state (`azmod-preview`) |
+| `azmod-subcolumn.off` | remembering the Browse sub column (`azmod-subcolumn`) |
 | `azmod-stemsmark.off` | the stem marks in track and playlist rows, whatever the Stem Marks switch says |
 | `azmod-wavemute.off` | waveform scaling by which stems are on |
 | `azmod-wscale.off` | the per-render waveform scaling path (falls back to per-point hooks) |

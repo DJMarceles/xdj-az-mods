@@ -267,7 +267,7 @@ static void c_select(azmod_state *s, int it) {
     s->menu_sel = -1;
     g_last_left = it;
     /* clang-format off */
-    if      (it == AZF_OVERLAYS) s->mode = AZ_OVERLAYS;
+    if      (sub_screen(it)) s->mode = sub_screen(it);
     else if (it == AZI_PAD_COLORS)  { s->mode = AZ_COLORS; s->color_sel = 0; }
     else if (it == AZI_COMMUNITY) { s->mode = AZ_COMMUNITY; cm_reset(); g_cm_full = 0; g_cm_dir_reset(); }   /* the summary card; the row opens the full screen */
     else if (it == AZI_SYSINFO) { s->mode = AZ_INFO;   s->last_action = AZI_SYSINFO; }
@@ -369,8 +369,8 @@ static void c_activate(azmod_state *s, int it) { /* a right-pane row by knob pre
         s->menu_sel = 0;
         return;
     }
-    if (it == AZF_OVERLAYS) { /* Extras > Overlays: its screen, likewise */
-        s->mode = AZ_OVERLAYS;
+    if (sub_screen(it)) { /* Extras > Overlays or Clock: its screen, likewise */
+        s->mode = sub_screen(it);
         s->pane = 1;
         s->menu_sel = 0;
         return;
@@ -390,19 +390,20 @@ static void c_activate(azmod_state *s, int it) { /* a right-pane row by knob pre
 /* Touch acts on controls only. A touch changes something only when the press and the
  * release both land on the same control (a checkbox, a bank / choice button,
  * Reload; padded for a finger), less than ~12 px apart and within 400 ms. Never
- * on the press: on the deck a finger move produces no X event at all (EP147's touch
- * decoder 0x212c6f0 only XWarpPointer()s on a move; it XSendEvent()s just
- * ButtonPress on down and ButtonRelease on up), so a scroll can arrive as press ...
- * release with nothing between. Movement is therefore judged from the release's own
- * coordinates, never only from motion events. In a left list that scrolls a row is a control too
+ * on the press: on the deck EP147's touch decoder 0x212c6f0 XSendEvent()s a ButtonPress
+ * when a finger lands AND at each step while it moves, and a ButtonRelease when it lifts.
+ * The overlay turns a press while the finger is down into a drag step (touch_seq.h,
+ * phase 1 here), so the gesture keeps its first press point. Movement is also judged
+ * from the release's own coordinates, never only from steps or motion events. In a left list that scrolls a row is a control too
  * (selecting it, c_ctl_at 0x20000), so a drag that scrolls the list never selects; being
  * navigation, it is not held to the 400 ms. A list that fits selects on the press (no press there
  * can become a scroll). */
 #define C_TAP_SLOP_800 12
+#define C_TZ_CTL 0x40000 /* a row of the Clock's zone list (row index below) */
 #define C_TAP_MS 400
 static struct {
-    bool on, moved;
-    int x0, y0, s0, l0, ctl; /* s0 / l0: the right pane's and the left list's offset at the press */
+    bool on, moved, cm; /* cm: a press on the Community Mods home page (screen_community.c) */
+    int x0, y0, s0, l0, ctl; /* s0 / l0: the right pane's (or the Community page's) and the left list's offset at the press */
     long t0;
 } g_rdrag;
 static long g_mnow; /* ms, set by azmod.c before each touch event */
@@ -410,6 +411,20 @@ void azmod_menu_clock(long ms) {
     g_mnow = ms;
 }
 static const char *g_mhit = ""; /* the last touch decision, for azmod.c's log */
+/* A press that the release decides (azmod_pane_drag): the Mod Menu's lists and the Community Mods
+ * home page both start their gesture here. ctl is the control under the press, or -1. */
+static void c_press(int tx, int ty, int ctl, bool cm, int s0) {
+    g_rdrag.on = true;
+    g_rdrag.moved = false;
+    g_rdrag.cm = cm;
+    g_rdrag.x0 = tx;
+    g_rdrag.y0 = ty;
+    g_rdrag.s0 = s0;
+    g_rdrag.l0 = g_lscroll;
+    g_rdrag.t0 = g_mnow;
+    g_rdrag.ctl = ctl;
+    g_mhit = ctl >= 0 ? "press:control" : "press:no-control";
+}
 const char *azmod_menu_last_hit(void) {
     return g_mhit;
 }
@@ -554,6 +569,14 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
         int bx, by, bw, bh;
         c_back_rect(fb, &bx, &by, &bw, &bh);
         if (in_rect(tx, ty, bx - 8, by - 8, bw + 16, bh + 16)) {
+            if (s->mode == AZ_CLOCK_TZ) { /* the zone list -> the Clock */
+                clock_tz_close(s);
+                return 1;
+            }
+            if (s->mode == AZ_CLOCK_SET) { /* the time picker -> the Clock */
+                clock_set_close(s);
+                return 1;
+            }
             if (c_back_to_extras(s))
                 return 1;
             if (s->pane)
@@ -583,19 +606,24 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
              * control (azmod_pane_drag): a tap on a row selects it (Community Mods and a mod's
              * SCREEN row then open), a tap on its checkbox toggles, and a drag past the slop
              * scrolls the list and does neither. */
+        } else if (s->mode == AZ_CLOCK_TZ) {
+            /* the zone list scrolls, so a touch on it is decided on the release, like a list
+             * that scrolls: a tap on a zone picks it, a drag scrolls (azmod_pane_drag); its
+             * header's BACK square acts on the press (azmod_input) */
+            int bx, by, bw, bh;
+            back_rect(fb, &bx, &by, &bw, &bh);
+            if (in_rect(tx, ty, bx - 8, by - 8, bw + 16, bh + 16)) {
+                s->pane = 1;
+                return 0;
+            }
+            int r = tzl_row_at(fb, tx, ty);
+            c_press(tx, ty, r >= 0 ? C_TZ_CTL | r : -1, false, g_tzl_first);
+            return 1;
         } else if (s->mode != AZ_OPEN) {
             s->pane = 1;
             return 0;
         }
-        g_rdrag.on = true;
-        g_rdrag.moved = false;
-        g_rdrag.x0 = tx;
-        g_rdrag.y0 = ty;
-        g_rdrag.s0 = g_rscroll;
-        g_rdrag.l0 = g_lscroll;
-        g_rdrag.t0 = g_mnow;
-        g_rdrag.ctl = c_ctl_at(s, fb, tx, ty);
-        g_mhit = g_rdrag.ctl >= 0 ? "press:control" : "press:no-control";
+        c_press(tx, ty, c_ctl_at(s, fb, tx, ty), false, g_rscroll);
         return 1;
     }
     if (s->pane == 0) {
@@ -634,8 +662,9 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
 }
 /* The menu's touch gesture after the press (motion = phase 1, release = 2). Returns 0
  * nothing to do, 1 redraw, 2 redraw and a control fired (the caller runs handle_action, as
- * after a press). Past the slop it is a drag: a scrolling right pane follows the finger
- * (on the deck the release may be the only point after the press; see above). */
+ * after a press). Past the slop it is a drag: a scrolling right pane, the left list or the
+ * Community Mods home page follows the finger (on the deck the release may be the only point
+ * after the press; see above). */
 int azmod_pane_drag(azmod_state *s, const azmod_fb *fb, int x, int y, int phase) {
     if (phase == 2 && g_cm_press >= 0) { /* Community: the pressed control unlights on lift */
         g_cm_press = -1;
@@ -652,29 +681,47 @@ int azmod_pane_drag(azmod_state *s, const azmod_fb *fb, int x, int y, int phase)
         g_mhit = "drop:menu-closed";
         return 0;
     }
+    bool cm = g_rdrag.cm;
+    if (cm && !cm_home_live(s)) { /* the page changed or closed under the finger */
+        g_rdrag.on = false;
+        g_mhit = "drop:community-left";
+        return 0;
+    }
     int dx = x - g_rdrag.x0, dy = y - g_rdrag.y0, slop = fb->h * C_TAP_SLOP_800 / 800;
     if (dx > slop || dx < -slop || dy > slop || dy < -slop)
         g_rdrag.moved = true;
     int was = g_rscroll, lwas = g_lscroll;
-    bool scrolls = s->mode == AZ_OPEN && g_rdrag.x0 >= c_lw(fb) && c_rmax(fb, s->left_sel) > 0;
+    bool cmoved = false;
+    bool scrolls = !cm && s->mode == AZ_OPEN && g_rdrag.x0 >= c_lw(fb) && c_rmax(fb, s->left_sel) > 0;
     if (g_rdrag.moved && scrolls) {
         g_rscroll = g_rdrag.s0 - dy;
         c_rclamp(fb, s->left_sel);
     }
-    if (g_rdrag.moved && g_rdrag.x0 < c_lw(fb)) { /* the left list follows the finger */
+    if (g_rdrag.moved && !cm && g_rdrag.x0 < c_lw(fb)) { /* the left list follows the finger */
         g_lscroll = g_rdrag.l0 - dy;
         c_lclamp(fb);
     }
+    if (g_rdrag.moved && cm) /* the Community Mods home page follows the finger */
+        cmoved = cm_home_scroll_to(fb, g_rdrag.s0 - dy, phase);
+    bool tz = !cm && s->mode == AZ_CLOCK_TZ, tzmoved = false;
+    if (g_rdrag.moved && tz) { /* the zone list follows the finger, a whole row at a time */
+        int f0 = g_tzl_first, rh = tzl_rowh(fb);
+        tzl_set_first(fb, g_rdrag.s0 - (rh > 0 ? dy / rh : 0));
+        tzmoved = g_tzl_first != f0;
+    }
     if (phase == 1) {
         g_mhit = g_rdrag.moved ? "motion:drag" : "motion:still";
-        return g_rscroll != was || g_lscroll != lwas;
+        return g_rscroll != was || g_lscroll != lwas || cmoved || tzmoved;
     }
     g_rdrag.on = false;
     if (g_rdrag.moved) {
         g_mhit = "release:drag";
         return 1;
     }
-    if (g_mnow - g_rdrag.t0 > C_TAP_MS && !(g_rdrag.ctl >= 0 && (g_rdrag.ctl & 0x20000))) {
+    /* navigation (a left row; on the Community page a tab, a tile, a mod row, the back square)
+     * is not held to the 400 ms */
+    bool nav = g_rdrag.ctl >= 0 && (cm ? cm_home_nav(g_rdrag.ctl) : (g_rdrag.ctl & (0x20000 | C_TZ_CTL)) != 0);
+    if (g_mnow - g_rdrag.t0 > C_TAP_MS && !nav) {
         g_mhit = "release:too-slow";
         return g_rscroll != was;
     }
@@ -682,11 +729,19 @@ int azmod_pane_drag(azmod_state *s, const azmod_fb *fb, int x, int y, int phase)
         g_mhit = "release:no-control";
         return 0;
     }
-    if (c_ctl_at(s, fb, x, y) != g_rdrag.ctl) {
+    int tr = tz ? tzl_row_at(fb, x, y) : -1;
+    int at = cm ? cm_home_ctl_at(s, fb, x, y) : tz ? (tr >= 0 ? C_TZ_CTL | tr : -1)
+                                                   : c_ctl_at(s, fb, x, y);
+    if (at != g_rdrag.ctl) {
         g_mhit = "release:off-control";
         return 0;
     }
-    c_fire(s, g_rdrag.ctl);
+    if (tz)
+        clock_tz_pick(s, g_rdrag.ctl & 0xffff);
+    else if (cm)
+        cm_home_fire(s, fb, g_rdrag.ctl);
+    else
+        c_fire(s, g_rdrag.ctl);
     g_mhit = "release:FIRED";
     return 2;
 }

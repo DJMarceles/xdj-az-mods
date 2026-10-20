@@ -61,11 +61,11 @@ STK=/deck/media/usb/sda1/MODS; COMM=$STK/community-mods
 st() { sed -n "s/^$1=//p" "$S"; }
 # catalog lines (az-community CATALOG): repo|text|name|ok|listed|error
 #   mod|repo|id|name|version|author|summary|category|hooks|firmware|size|icon|installed|
-#       min_core|description|assets_kb|held|also|nalso
+#       min_core|description|assets_kb|held|also|nalso|updated
 rf() { awk -F'|' -v u="$1" -v k="$2" '$1=="repo"&&$2==u{ print $k; exit }' "$CAT"; }
 mf() { awk -F'|' -v id="$1" -v k="$2" -v u="${3:-}" '$1=="mod"&&$3==id&&(u==""||$2==u){ print $k; exit }' "$CAT"; }
 nrec() { awk -F'|' -v id="$1" -v u="$2" '$1=="mod"&&$3==id&&$2==u{ n++ } END{ print n+0 }' "$CAT"; }
-fields_ok() { awk -F'|' 'NR==1{ if($0!="v1") bad=1; next } $1=="repo"{ if(NF!=6) bad=1; next } $1=="mod"{ if(NF!=19||more) bad=1; next } $1=="more"{ if(NF!=2||$2 !~ /^[1-9][0-9]*$/||more) bad=1; more=1; next } { bad=1 } END{ exit bad }' "$CAT"; }
+fields_ok() { awk -F'|' 'NR==1{ if($0!="v1") bad=1; next } $1=="repo"{ if(NF!=6) bad=1; next } $1=="mod"{ if(NF!=20||more) bad=1; next } $1=="more"{ if(NF!=2||$2 !~ /^[1-9][0-9]*$/||more) bad=1; more=1; next } { bad=1 } END{ exit bad }' "$CAT"; }
 stick_ro() { grep " /deck/media/usb/sda1 " /proc/mounts | grep -q "[ ,]ro[ ,]"; }
 nothing_half() { ! for x in "$COMM"/.[!.]*; do printf '%s\n' "${x##*/}"; done | grep -qE '^\.[a-z0-9-]+\.(new|old)$'; }
 # a mod's switch in MODS/azmods.cfg (community-mods.<id> = on|off)
@@ -116,6 +116,9 @@ chk "not-a-repo JSON -> error" '[ "$(rf $B/notrepo/azmods-repo.json 4)" = 0 ]'
 chk "list entries that are not repos (space, http://) never reach the catalog" '! grep -q "^repo|http://\|^repo|not" $CAT'
 chk "a | inside a value is stripped, a long UTF-8 name capped at 47 bytes, still valid UTF-8" 'n=$(mf other-mod 4); [ ${#n} -le 47 ] && ! printf "%s" "$n" | grep -q "|" && printf "%s" "$n" | python3 -c "import sys; sys.stdin.buffer.read().decode(\"utf-8\")"'
 chk "an unknown category is dropped, a known one kept" '[ -z "$(mf other-mod 8)" ] && [ "$(mf good-mod 8 $R1)" = visual ]'
+# the fixture's well-formed date, read from the served index so the test names no date itself
+UPD=$(sed -n 's/.*"updated": "\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)".*/\1/p' /srv/r1/azmods-repo.json | head -1)
+chk "the index's updated date is field 20; CONTROL: a malformed one (one-digit month and day) is empty" '[ -n "$UPD" ] && [ "$(mf good-mod 20 $R1)" = "$UPD" ] && [ -z "$(mf dd-mod 20)" ] && [ "$(mf any-mod 20)" = "$UPD" ]'
 chk "good-mod listed with its fields" '[ "$(mf good-mod 5 $R1)" = 1.0.0 ] && [ "$(mf good-mod 6 $R1)" = fixture ] && [ "$(mf good-mod 9 $R1)" = 0 ] && [ "$(mf good-mod 10 $R1)" = ep147-679e1b451e5fe82b ] && [ "$(mf good-mod 11 $R1)" -gt 0 ] && [ -z "$(mf good-mod 13 $R1)" ]'
 chk "good-mod icon: a local PNG under /tmp/az-community/icons" 'f=$(mf good-mod 12 $R1); case "$f" in /tmp/az-community/icons/*.png) ;; *) false ;; esac && [ "$(head -c 8 /deck$f | od -An -tx1 | tr -d " \n")" = 89504e470d0a1a0a ]'
 chk "any-mod listed with firmware any; its non-PNG icon refused (icon empty)" '[ "$(mf any-mod 10)" = any ] && [ -z "$(mf any-mod 12)" ]'
@@ -240,7 +243,7 @@ cp /srv/r1/azmods-repo.v2.json /srv/r1/azmods-repo.json; run refresh
 chk "catalog: 1.0.1 offered while 1.0.0 is installed" '[ "$(mf good-mod 5 $R1)" = 1.0.1 ] && [ "$(mf good-mod 13 $R1)" = 1.0.0 ]'
 rwst 'mkdir -p good-mod/data good-mod/.data@0123456789abcdef; echo mine > good-mod/data/save.txt; echo local > good-mod/.data.owner; echo other > good-mod/.data@0123456789abcdef/save.txt'
 run install "$R1" good-mod
-chk "updated to 1.0.1, still disabled" '[ "$(st state)" = done ] && grep -qx version=1.0.1 $COMM/good-mod/.origin && is_off_key good-mod && st msg | grep -q "stays turned off"'
+chk "updated to 1.0.1, still disabled" '[ "$(st state)" = done ] && grep -qx version=1.0.1 $COMM/good-mod/.origin && is_off_key good-mod && st msg | grep -q "stays disabled"'
 chk "the new .so is 1.0.1" 'unzip -p /srv/pkg/good-mod-1.0.1.azmod good-mod.so | cmp -s - $COMM/good-mod/good-mod.so'
 chk "the update keeps the mod's data/, its owner stamp and the set-aside copy (CONTROL: the .so above was replaced)" '[ "$(cat $COMM/good-mod/data/save.txt)" = mine ] && [ "$(cat $COMM/good-mod/.data.owner)" = local ] && [ "$(cat $COMM/good-mod/.data@0123456789abcdef/save.txt)" = other ] && nothing_half'
 chk "a deck update keeps it approved: the id's line now holds the 1.0.1 .so's sha256" '[ "$(appr good-mod)" = "good-mod $(pkgsha good-mod 1.0.1)" ] && [ "$(pkgsha good-mod 1.0.1)" != "$(pkgsha good-mod 1.0.0)" ]'
@@ -392,6 +395,31 @@ chk "over the icon cap: the oldest icon goes first, the others stay" '[ ! -e "$G
 chk "the catalog no longer points at the dropped icon" '[ -z "$(mf good-mod 12 $R1)" ]'
 run refresh
 chk "CONTROL: under the default cap it is fetched again" '[ -f "$GI" ] && [ "$(mf good-mod 12 $R1)" = "${GI#/deck}" ]'
+
+echo "== [$SHN] icons are kept on the stick: after a reboot (/tmp cleared) they are not downloaded again"
+# shellcheck disable=SC2034 # read by the eval'd assertions below
+SI=$COMM/.icons
+run refresh
+chk "every icon in /tmp is also on the stick (MODS/community-mods/.icons), same name, same bytes" 'n=0; for f in $I/*.png; do cmp -s "$f" "$SI/${f##*/}" || exit 1; n=$((n + 1)); done; [ $n -gt 0 ]'
+chk "the stick is back on its read-only mount after keeping them" 'stick_ro'
+rm -rf /deck/tmp/az-community; mv /srv/icons /srv/icons.off; run refresh
+# shellcheck disable=SC2034 # read by the eval'd assertions below
+GI=/deck$(mf good-mod 12 $R1)
+chk "a reboot, then a refresh with every icon URL unreachable: the catalog still shows them" '[ -f "$GI" ] && [ -f "/deck$(mf other-mod 12)" ]'
+chk "the icon shown is the stick's copy" 'cmp -s "$GI" "$SI/${GI##*/}"'
+rwst 'rm -rf .icons'; rm -rf /deck/tmp/az-community; run refresh
+chk "CONTROL: no copies on the stick and the URLs unreachable: no icon" '[ -z "$(mf good-mod 12 $R1)" ] && [ -z "$(mf other-mod 12)" ]'
+mv /srv/icons.off /srv/icons; run refresh
+chk "CONTROL: the URLs back: downloaded, and kept on the stick again" 'g=$(mf good-mod 12 $R1); [ -n "$g" ] && [ -f "$SI/${g##*/}" ]'
+# a new version of a mod: its icon gets a new name (fetched again); the old name leaves both places
+OLDI=$(mf good-mod 12 $R1); OLDI=${OLDI##*/}
+cp /srv/r1/azmods-repo.json /tmp/r1.json.bak
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [m.update(version="1.0.1") for m in d["mods"] if m.get("id")=="good-mod" and m.get("version")=="1.0.0"]; json.dump(d, open(p,"w"))' /srv/r1/azmods-repo.json
+run refresh
+# shellcheck disable=SC2034 # read by the eval'd assertions below
+NEWI=$(mf good-mod 12 $R1); NEWI=${NEWI##*/}
+chk "a new mod version: its icon has a new name, in /tmp and on the stick; the old name is gone from both" '[ "$(mf good-mod 5 $R1)" = 1.0.1 ] && [ -n "$NEWI" ] && [ "$NEWI" != "$OLDI" ] && [ -f "$I/$NEWI" ] && [ -f "$SI/$NEWI" ] && [ ! -e "$I/$OLDI" ] && [ ! -e "$SI/$OLDI" ]'
+cp /tmp/r1.json.bak /srv/r1/azmods-repo.json; run refresh
 
 echo "== [$SHN] bad requests"
 run frobnicate; chk "unknown request -> error" '[ "$(st state)" = error ] && st msg | grep -q unknown'

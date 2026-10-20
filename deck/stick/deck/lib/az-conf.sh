@@ -14,8 +14,9 @@
 # file holding only `mods = off` turns the mods off.
 #
 # The stick is the source of truth. The deck keeps a working copy (CFG_DECK), written only by
-# azmod. az-usbload hands the stick's file to azmod (CFG_IMPORT) when the stick's file changed
-# since the last sync, and writes the deck copy back to the stick when the deck copy changed.
+# azmod. az-usbload hands the stick's settings to azmod (CFG_IMPORT: the deck copy with every
+# key the stick's file sets) when the stick's file changed since the last sync, and writes the
+# deck copy back to the stick when the deck copy changed.
 # CFG_SYNC (p7) records the sync point: line 1 the md5 of the stick's file, line 2 the md5 of
 # the deck copy, or "pending" while azmod has not taken an import yet.
 CFG_NAME=azmods.cfg
@@ -55,10 +56,33 @@ cfg_set() {
           print }
         END { if (!done && v != "") print k " = " v }' > "$1.new" && mv -f "$1.new" "$1" || { rm -f "$1.new"; return 1; }
 }
+# cfg_merge BASE OVER: BASE with every key OVER sets, to stdout. OVER's value goes in BASE's
+# line (later duplicates of that key dropped), keys BASE lacks are appended in OVER's order,
+# and BASE's comments and other keys are kept as they are. A line whose value does not change
+# is printed unchanged, so a merge that changes nothing reproduces BASE byte for byte. BASE
+# and OVER are two different paths (OVER is told apart by its name).
+cfg_merge() {
+    awk -v over="$2" '
+        { sub(/\r$/, "") }
+        FILENAME == over { l = $0; sub(/^[ \t]+/, "", l); if (l ~ /^#/) next
+          i = index(l, "="); if (!i) next
+          k = substr(l, 1, i - 1); sub(/[ \t]+$/, "", k)
+          v = substr(l, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+          if (!(k in val)) ord[++n] = k
+          val[k] = v; next }
+        { l = $0; sub(/^[ \t]+/, "", l); i = index(l, "=")
+          if (l !~ /^#/ && i) { k = substr(l, 1, i - 1); sub(/[ \t]+$/, "", k)
+              if (k in val) { if (k in done) next
+                  done[k] = 1
+                  v = substr(l, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                  if (v != val[k]) { print k " = " val[k]; next } } }
+          print }
+        END { for (j = 1; j <= n; j++) if (!(ord[j] in done)) print ord[j] " = " val[ord[j]] }' "$2" "$1"
+}
 cfg_new() { printf '# azmods.cfg: AZ-MODS settings\nversion = 1\n' > "$1"; }
 cfg_md5() { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
-# cfg_stick_put SRC MNT: SRC -> MNT/MODS/azmods.cfg. The stock mount is read-only: remounted
-# rw for the write and back after. Written .azmods.cfg.new, compared, renamed, synced: a stick
+# cfg_stick_put SRC MNT: SRC -> MNT/MODS/azmods.cfg. A read-only mount (the stock mount is
+# rw,noatime; a test rig's is ro) is remounted rw for the write and back after. Written .azmods.cfg.new, compared, renamed, synced: a stick
 # pulled mid-write keeps the previous file (a leftover .new is never read).
 cfg_stick_put() {
     [ -n "$2" ] && [ -d "$2/MODS" ] || return 1

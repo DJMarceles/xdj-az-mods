@@ -98,11 +98,11 @@ echo "stripped payload staged + sh -n OK: $S; MODS/deck staged: $D"
 # AZ_BOOT_WINDOW: a container's /proc/uptime is the docker VM's, so without it every
 # loader run would count as "long after boot" and the restart policy would hold back the
 # restarts the older suites assert. restart.sh sets its own window per case.
-[ $# -gt 0 ] && SUITES="$*" || SUITES="lint clguard ports mirror hooks poststart gate restart bootlogo uninstall renotify watch trust modupdate community remotestems logcap sshprio boothooks savelogs stickconf"
+[ $# -gt 0 ] && SUITES="$*" || SUITES="lint clguard ports mirror hooks poststart gate restart bootlogo uninstall renotify watch trust modupdate community remotestems logcap sshprio boothooks savelogs stickconf deckcmds"
 # Git Bash on Windows rewrites /paths in arguments ("/t/x.sh" -> "T:/x.sh"); Docker
 # Desktop takes the /g/... host paths as they are. Only docker gets the switch: python
 # above still needs its arguments converted. A no-op elsewhere.
-# community, remotestems, sshprio and part of trust run under the DECK'S OWN
+# community, remotestems, sshprio and part of trust run under (and deckcmds checks against) the DECK'S OWN
 # busybox/curl/bash: the extracted 2.01 rootfs at AZ_DECK_ROOTFS, mounted read-only (each
 # suite overlays it). Without one, those suites FAIL rather than pass on a userland that
 # is not the deck's.

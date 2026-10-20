@@ -95,7 +95,7 @@ def gen(root, base):
     d = ship("good-mod", pkg("good-mod")); put("icons/good-mod.png", png())
     mods.append(entry(base, "good-mod", d, category="visual"))
     d = ship("dd-mod", pkg("dd-mod", stream=True))                  # data descriptors: fine
-    mods.append(entry(base, "dd-mod", d))
+    mods.append(entry(base, "dd-mod", d, updated="2026-1-8"))  # a malformed date
     d = ship("any-mod", pkg("any-mod", man=manifest("any-mod", firmware=["any"], hooks=False)))
     put("icons/any-mod.png", b"this is not a png\n")              # icon refused, mod still listed
     mods.append(entry(base, "any-mod", d, firmware=["any"]))

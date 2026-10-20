@@ -1,17 +1,19 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /**
  * @file bluetooth.c
- * @brief Bluetooth auto-connect, remembered CH3/CH4 input selection and UART speed recovery
+ * @brief Bluetooth auto-connect, remembered channel inputs and UART speed recovery
  *
- * Stock never connects to the paired device by itself and resets CH3/CH4 to DECK on every
- * start. The sink hook connects to the paired device when the stack comes up
+ * Stock never connects to the paired device by itself. The sink hook connects to the paired device when the stack comes up
  * (AZF_BT_AUTO_CONNECT), and bt_mods_tick switches the channel the DJ last set to
  * Bluetooth back to it on connect and to DECK on disconnect (AZF_BT_REMEMBER_CHANNEL).
  * bt_uart_recover repairs the controller's UART speed after EP147 was stopped with
- * Bluetooth on. Every action is EP147's own routine. Diagnostics: /tmp/azmod-bt.log.
+ * Bluetooth on. im_tick applies Channel Input Select Memory's saved inputs when EP147's own
+ * start-up apply missed them (input_memory.h). Every action is EP147's own routine.
+ * Diagnostics: /tmp/azmod-bt.log.
  *
  * Entry points: install_bt_mods, bt_mods_tick, bt_uart_recover.
  */
+#include "input_memory.h"
 /* EP147 runs the sink role of its own stack (libanwbt*):
  *   - sink general handler FUN_0211c0e8(sink, ctx, code, p4): 0x93 = SET_LOCAL_NAME_CFM,
  *     the last step of every stack start (boot, reload, Bluetooth switched on). The paired
@@ -194,7 +196,73 @@ static void bt_chan_save(int idx) {
     int n = snprintf(line, sizeof line, "%d\n", idx + 1);
     settings_write(BT_CHAN_PATH, line, (size_t) n, 1);
 }
+/* Channel Input Select Memory at start (input_memory.h). g_im is written once, by
+ * install_bt_mods in the constructor (before EP147 starts any thread that could read it),
+ * and read only by im_tick on the message thread afterwards. */
+#define IM_SETTINGS_PATH "/home/root/settings/SETTINGS.DAT"
+#define IM_OFF_PATH "/home/root/settings/azmod-inputmemory.off"
+#define IM_FILE_MAX 65536
+static struct im_saved g_im = {-1, {-1, -1, -1, -1}};
+static void im_load(void) { /* constructor: the file is still the one EP147 saved last */
+    if (access(IM_OFF_PATH, F_OK) == 0)
+        return;
+    int fd = open(IM_SETTINGS_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    static uint8_t buf[IM_FILE_MAX];
+    size_t n = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf + n, sizeof buf - n);
+        if (r <= 0)
+            break;
+        n += (size_t) r;
+        if (n == sizeof buf)
+            break;
+    }
+    close(fd);
+    if (n == sizeof buf) /* larger than any settings file: not read */
+        return;
+    im_parse(buf, n, &g_im);
+    bt_log("input memory: memory=%d saved inputs %d %d %d %d\n", g_im.memory, g_im.input[0],
+           g_im.input[1], g_im.input[2], g_im.input[3]);
+}
+static void im_tick(void) { /* message thread */
+    static int done[IM_CHANNELS], all_done;
+    static long long first[IM_CHANNELS];
+    if (all_done)
+        return;
+    if (g_im.memory != 1) {
+        all_done = 1;
+        return;
+    }
+    long long now = drag_now_ms();
+    int pending = 0;
+    mixch_hold();
+    for (int i = 0; i < IM_CHANNELS; i++) {
+        if (done[i])
+            continue;
+        pending = 1;
+        uintptr_t c = mixch_get(i);
+        if (!c)
+            continue;
+        if (!first[i])
+            first[i] = now;
+        int cur = mixch_input(c);
+        int d = im_decide(&g_im, i, cur, (long) (now - first[i]));
+        if (d == IM_SELECT) {
+            mixch_select(c, g_im.input[i]);
+            bt_log("input memory: CH%d was DECK at start, saved input %d applied (now %d)\n",
+                   i + 1, g_im.input[i], mixch_input(c));
+        }
+        if (d != IM_WAIT)
+            done[i] = 1;
+    }
+    mixch_drop();
+    if (!pending)
+        all_done = 1;
+}
 static void bt_mods_tick(void) { /* message thread */
+    im_tick();
     static int remembered = -2, last_on = -1, seen[4] = {-1, -1, -1, -1};
     if (remembered == -2)
         remembered = bt_chan_load();
@@ -250,6 +318,7 @@ static void bt_mods_tick(void) { /* message thread */
                seen[remembered]);
 }
 static void install_bt_mods(void) {
+    im_load();
     int a = azm_install_hook(BT_SNK_EV_FN, (void *) bt_snk_hook, (void **) &g_o_bt_snk);
     int b = azm_install_hook(BT_A2DP_EV_FN, (void *) bt_a2dp_hook, (void **) &g_o_bt_a2dp);
     /* the channel destructors first, from the vtable (RTTI-checked at build time): a channel

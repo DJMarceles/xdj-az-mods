@@ -14,6 +14,8 @@
  *
  * Old/new adapters: the few lines that name the settings storage are under MENUDUMP_NEW.
  * argv[1]: scratch path for the cfg file. Output on stdout. */
+/* the zone list without offsets: no dependence on the host's zone files or the date */
+#define AZ_ZONEINFO "/nonexistent-zoneinfo"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -129,6 +131,15 @@ static const char *mode_name(int m) {
     case AZ_UPDATE: return "update";
     case AZ_OVERLAYS: return "overlays";
     case AZ_COMMUNITY: return "community";
+#ifdef AZMOD_HAVE_CLOCK_TZ_LIST /* the Clock's zone list: likewise */
+    case AZ_CLOCK_TZ: return "clocktz";
+#endif
+#ifdef AZMOD_HAVE_CLOCK_SCREEN /* the Clock's own screen: likewise */
+    case AZ_CLOCK: return "clock";
+#endif
+#ifdef AZMOD_HAVE_CLOCK_SET /* Set Time Manually: likewise */
+    case AZ_CLOCK_SET: return "clockset";
+#endif
     default: return "?";
     }
 }

@@ -381,6 +381,16 @@ static int slot7_repaint_all(void);
 
 #include "stems4art.h" /* 4-DECK source-cell stem strips (generated art) */
 
+/* Stem state on the jog display (jog_display.c, jog_stems_logic.h), per deck, atomics only:
+ * g_jog_src = jog_word(engaged, 1, stem mask), written by the overlay thread;
+ * g_jog_page = the deck's pads are its stem toggles, written by the ErP LED path. */
+#include "jog_stems_logic.h"
+static unsigned g_jog_src[AZMOD_STEM_DECKS];
+static int g_jog_page[AZMOD_STEM_DECKS];
+static void install_jogstems(void);
+static void jogstems_tick(void);              /* picture style: decode, then the timing log */
+static void jog_tx_note(int bus, const void *arg); /* picture style: time artwork transfers */
+
 static int g_fxroll_art_ready;
 
 static _Atomic int g_fxrow_zone;
@@ -463,7 +473,7 @@ static void wave_prov_report(void);
 
 static int g_attzero;
 
-static void build_atten(int deck);
+static int build_atten(int deck, const int gq[AZMOD_STEM_COUNT]);
 
 static void ov_forget_all(void);
 
@@ -562,6 +572,12 @@ struct plsnap {
     char sel_title[96];  /* the selected row's displayed name (record +0x18) */
     unsigned sel_row;    /* the display row of sel_pl in the playlist list (record +4) */
     unsigned open_pl;    /* the playlist whose track list is open, any sort */
+    /* the Browse FOLDER view (category 17): the selected entry, relative to its stick, and the
+     * folder a PASTE there lands in (the selected folder, or a selected file's folder) */
+    unsigned fsel_media;
+    unsigned fsel_dir_id; /* the folder entry id of fsel_dir (0 = the stick's top, or unknown) */
+    int fsel_kind;        /* 1 a folder, 4 a file, 0 none */
+    char fsel_path[512], fsel_dir[512];
 };
 
 static struct plsnap plsnap_get(void);
@@ -711,11 +727,20 @@ static struct plsnap g_grab;
 
 #define CLIP_TAGGED 4 /* the Tag List's tracks (g_tag_cids), read at COPY time */
 
+#define CLIP_FILES 5 /* a folder or file in the Browse FOLDER view (path), copied as files */
+
 static struct {
     int kind, move;
     unsigned media, id, src_pl, src_seq;
     char name[PL_TGT_NAME_MAX];
+    char path[512]; /* CLIP_FILES: relative to its stick */
 } g_clip;
+
+static void fc_mount_cleanup(const char *mount); /* folder_copy.c */
+static void fc_refresh_service(void *server);
+static void fc_tick(void);
+static int fc_request(unsigned src_media, const char *src_rel, unsigned dst_media,
+                      const char *dst_dir, unsigned dst_id, const char *name);
 
 static int g_paste_pending;
 
@@ -1067,6 +1092,7 @@ static int g_tclip_x;
 static int cg_track_row(uintptr_t tw, int row);
 
 static void install_stemsmark(void);
+static int install_preview_hotcues(void); /* preview_hotcues.c, via stem_marks.c */
 
 static int install_hlabel_paint_slot(void);
 

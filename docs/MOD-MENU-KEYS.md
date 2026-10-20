@@ -40,10 +40,15 @@ the table and `features.def` disagree.
 | `overlay-cpu-usage` | CPU Usage | toggle | overlays | 0 = off, 1 = on |
 | `overlay-cpu-clock` | CPU Clock | toggle | overlays | 0 = off, 1 = on |
 | `overlay-ram` | RAM Usage | toggle | overlays | 0 = off, 1 = on |
+| `overlay-clock` | Clock | toggle | extras | 0 = off, 1 = on |
+| `overlay-clock-24h` | Time Format | choice | overlay-clock | 0 = "12-hour", 1 = "24-hour" |
 | `beat-jump-2-first` | BEAT JUMP 2 First | toggle | extras | 0 = off, 1 = on |
 | `fine-vinyl-speed` | Fine Vinyl Speed Adjust | toggle | extras | 0 = off, 1 = on |
 | `bt-auto-connect` | Bluetooth Auto-Connect | toggle | extras | 0 = off, 1 = on |
 | `bt-remember-channel` | Remember Selected Channel | toggle | extras | 0 = off, 1 = on |
 | `hide-track-title` | Hide Track Title | toggle | extras | 0 = off, 1 = on |
 | `phase-meter` | Phase Meter | toggle | extras | 0 = off, 1 = on |
+| `preview-hot-cues` | Preview Hot Cues | toggle | extras | 0 = off, 1 = on |
+| `extended-lead-in` | Extended Lead-In | toggle | extras | 0 = off, 1 = on |
+| `camelot-keys` | Camelot Keys | toggle | extras | 0 = off, 1 = on |
 <!-- keys:end -->

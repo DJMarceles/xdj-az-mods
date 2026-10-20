@@ -155,7 +155,12 @@ static void pl_edit_notify(int op, int rc) {
                 : rc == -10 ? "Couldn't add to this playlist"
                             : "Couldn't add this track";
     } else if (op == MV_OP_CPREAD) { /* rc 1 = copying started; the result comes later */
-        if (rc == 1) {
+        int fold = g_cp.kind == CPK_FOLDER;
+        if (rc == 1 && fold) {
+            snprintf(buf, sizeof buf, "Copying %s to the other USB...",
+                     pl_name_short(g_cp.src_pl_name));
+            ms = PL_MSG_HOLD;
+        } else if (rc == 1) {
             snprintf(buf, sizeof buf, "Copying %d track%s to the other USB...", g_cp.ntrk,
                      g_cp.ntrk == 1 ? "" : "s");
             ms = PL_MSG_HOLD;
@@ -163,7 +168,10 @@ static void pl_edit_notify(int op, int rc) {
             snprintf(buf, sizeof buf, "Copying %d/%d to the other USB...",
                      __atomic_load_n(&g_cp.done_n, __ATOMIC_ACQUIRE), g_cp.ntrk);
             ms = PL_MSG_HOLD;
-        } else if (rc == 0 && (g_cp.kind == CPK_PLAYLIST || g_cp.kind == CPK_TAGGED))
+        } else if (rc == 0 && fold)
+            snprintf(buf, sizeof buf, "Copied %s to the other USB (%d track%s)",
+                     pl_name_short(g_cp.src_pl_name), g_cp.ntrk, g_cp.ntrk == 1 ? "" : "s");
+        else if (rc == 0 && (g_cp.kind == CPK_PLAYLIST || g_cp.kind == CPK_TAGGED))
             snprintf(buf, sizeof buf, "Copied %d tracks to the other USB", g_cp.ntrk);
         else if (rc == 0)
             snprintf(buf, sizeof buf, "Copied to the other USB");
@@ -173,8 +181,10 @@ static void pl_edit_notify(int op, int rc) {
                 : rc == -58              ? "Copied \xc2\xb7 finishes on the other USB in a moment"
                 : rc == -56 || rc == -57 ? "Copied, but the other USB's library refused it"
                 : rc == -2               ? "Still copying"
+                : rc == -45 && fold      ? "A list inside it can't be copied"
                 : rc == -45              ? "Only playlists can be copied"
                 : rc == -46              ? "Too many tracks (300 max)"
+                : rc == -49              ? "Too much inside (500 max)"
                 : rc == -47              ? "That playlist is empty"
                 : rc == -60              ? "Copy a whole playlist into a folder"
                                          : "Couldn't copy this track";
@@ -251,7 +261,6 @@ static void pl_edit_notify(int op, int rc) {
             : rc == -68 ? "Cut and paste works within one USB \xc2\xb7 use COPY"
             : rc == -69 ? "Highlight where it goes, then PASTE"
             : rc == -96 ? "Paste tagged tracks on the same USB"
-            : rc == -65 ? "Folders copy within one USB"
             : rc == -62 ? "Can't paste it onto itself"
             : rc == -2  ? "Busy \xc2\xb7 try again"
                         : "Highlight a playlist or folder";
@@ -497,6 +506,16 @@ static void pl_tb_tick(void) {
 static int pl_request_paste(void) {
     if (!g_clip.kind)
         return -66;
+    if (g_clip.kind == CLIP_FILES) { /* the FOLDER view: files to the other stick */
+        struct plsnap sn = plsnap_get();
+        if (!sn.fsel_media) {
+            az_banner_strip("Paste in the other USB's FOLDER view", PL_MSG_READ);
+            return 0; /* said: no second message */
+        }
+        fc_request(g_clip.media, g_clip.path, sn.fsel_media, sn.fsel_dir, sn.fsel_dir_id,
+                   g_clip.name);
+        return 0; /* fc_request shows its own messages */
+    }
     if (__atomic_load_n(&g_drag_on, __ATOMIC_RELAXED))
         return -1;
     if (__atomic_load_n(&g_mv_state, __ATOMIC_ACQUIRE) != MV_IDLE)
@@ -756,6 +775,12 @@ static int tag_clear(unsigned media) {
     drag_log("TAGLIST not cleared: no ManagementSystemID seen for media %04x\n", media);
     return -3;
 }
+/* 1 = the PASTE's destination row is the copied row itself. Playlist ids are per stick, and two
+ * sticks exported from one library share them, so a row on the other stick with the copied
+ * row's id is a different row. */
+static int pl_paste_is_self(int same_stick, unsigned dest_row, unsigned clip_id) {
+    return same_stick && dest_row == clip_id;
+}
 /* The destination row is resolved (g_mv: pl, media, name, attribute in n, parent,
  * pname, mount): arm the write. Called from msg_tick with the slot idle. Returns
  * <0 when refused (nothing written) and the op whose message explains it. */
@@ -846,21 +871,20 @@ static int pl_paste_route(int *op_out) {
     }
     /* a playlist or folder: into a folder row, or right below a playlist row */
     unsigned dest = attr == PL_ATTR_FOLDER ? r : parent, after = attr == PL_ATTR_FOLDER ? 0 : r;
+    int self = pl_paste_is_self(same, r, g_clip.id);
     if (g_fl_paste.plist &&
         g_fl_paste.row >= 0) { /* the flash: the folder it went into, or the row below */
         int base = g_fl_paste.row;
         if (!same && attr != PL_ATTR_FOLDER)
             g_fl_paste.row = -1; /* the other stick's top level: unknown */
         else
-            g_fl_paste.row = (attr == PL_ATTR_FOLDER && r != g_clip.id ? base : base + 1) -
+            g_fl_paste.row = (attr == PL_ATTR_FOLDER && !self ? base : base + 1) -
                              (g_fl_paste.cutrow >= 0 && g_fl_paste.cutrow < base
                                   ? 1
                                   : 0); /* the cut row left from above */
     }
     const char *dname = attr == PL_ATTR_FOLDER ? name : pname;
-    if (g_clip.kind == CLIP_FOLDER && !g_clip.move && !same)
-        return -65;       /* a folder copies within one USB only */
-    if (r == g_clip.id) { /* onto itself */
+    if (self) { /* onto itself */
         if (g_clip.move)
             return -62; /* a CUT: nothing to do */
         dest = parent;
@@ -885,14 +909,15 @@ static int pl_paste_route(int *op_out) {
         return 0;
     }
     struct pl_addtgt t;
-    memset(&t, 0, sizeof t); /* a playlist onto the other stick: into that folder / top */
+    memset(&t, 0, sizeof t); /* a playlist or folder onto the other stick: into that folder / top */
     t.pl = dest;
     t.media = media;
     t.attr = PL_ATTR_FOLDER;
     utf8_copy(t.name, sizeof t.name, dname);
     snprintf(t.mount, sizeof t.mount, "%s", mount);
     *op_out = MV_OP_CPREAD;
-    return cp_request_playlist(g_clip.media, g_clip.id, &t);
+    return g_clip.kind == CLIP_FOLDER ? cp_request_folder(g_clip.media, g_clip.id, &t)
+                                      : cp_request_playlist(g_clip.media, g_clip.id, &t);
 }
 /* A stock DELETE was confirmed on the playlist list (menu_popup.c): drop the target and
  * clipboard if the deleted row was them, or was a folder (which may hold them), so nothing

@@ -24,6 +24,7 @@
  * use by mp_enabled(), MAKE STEMS by mp_stems_on(). Every object (controller, widget,
  * buttons, model) is vtable-checked at use; any mismatch = stock behavior, untouched. */
 #include "menulabels.h"
+#include "menu_popup_gate.h"
 
 #define MP_CTRL_VT EP_2b44be8   /* gui::BrowseMenuWidgetController */
 #define MP_WIDGET_VT EP_2b37908 /* gui::BrowseMenuWidget */
@@ -43,6 +44,7 @@
 #define MP_KIND_REMOVE 6          /* our pending kind; stock uses 1..5 */
 #define MP_KIND_FOLDERDEL 7       /* REMOVE on a folder (ours; stock disables it) */
 #define MP_TYPE_ADD 8             /* our synthesized menu type; stock uses 0..3 */
+#define MP_TYPE_FOLDER 9 /* ours: a folder or file in the Browse FOLDER view (COPY | PASTE) */
 #define MP_SET_UNPLAYED 3         /* B1 extra set */
 #define MP_SET_ADD 4              /* B1 and B2 extra set: "ADD TO / PLAYLIST" (no target) */
 #define MP_SET_ADDNAME 5          /* B1 and B2 extra set: "ADD TO / <target>" (swapped per name) */
@@ -768,7 +770,9 @@ static void mp_title_update(uintptr_t c, int type) {
     /* not type 3 (TAG LIST): that menu acts on the whole list, so the highlighted
      * track's name there would be misleading; stock "MENU" stays */
     const char *t =
-        (type == 0 || type == 1 || type == 2 || type == MP_TYPE_ADD) ? sn.sel_title : "";
+        (type == 0 || type == 1 || type == 2 || type == MP_TYPE_ADD || type == MP_TYPE_FOLDER)
+            ? sn.sel_title
+            : "";
     g_mpt_widget = w;
     if (!*t) {
         mp_release(g_mpt_img);
@@ -1299,7 +1303,7 @@ static int mp_has_twin(uintptr_t b, uintptr_t b2) {
     return mp_twin_of(b, b2) >= 0;
 }
 /* UNDO: a small button in the panel's top-right corner, where the stock X was. Shown
- * on every menu (with nothing to undo, pressing it says so); the undo itself
+ * on every menu but FOLDER (with nothing to undo, pressing it says so); the undo itself
  * re-proves the rows it restores. */
 static uintptr_t g_mp_bu, g_mp_bu_widget;
 static int g_mp_bu_on;
@@ -1448,7 +1452,9 @@ static void mp_rebuild_hook(void *ctrl) {
         if (type >= 0 && own_q(c + 0xa0, &w) && mp_hide_x(w, b1, &xr, &yc)) {
             xr -= 0;
         }        /* every menu: BACK closes it */
-        if (w) { /* always; with nothing to undo it says "Nothing to undo" */
+        /* every menu but FOLDER (a file copy is not in the undo journal); with nothing to undo
+         * it says "Nothing to undo" */
+        if (w && type != MP_TYPE_FOLDER) {
             uintptr_t bu = mp_bu(c, w, b1); /* the small UNDO, in the X's corner */
             if (bu) {
                 ((void (*)(uintptr_t, int, int, int, int)) MP_SET_BOUNDS)(
@@ -1566,6 +1572,30 @@ static void mp_rebuild_pledit(void *ctrl) {
         mp_log("REBUILD type 1: COPY | PASTE(%s) | %s | NEW | EDIT (%s %u)\n",
                can ? "on" : "grayed", bt ? "SELECT" : "-", sn.sel_folder ? "folder" : "playlist",
                sn.sel_pl);
+        return;
+    }
+    if (type == MP_TYPE_FOLDER) { /* the FOLDER view: COPY | PASTE, files only */
+        struct plsnap sn = plsnap_get();
+        if (!sn.fsel_media || !sn.fsel_kind || !mp_prepare_buttons(b1, b2))
+            return;
+        mp_show(b1, 0, 0, 0);
+        mp_show(b2, 0, 0, 0);
+        uintptr_t w = 0;
+        own_q(c + 0xa0, &w);
+        uintptr_t b3 = mp_b3(c, w, b1);
+        if (b3) {
+            mp_show(b3, MP_B3_SET_COPY, 1, 1);
+            g_mp_b3_action = MP_B3_COPY;
+        }
+        /* PASTE: files copied in the FOLDER view of the OTHER stick */
+        int can = g_clip.kind == CLIP_FILES && g_clip.media != sn.fsel_media;
+        uintptr_t bm = mp_bm(c, w, b1);
+        if (bm) {
+            mp_show_paste(bm, can);
+            g_mp_bm_on = 1;
+        }
+        mp_log("REBUILD FOLDER: COPY | PASTE(%s) on \"%s\"\n", can ? "on" : "grayed",
+               sn.fsel_path);
         return;
     }
     if (type == 2 || type == MP_TYPE_ADD) { /* a track row */
@@ -1737,7 +1767,12 @@ static void mp_place_stems(uintptr_t c) {
                mp_visible(g_mp_brn);
     int bedv = g_mp_bed_on && g_mp_bed && g_mp_bed_widget == w && mp_valid(g_mp_bed, MP_TIB_VT0) &&
                mp_visible(g_mp_bed);
-    if (mp_enabled() && (type == 0 || type == 1 || type == 2 || type == 3 || type == MP_TYPE_ADD)) {
+    if (type == MP_TYPE_FOLDER) { /* ours: no stock items */
+        mp_show(b1, 0, 0, 0);
+        mp_show(b2, 0, 0, 0);
+    }
+    if (mp_enabled() && (type == 0 || type == 1 || type == 2 || type == 3 || type == MP_TYPE_ADD ||
+                         type == MP_TYPE_FOLDER)) {
         /* Fixed slots: every button 210 wide, six slots 212 apart, so a
          * button is always in the same place: COPY, PASTE, SELECT / ADD TO on the left,
          * MAKE STEMS always on the right; a slot with nothing for this row stays empty. */
@@ -1881,6 +1916,18 @@ static void mp_producer_hook(void *ctx) {
      * steal the one the DJ chose with [SELECT] and make copying A -> B impossible. */
     if (type != -1)
         return;
+    if (mp_enabled()) { /* the FOLDER view: stock has no menu there; ours copies files */
+        struct plsnap fs = plsnap_get();
+        if (fs.fsel_media && fs.fsel_kind) {
+            *(uint8_t *) (m + 0x08) = 1;
+            *(uintptr_t *) (m + 0x10) = gen;
+            *(int8_t *) (m + 0x18) = MP_TYPE_FOLDER;
+            *(uintptr_t *) (m + 0x20) = gen;
+            mp_log("PRODUCER: synthesised the FOLDER menu (\"%s\", gen %lx)\n", fs.fsel_path,
+                   (unsigned long) gen);
+            return;
+        }
+    }
     if (!mp_stems_on())
         return;                    /* no stock menu = not a playlist: only MAKE STEMS may add one */
     if (!pl_selected_is_track()) { /* with or without a target: see mp_add */
@@ -1933,6 +1980,19 @@ static void mp_add(uintptr_t ctrl, const char *who) {
  * sorted by "#". A playlist/folder row: its id (folders are moved, not copied). */
 static int mp_clip_set(int move) {
     struct plsnap sn = plsnap_get();
+    if (sn.fsel_media && sn.fsel_kind && !move) { /* the FOLDER view: the entry's path */
+        memset(&g_clip, 0, sizeof g_clip);
+        g_clip.kind = CLIP_FILES;
+        g_clip.media = sn.fsel_media;
+        snprintf(g_clip.path, sizeof g_clip.path, "%s", sn.fsel_path);
+        const char *base = strrchr(sn.fsel_path, '/');
+        utf8_copy(g_clip.name, sizeof g_clip.name, base ? base + 1 : sn.fsel_path);
+        char b[160];
+        snprintf(b, sizeof b, "Copied %s", pl_name_short(g_clip.name));
+        az_banner_strip(b, 2000);
+        drag_log("CLIP COPY files \"%s\" (media %04x)\n", g_clip.path, g_clip.media);
+        return 0;
+    }
     if (pl_selected_is_track()) {
         if (move && !mp_remove_eligible()) {
             az_banner_strip("Sort by # to cut tracks", PL_MSG_READ);
@@ -2299,7 +2359,7 @@ static void mp_click_hook(void *ctrl, void *arg) {
         return;
     }
     if (type == 0 || type == 1) { /* playlist list (1) / history (0) */
-        if (clicked == k1) {
+        if (clicked == k1 && mp_b1_refused(type)) { /* HISTORY's ALL DELETE stays stock */
             mp_log("CLICK REMOVE ALL refused (hidden: it wipes every playlist on the USB)\n");
             return;
         }

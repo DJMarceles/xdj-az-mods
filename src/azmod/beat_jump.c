@@ -29,7 +29,21 @@
  * answers 5<->6 to that caller only (BJ_TILE_RA), with that deck's own mode. With the mod
  * off both pass through untouched.
  *
- * Entry points: bj_padpress_hook(), bj_padrel_hook().
+ * Jog display. The jog LCD draws each pad page itself, from one byte of the deck frame
+ * (offset 0x46 = jog case << 1 | layout variant; BEAT JUMP is case 3, BEAT JUMP 2 case 7,
+ * the AZ grid layout is variant 1). The deck frame builder's player-info writer 0x2178820
+ * reads that pair from device_adapter::sublcd::PlayerInfo +0xd4 (variant) and +0xd5 (case), which
+ * PlayerInfoData's get 0x1fefe18 hands it from the copy that PlayerInfoData's store 0x1fefa78
+ * makes of its staging area (data + 0x4f8). bj_joginfo_hook wraps that store: with the mod on,
+ * the store is handed a copy of the staging area whose case is swapped 3 <-> 7, so the jog shows
+ * the lengths the pads perform. The staging case itself is never written (EP147 can store the
+ * same staging area again without rereading it, and must find its own page there); the fields
+ * the store fills into its argument (timing, flags) are copied back, so the staging area ends
+ * as EP147's own store would leave it. The PlayerInfo is plain data (the store copies its two
+ * colour words with a 4-byte load and store). Only the object's own staging area is replaced;
+ * anything else, or a PlayerInfoData whose vtable does not match, passes through untouched.
+ *
+ * Entry points: bj_padpress_hook(), bj_padrel_hook(), bj_joginfo_hook().
  */
 #define BJ_PADPRESS_RUN EP_2086748 /* AsyncTask<pressPad lambda>::run(task)   */
 #define BJ_PADPRESS_VT EP_2e15028  /*   its vtable (address point)            */
@@ -122,4 +136,41 @@ static void bj_padrel_hook(long task) {
         pthread_mutex_unlock(&bj_held_mx);
     }
     g_orig_bj_padrel(task);
+}
+/* ---- Jog display ---- */
+#define BJ_JOGINFO_STORE EP_1fefa78 /* PlayerInfoData store(data, staging) */
+#define BJ_PLAYERINFODATA_VT EP_2df55e8
+#define BJ_JOG_STAGING 0x4f8 /* PlayerInfoData's staging PlayerInfo */
+#define BJ_JOG_INFO_SIZE 0xd6 /* PlayerInfo: its last field is the byte at +0xd5 */
+#define BJ_JOG_VARIANT 0xd4  /* PlayerInfo: jog layout variant (1 = the AZ pad grid) */
+#define BJ_JOG_CASE 0xd5     /* PlayerInfo: jog pad page */
+/* the jog page that shows the other BEAT JUMP page's lengths; any other page as it is */
+static uint8_t bj_jog_case(uint8_t variant, uint8_t jcase) {
+    if (variant != 1)
+        return jcase;
+    if (jcase == 3) /* BEAT JUMP: 1/2 1 2 4 */
+        return 7;
+    if (jcase == 7) /* BEAT JUMP 2: 8 16 32 64 */
+        return 3;
+    return jcase;
+}
+static void (*g_orig_bj_joginfo)(long, unsigned char *);
+/* Runs on the thread that builds the deck frames, inside PlayerInfoData's get, which fills the
+ * staging area just before this call. Nothing here is shared: the copy is this call's own. */
+static void bj_joginfo_hook(long data, unsigned char *info) {
+    uintptr_t v;
+    if (az_on(AZF_BEAT_JUMP_2_FIRST) && data && !(data & 7) &&
+        (uintptr_t) info == (uintptr_t) data + BJ_JOG_STAGING && own_q((uintptr_t) data, &v) &&
+        v == BJ_PLAYERINFODATA_VT) {
+        uint8_t c = info[BJ_JOG_CASE], sw = bj_jog_case(info[BJ_JOG_VARIANT], c);
+        if (sw != c) {
+            _Alignas(8) unsigned char copy[BJ_JOG_INFO_SIZE];
+            memcpy(copy, info, sizeof copy);
+            copy[BJ_JOG_CASE] = sw;
+            g_orig_bj_joginfo(data, copy);
+            memcpy(info, copy, BJ_JOG_CASE); /* what the store filled in; the case stays EP147's */
+            return;
+        }
+    }
+    g_orig_bj_joginfo(data, info);
 }

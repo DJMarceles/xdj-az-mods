@@ -505,6 +505,8 @@ static void drag_log(const char *fmt, ...) {
 #define LS_LEVELS 104             /* [begin, end) of 0x28-byte levels */
 #define LS_LEVEL_STRIDE 0x28
 #define LS_CATEGORY_PLAYLIST 5
+#define LS_CATEGORY_FOLDER 17 /* the Browse FOLDER view: the stick's file system */
+#define REC_KIND_FOLDER_ENTRY 1 /* a folder row in the FOLDER view (a file row is kind 4) */
 #define LV_SORT_Q 8   /* u32 +8 SortKind (0 = "#"), u8 +12 ListOrder (1 = desc) */
 #define LV_REC 24     /* the level's selected record */
 #define REC_ROW_Q 0   /* u32 at +4: display row of the selection */
@@ -582,7 +584,8 @@ static void plsnap_take(uintptr_t ls, unsigned media) {
         if ((long) c < n && n < 64 && own_q(b + (uintptr_t) c * LS_LEVEL_STRIDE + LV_REC, &lrec) &&
             lrec && own_q(lrec + REC_KIND_Q, &lk) && own_q(lrec + REC_ROW_Q, &row) &&
             (lk >> 32)) {
-            if ((lk & 0xff) == REC_KIND_TRACK) {
+            if ((lk & 0xff) == REC_KIND_TRACK && (cat & 0xffff) != LS_CATEGORY_FOLDER) {
+                /* (in the FOLDER view a file row's id is a folder entry, not a content id) */
                 s.any_cid = (unsigned) (lk >> 32);
                 s.any_row = (unsigned) (row >> 32);
                 s.any_media = media;
@@ -600,6 +603,45 @@ static void plsnap_take(uintptr_t ls, unsigned media) {
                     own_str(sp, s.sel_title, sizeof s.sel_title);
             }
         }
+    }
+    /* the Browse FOLDER view: the selected entry's path from the level names, 0..cursor (its
+     * stick's own file names; folder_copy.h checks each before it is joined) */
+    cat = cur = b = e = 0;
+    if (media && own_q(ls + LS_CATEGORY_Q, &cat) && (cat & 0xffff) == LS_CATEGORY_FOLDER &&
+        own_q(ls + LS_CURSOR_Q, &cur) && own_q(ls + LS_LEVELS, &b) &&
+        own_q(ls + LS_LEVELS + 8, &e) && b && e > b) {
+        long n = (long) ((e - b) / LS_LEVEL_STRIDE);
+        int c = (int) (unsigned) (cur >> 32);
+        static char nm[FC_MAX_DEPTH + 1][FC_NAME_MAX + 1]; /* this hook's thread only */
+        const char *names[FC_MAX_DEPTH + 1];
+        int k = 0, kind = 0;
+        unsigned ids[FC_MAX_DEPTH + 1];
+        for (int i = 0; i <= c && i < n && n < 64 && i <= FC_MAX_DEPTH; i++) {
+            uintptr_t r = 0, kq = 0, sp = 0;
+            if (!own_q(b + (uintptr_t) i * LS_LEVEL_STRIDE + LV_REC, &r) || !r ||
+                !own_q(r + REC_KIND_Q, &kq) || !own_q(r + 0x18, &sp) || !sp)
+                break;
+            own_str(sp, nm[i], sizeof nm[i]);
+            ids[k] = (unsigned) (kq >> 32);
+            names[k++] = nm[i];
+            kind = (int) (kq & 0xff);
+        }
+        if (k >= 1 && k == c + 1 && (kind == REC_KIND_FOLDER_ENTRY || kind == REC_KIND_TRACK) &&
+            !fc_rel_from_levels(names, k, s.fsel_path, sizeof s.fsel_path) &&
+            (kind == REC_KIND_FOLDER_ENTRY
+                 ? !fc_rel_from_levels(names, k, s.fsel_dir, sizeof s.fsel_dir)
+                 : (k == 1 ? (s.fsel_dir[0] = 0, 1)
+                           : !fc_rel_from_levels(names, k - 1, s.fsel_dir, sizeof s.fsel_dir)))) {
+            s.fsel_media = media;
+            s.fsel_kind = kind == REC_KIND_FOLDER_ENTRY ? 1 : 4;
+            unsigned dir_id = 0; /* the folder the selection is in: itself for a folder entry */
+            if (kind == REC_KIND_FOLDER_ENTRY)
+                dir_id = ids[k - 1];
+            else if (k >= 2)
+                dir_id = ids[k - 2];
+            s.fsel_dir_id = dir_id;
+        } else
+            s.fsel_path[0] = s.fsel_dir[0] = 0;
     }
     cat = cur = b = e = 0;
     if (own_q(ls + LS_CATEGORY_Q, &cat) && (cat & 0xffff) == LS_CATEGORY_PLAYLIST &&
@@ -1477,6 +1519,7 @@ static void mm_note(void *server) {
     __atomic_store_n(&g_mm[k].seq, ++seq, __ATOMIC_RELEASE);
     __atomic_store_n(&g_mm[k].media, media, __ATOMIC_RELEASE);
     __atomic_store_n(&g_mm[k].server, (unsigned long) (uintptr_t) server, __ATOMIC_RELEASE);
+    fc_mount_cleanup(mnt); /* an interrupted FOLDER-view copy onto this stick */
 }
 /* the newest server's mount for `media`; 0 = unknown (then nothing is drawn) */
 static int media_mount(unsigned media, char *out, size_t n) {
@@ -1780,6 +1823,7 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
             mv_pdb_sync(server); /* Device Library follows the edit */
         __atomic_store_n(&g_mv_state, MV_DONE, __ATOMIC_RELEASE);
     }
+    fc_refresh_service(server); /* a FOLDER-view copy landed on this stick: re-list it */
     if (__atomic_load_n(&g_ls_armed, __ATOMIC_ACQUIRE)) {
         t_pst_own++;        /* the spool syncs export.pdb itself (ls_pdb_sync) */
         ls_service(server); /* library spool, armed by ls_tick */
