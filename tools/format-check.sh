@@ -43,6 +43,7 @@ EXCLUDE=(
     '^guest/azmod/fxhdr\.h$'            # the Drum Roll X-PAD header bar
     '^guest/azmod/menu_icons\.h$'       # Mod Menu icons, from the SVGs in azmod/icons
     '^guest/azmod/menulabels\.h$'       # MENU panel labels
+    '^guest/azmod/collabels\.h$'        # the Browse COLUMNS button's labels
     '^guest/azmod/stems4art\.h$'        # 4-deck source-cell stem strips
     '^guest/azmod/stemsmark\.h$'        # the browser's stems mark
     '^guest/azmod/vsbar\.h$'            # the vinyl slider's canvas, an RGBA PNG

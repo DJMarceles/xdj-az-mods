@@ -8,10 +8,12 @@
  *   - a slow press on an order button does nothing (a quick tap picks it); a slow press on a
  *     tile still opens it (navigation);
  *   - the knob scrolls the page a row per detent, never past either end, with no knob focus
- *     drawn; its click fires nothing on the home page;
+ *     drawn; its click fires nothing on the home page (Browse's Home view aside: there the knob
+ *     moves a focus through the shelves' tiles, cmcat_test.c);
  *   - the offset stays inside the page (a shorter tab brings it back);
  *   - EP147's own scroll bar in the right margin only while the page overflows, its thumb at the
- *     top at offset 0 and at the bottom at the end.
+ *     top at offset 0 and at the bottom at the end;
+ *   - a full-screen frame does not draw the Mod Menu's left list under it.
  * menu.c is #included (MENU_C) for its statics; CM_CATALOG points at a temp file. */
 #include <stdlib.h>
 #include <string.h>
@@ -19,13 +21,14 @@
 #include "check.h"
 #include MENU_C
 
+static int g_sysinfo; /* times the Mod Menu's left list drew its "System Info" row */
 int azmod_ttf_menu(const azmod_fb *fb, int x, int y, int w, int h, const char *s, int px, int track, int bold, uint32_t c) {
     (void) fb;
     (void) x;
     (void) y;
     (void) w;
     (void) h;
-    (void) s;
+    if (s && !strcmp(s, "System Info")) g_sysinfo++;
     (void) px;
     (void) track;
     (void) bold;
@@ -144,6 +147,7 @@ int main(void) {
     g_s.menu_focused = 1;
     write_catalog(30);
     CHECK("30 mods in the catalog", g_ncc == 30);
+    g_cm_fcat = CMB_ALL;   /* Browse's grid (All mods); Home's knob is checked in cmcat_test.c */
     home(g_tab0);
     CHECK("Browse with 30 tiles overflows the page", g_cm_smax > 0);
     int smax = g_cm_smax;
@@ -210,7 +214,7 @@ int main(void) {
 
     /* a tile scrolled up under the header: a tap there is the header's, never the tile's */
     home(g_tab0);
-    g_cm_scroll = 250;
+    g_cm_scroll = ctl_of(CMC_TILE, 0)->y - view_top() + 40;   /* 40 px of tile 0 under the header */
     draw();
     t = ctl_of(CMC_TILE, 0);
     CHECK("tile 0 sits partly under the header", t->kind == CMC_TILE && t->y < view_top() && t->y + t->h > view_top());
@@ -228,19 +232,49 @@ int main(void) {
     int off = cm_off_now(), sx = g_fb.w * 3 / 10, sy = dock_y(&g_fb) + menu_hdrh(&g_fb) / 2;
     touch(sx, sy, sx, sy, 80);
     CHECK("the header: a tap beside the title turns nothing on or off", cm_off_now() == off && g_cm_view == CMV_HOME);
-    /* a slow press on a control that is not navigation (an order button) does nothing; a quick
-     * tap on it picks the order */
+    /* a slow press on a control that is not navigation (a view button) does nothing; a quick
+     * tap on it switches the view */
+    home(g_tab0);
+    const cm_ctl *vb = ctl_of(CMC_FCAT, CMB_HOME);
+    int vbx = vb->x + vb->w / 2, vby = vb->y + vb->h / 2;
+    touch(vbx, vby, vbx, vby, 900);
+    CHECK("slow press on a view button: the view stays", vb->kind == CMC_FCAT && g_cm_fcat == CMB_ALL && g_cm_view == CMV_HOME);
+    home(g_tab0);
+    touch(vbx, vby, vbx, vby, 80);
+    CHECK("CONTROL: a quick tap on it switches the view", g_cm_fcat == CMB_HOME);
+    g_cm_fcat = CMB_ALL;
+    /* the orders: the Sort button opens them, a tap on one picks it and closes them; a tap
+     * anywhere else, a knob turn or BACK only closes them */
     home(g_tab0);
     g_cm_sort = CMB_SORT_NAME;
+    CHECK("orders closed: no order buttons", ctl_of(CMC_SORT, 0)->kind < 0 && ctl_of(CMC_SORTBTN, 0)->kind == CMC_SORTBTN);
+    const cm_ctl *sb = ctl_of(CMC_SORTBTN, 0);
+    int sbx = sb->x + sb->w / 2, sby = sb->y + sb->h / 2;
+    touch(sbx, sby, sbx, sby, 80);
+    CHECK("tap on Sort: the four orders open", g_cm_sortpop && ctl_of(CMC_SORT, CMB_NSORT - 1)->kind == CMC_SORT);
     const cm_ctl *so = ctl_of(CMC_SORT, CMB_SORT_UPDATED);
     int sox = so->x + so->w / 2, soy = so->y + so->h / 2;
+    CHECK("the orders open under the button", so->y > sb->y && so->x == sb->x);
     touch(sox, soy, sox, soy, 900);
-    CHECK("slow press on an order button: the order stays", so->kind == CMC_SORT && g_cm_sort == CMB_SORT_NAME && g_cm_view == CMV_HOME);
-    home(g_tab0);
-    so = ctl_of(CMC_SORT, CMB_SORT_UPDATED);
-    touch(so->x + so->w / 2, so->y + so->h / 2, so->x + so->w / 2, so->y + so->h / 2, 80);
-    CHECK("CONTROL: a quick tap on it picks the order", g_cm_sort == CMB_SORT_UPDATED);
+    CHECK("slow press on an order: it is picked and the orders close", g_cm_sort == CMB_SORT_UPDATED && !g_cm_sortpop && g_cm_view == CMV_HOME);
     g_cm_sort = CMB_SORT_NAME;
+    home(g_tab0);
+    touch(sbx, sby, sbx, sby, 80);
+    t = ctl_of(CMC_TILE, 4);
+    touch(t->x + 10, t->y + t->h - 10, t->x + 10, t->y + t->h - 10, 80);
+    CHECK("orders open, a tap on a tile: they close, the tile does not open", !g_cm_sortpop && g_cm_view == CMV_HOME && g_cm_sort == CMB_SORT_NAME);
+    touch(sbx, sby, sbx, sby, 80);
+    knob(1, false);
+    CHECK("orders open, a knob turn: they close, the page stays", !g_cm_sortpop && g_cm_scroll == 0);
+    touch(sbx, sby, sbx, sby, 80);
+    CHECK("BACK with the orders open: they close, Community stays open", cm_back() && !g_cm_sortpop && g_cm_view == CMV_HOME && g_cm_full);
+    touch(sbx, sby, sbx, sby, 80);
+    touch(sbx, sby, sbx, sby, 80);
+    CHECK("a second tap on Sort closes them", !g_cm_sortpop);
+    g_cm_fcat = CMB_HOME;
+    home(g_tab0);
+    CHECK("Home: no Sort button (its shelves have their own orders)", ctl_of(CMC_SORTBTN, 0)->kind < 0);
+    g_cm_fcat = CMB_ALL;
     home(g_tab0);
     /* a slow press on a tile is navigation: it still opens */
     t = ctl_of(CMC_TILE, 2);
@@ -281,7 +315,7 @@ int main(void) {
     int ring = 0;
     for (int yy = view_top(); yy < view_bot() && !ring; yy++)
         for (int xx = 0; xx < W && !ring; xx += 2)
-            ring = px_at(xx, yy) == (C_HI & 0xffffff) && px_at(xx, yy + 1) == (C_HI & 0xffffff) && xx > 40;
+            ring = px_at(xx, yy) == (C_HI & 0xffffff) && px_at(xx, yy + 1) == (C_HI & 0xffffff) && xx > cm_rail_w(&g_fb) + 40;   /* the rail lights its tab */
     CHECK("no knob focus ring is drawn on the page", !ring);
     int v = g_cm_view, tab = g_cm_tab, o = cm_off_now();
     knob(0, true);
@@ -296,6 +330,17 @@ int main(void) {
     g_cm_tab = 2;
     draw();
     CHECK("a shorter tab: the offset is clamped at the next draw", g_cm_scroll == 0);
+
+    /* the full screen paints the whole menu area: the Mod Menu's left list under it is not drawn
+     * (each scroll frame would pay for it unseen); the summary card beside the list still has it */
+    g_sysinfo = 0;
+    draw();
+    CHECK("full screen: the left list under it is not drawn", g_sysinfo == 0);
+    g_cm_full = 0;
+    g_sysinfo = 0;
+    draw();
+    CHECK("CONTROL: the summary card beside the left list draws the list", g_sysinfo > 0);
+    g_cm_full = 1;
 
     /* pure geometry */
     CHECK("scroll max: content past the view", cm_scroll_max(1000, 400) == 600);

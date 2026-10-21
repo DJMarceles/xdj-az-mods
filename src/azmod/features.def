@@ -30,8 +30,8 @@
  *     azmod.cfg. Its id is AZI_<ENUM> (an item), its index AZA_<ENUM>.
  *
  *   AZ_REGISTERED_ROWS()
- *     Where community mods' rows (azf_register) go: after every official row, before the
- *     utilities.
+ *     Where community mods' rows (azf_register) go: right under Community Mods, before the
+ *     other utilities, so they read as Community Mods' own.
  *
  *   AZ_RETIRED(cfg)
  *     An azmod.cfg slot with no feature: never reused (an old file may carry a '1' there),
@@ -132,6 +132,19 @@ AZ_FEATURE( CLOCK_24H,         "overlay-clock-24h",          "Time Format",     
 /*          ENUM               label                         parent        kind            flags                          screen */
 AZ_ACTION(  PAD_COLORS,        "Pad Colors",                 EXTRAS,       AZ_ROW_SCREEN,  0,                             AZ_COLORS,
             .d.help = "Choose the colors of the pad mode buttons.")
+/* the Browse track list changes: a group whose rows live on their own screen (Browse View Mods >) */
+AZ_FEATURE( BROWSE_VIEW,       "browse-view",                "Browse View Mods",           EXTRAS,       AZ_ROW_GROUP,   AZ_ROW_CHILD_ICONS,             -1,
+            .screen = AZ_BROWSE_VIEW,
+            .d.help = "Changes to the Browse track lists.")
+/* the COLUMN EDIT button beside PREVIEW and everything it sets: widths, fields and hidden
+ * columns (browse_edit.c, browse_fields.c), and every library field in the sub column list
+ * (browse_columns.c, from the next Reload). Off = EP147's own columns; what was set is kept. */
+AZ_FEATURE( COLUMN_EDIT,       "column-edit",                "Column Edit",                BROWSE_VIEW,  AZ_ROW_TOGGLE,  0,                              -1,
+            .d.help = "Resize, change or hide the track list columns.")
+/* hot cue marks on the Browse TRACK list's PREVIEW waveforms, from each track's analysis
+ * file (preview_hotcues.c) */
+AZ_FEATURE( PREVIEW_HOT_CUES,  "preview-hot-cues",           "Preview Hot Cues",           BROWSE_VIEW,  AZ_ROW_TOGGLE,  0,                              -1,
+            .d.help = "Hot cue marks on the track list's PREVIEW waveforms.")
 /* entering BEAT JUMP lands on EP147's own BEAT JUMP 2 (8-64 beats) first. Read live. */
 AZ_FEATURE( BEAT_JUMP_2_FIRST, "beat-jump-2-first",          "BEAT JUMP 2 First",          EXTRAS,       AZ_ROW_TOGGLE,  0,                              27,
             .d.help = "BEAT JUMP opens the 8, 16, 32 and 64 beat jumps first.")
@@ -152,10 +165,6 @@ AZ_FEATURE( HIDE_TRACK_TITLE,  "hide-track-title",           "Hide Track Title",
  * usecase::phase_meter */
 AZ_FEATURE( PHASE_METER,       "phase-meter",                "Phase Meter",                EXTRAS,       AZ_ROW_TOGGLE,  0,                              36,
             .d.help = "Shows how the two decks line up, above their waveforms.")
-/* hot cue marks on the Browse TRACK list's PREVIEW waveforms, from each track's analysis
- * file (preview_hotcues.c) */
-AZ_FEATURE( PREVIEW_HOT_CUES,  "preview-hot-cues",           "Preview Hot Cues",           EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
-            .d.help = "Hot cue marks on the track list's PREVIEW waveforms.")
 /* the jog spins a track back far past its start, not only 2 s (spin_back.c) */
 AZ_FEATURE( EXTENDED_LEAD_IN, "extended-lead-in",      "Extended Lead-In",        EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
             .d.help = "Spin a track back as far as you like before its start.")
@@ -164,9 +173,10 @@ AZ_FEATURE( EXTENDED_LEAD_IN, "extended-lead-in",      "Extended Lead-In",      
 AZ_FEATURE( CAMELOT_KEYS,      "camelot-keys",               "Camelot Keys",               EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
             .d.help = "Streaming tracks' keys in Camelot, like 8A.")
 
+AZ_ACTION(  COMMUNITY,         "Community Mods",             NONE,         AZ_ROW_SCREEN,  0,                             AZ_COMMUNITY)
+
 AZ_REGISTERED_ROWS()
 
-AZ_ACTION(  COMMUNITY,         "Community Mods",             NONE,         AZ_ROW_SCREEN,  0,                             AZ_COMMUNITY)
 AZ_ACTION(  UPDATE,            "Updates",                    NONE,         AZ_ROW_SCREEN,  AZ_ROW_NO_CHEVRON,             AZ_UPDATE)
 AZ_ACTION(  SYSINFO,           "System Info",                NONE,         AZ_ROW_SCREEN,  0,                             AZ_INFO)
 AZ_ACTION(  RELOAD,            "Reload",                     NONE,         AZ_ROW_ACTION,  0,                             -1,

@@ -293,21 +293,29 @@ static void compose_pad_colors(azmod_state *s, const azmod_fb *fb, int rowh, int
     }
 }
 
-/* Overlays or the Clock: the switch and one row per setting under it. */
+/* Overlays, the Clock or Browse View Mods: the switch (a group has none) and one row per setting
+ * under it. */
 static void compose_overlays(azmod_state *s, const azmod_fb *fb, int rowh, int scale) {
     int head = sub_head(s->mode);
-    bool on = az_on(head);
+    bool on = az_kind(head) != AZ_ROW_TOGGLE || az_on(head);
     draw_menu_header(fb, rowh, scale, az_label(head));
     int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(head, ovr);
     for (int r = 0; r < OVERLAYS_ROWS; r++) {
         /* the rows under the switch gray while it is off (their picks are kept) */
-        uint32_t ink = (r == 0 || on) ? C_TEXT : C_TEXT_DIM;
-        draw_colors_row(s, fb, r, rowh, overlays_label(r, ovr[r]), scale, ink);
+        uint32_t ink = (ovr[r] == head || on) ? C_TEXT : C_TEXT_DIM;
+        bool icons = (az_row(head)->d.flags & AZ_ROW_CHILD_ICONS) && ovr[r] != head;
+        draw_colors_row(s, fb, r, rowh, icons ? "" : overlays_label(ovr[r]), scale, ink);
         int rx, ry, rw, rh;
         colors_row_rect(fb, r, &rx, &ry, &rw, &rh);
         int sz = g_full ? fb->h * 20 / 800 : rh / 2,
             cbx = rx + rw - sz - (g_full ? fb->w / 40 : rh / 3), cby = ry + (rh - sz) / 2;
         bool hi = s->menu_sel == r || (s->pressed_item == r && s->pressed_ticks > 0);
+        if (icons) { /* the group's rows wear the icons Extras' rows do, the label right of it */
+            uint32_t tc = (hi && !g_full) ? C_HI_TEXT : ink;
+            int isz = rh * 55 / 100, ix = rx + sub_lx(fb);
+            draw_item_icon(fb, ix, ry + (rh - isz) / 2, isz, ovr[r], tc);
+            draw_text(fb, ix + isz + fb->w / 60, ry + (rh - 7 * scale) / 2, overlays_label(ovr[r]), scale, tc);
+        }
         const char *val = overlays_value(s, ovr[r]);
         if (!val) {
             draw_checkbox(fb, cbx, cby, sz, az_on(ovr[r]), hi);
@@ -483,8 +491,15 @@ void azmod_composite(azmod_state *s, const azmod_fb *fb) {
         scale = 1;
     int rowh = menu_rowh(fb);
     if (g_full) {
+        if (s->mode == AZ_COMMUNITY && g_cm_full && !cm_animating()) {
+            /* full-screen Community Mods paints the whole menu area opaque: the left list under it
+             * would never be seen, so only its rows are kept current */
+            c_lsync(s, fb);
+            cm_draw(s, fb);
+            return;
+        }
         c_draw_left(s, fb);
-        if (s->mode == AZ_OPEN) {
+        if (c_rows_pane(s)) { /* a mod's settings, or a group's screen (Browse View Mods) */
             c_draw_right(s, fb);
             return;
         }
@@ -514,7 +529,7 @@ void azmod_composite(azmod_state *s, const azmod_fb *fb) {
         return;
     }
 
-    if (s->mode == AZ_OVERLAYS || s->mode == AZ_CLOCK) {
+    if (sub_mode(s->mode)) {
         compose_overlays(s, fb, rowh, scale);
         return;
     }

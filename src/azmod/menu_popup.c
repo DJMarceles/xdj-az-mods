@@ -103,7 +103,7 @@ static int mp_enabled(void) { /* Playlist Editing's buttons */
     return g_mp_installed && g_reorder_hooks && az_on(AZF_PLAYLIST_EDITING);
 }
 static int mp_stems_on(void) { /* MAKE STEMS (remote stems): its own flag, not Playlist Editing's */
-    return g_mp_installed && g_rs_on;
+    return g_mp_installed && __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED);
 }
 
 /* juce::ImageCache::getFromMemory(const void *data, int size) -> juce::Image (sret

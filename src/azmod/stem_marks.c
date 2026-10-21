@@ -603,15 +603,17 @@ static int sm_fds_on(const char *path) {
         if (k <= 0)
             continue;
         tgt[k] = 0;
-        if (!strcmp(tgt, path))
-            n++;
+        if (!strcmp(tgt, path) && libfd_owner(atoi(e->d_name)) != LIBFD_FIELDS)
+            n++; /* browse_fields.c's connection is not EP147's */
     }
     closedir(fd);
     return n;
 }
 static void sm_db_close(struct sm_db *d, const char *why, FILE *lg) {
-    if (d->db)
+    if (d->db) {
+        libfd_del(libfd_fd_of(d->db));
         g_smsq.close(d->db);
+    }
     if (lg && d->db)
         fprintf(lg, "DB closed %s: %s\n", d->mount, why);
     d->db = 0;
@@ -732,6 +734,7 @@ static void *sm_db_for(const char *mount, FILE *lg) {
     if (d && d->db && d->sig == sig && sig)
         return d->db;
     if (d && d->db) {
+        libfd_del(libfd_fd_of(d->db));
         g_smsq.close(d->db);
         d->db = 0;
     }
@@ -764,6 +767,7 @@ static void *sm_db_for(const char *mount, FILE *lg) {
     }
     d->db = db;
     d->sig = sig;
+    libfd_add(libfd_of_db(db, dbp), LIBFD_STEMS);
     if (lg)
         fprintf(lg, "DB open %s (key %lld ms, first read %lld ms)\n", dbp, t1 - t0, drag_now_ms() - t1);
     return db;
@@ -872,7 +876,7 @@ static int sm_resolve_playlist(unsigned pl, const char *name, unsigned media, FI
              * rows on screen are answered in between, not after it */
             sm_serve_tracks(lg);
             const unsigned char *pp = g_sq.column_text(st, 0), *tt = g_sq.column_text(st, 2);
-            if (tt && g_rs_on && *busy < 2) { /* the queue's identity: (content_id, title) */
+            if (tt && __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED) && *busy < 2) { /* the queue's identity: (content_id, title) */
                 int pd = sm_pending((unsigned) g_sq.column_int64(st, 1), (const char *) tt, 0);
                 if (pd >= 0)
                     *busy = 2;
@@ -1341,6 +1345,31 @@ static void smk_draw(void *g, int which, int x, int y) {
     t_dm_bypass = 0;
 #endif
 }
+/* The rightmost visible column, from the list's own header (gui::browse::TrackListHeader at
+ * widget+0xd0): EP147's column ids run left to right, so it is the highest visible id. 0 when
+ * the header cannot be read. Browse Columns changes the columns while the list is up, and
+ * a row painted with the old layout would teach the learned column a wrong answer. */
+static int sm_hdr_lastcol(uintptr_t widget) {
+    uintptr_t hdr = 0, vt = 0;
+    if (!own_q(widget + 0xd0, &hdr) || !hdr || (hdr & 7) || !own_q(hdr, &vt) || vt != EP_2b7d8d0)
+        return 0;
+    for (int id = ep_off(7, 8); id >= 1; id--)
+        if (((int (*)(long, int)) EP_24597e0)((long) hdr, id) & 0xff)
+            return id;
+    return 0;
+}
+/* The room the mark takes at the right of the column it is drawn on: paintcell_hook has EP147
+ * paint that column's cells this much narrower, so a right-aligned value (BPM) ends before the
+ * mark instead of under it. 0 for any other cell. (message thread) */
+#define SM_RESERVE_GAP 4
+static int sm_reserve_w(void *model, int col, int w, int h) {
+    uintptr_t self = (uintptr_t) model - 0x30, vt = 0;
+    if (!g_sm_on || !model || col == SM_TITLE_COL || w < 70 || h < 30 || !sm_shown() || !own_q(self, &vt) ||
+        vt != TRACKLIST_WIDGET_VT)
+        return 0;
+    int hc = sm_hdr_lastcol(self);
+    return hc > 0 && col == hc ? SMK_INSET_TRACK + SMK_W + SM_RESERVE_GAP : 0;
+}
 static void sm_after_paint(void *self, void *g, int row, int col, int w, int h) {
     if (row < 0 || !sm_shown())
         return;
@@ -1351,6 +1380,11 @@ static void sm_after_paint(void *self, void *g, int row, int col, int w, int h) 
     struct sm_w *e = sm_wslot((unsigned long) (uintptr_t) self);
     e->ms = drag_now_ms();
     sm_learn_lastcol(e, row, col);
+    if (w >= 70 && h >= 30) {
+        int hc = sm_hdr_lastcol((uintptr_t) self);
+        if (hc > 0)
+            e->lastcol = hc;
+    }
     /* >= 70 px: juce calls paintCell only for columns without a component, so in a list
      * whose rightmost column is the title (a component), as in the two-pane PLAYLIST
      * view's track pane, the "rightmost painted cell" is the 52 px artwork. Key is 90 px.
@@ -1408,7 +1442,7 @@ static int sm_mark_row(struct sm_w *e, uintptr_t self, void *g, int row, int x0,
     /* In the Remote Stems queue: animated from the moment it is queued, one animation per
      * phase (smk_anim). sm_tick repaints these rows (~12 fps). */
     int ph = SM_PH_WT;
-    int pend = (g_rs_on && id) ? sm_pending(id, tt, &ph) : -2;
+    int pend = (__atomic_load_n(&g_rs_on, __ATOMIC_RELAXED) && id) ? sm_pending(id, tt, &ph) : -2;
     if (pend > -2) {
         long long t = drag_now_ms();
         if (ph != SM_PH_WT &&

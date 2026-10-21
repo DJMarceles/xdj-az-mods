@@ -10,14 +10,15 @@
 
 static unsigned char g_out[1 << 20];
 static int g_outn;
-static int verdict(const char *path) {   /* 1 accepted (g_out = what JUCE gets), 0 refused */
+static int verdict_fit(const char *path, int shot) {   /* 1 accepted (g_out = what JUCE gets), 0 refused */
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     int n = (int) fread(g_out, 1, sizeof g_out, f);
     fclose(f);
-    g_outn = cmi_png_ok(g_out, n);
+    g_outn = shot ? cmi_png_fit(g_out, n, 1280, 800) : cmi_png_ok(g_out, n);
     return g_outn > 0;
 }
+static int verdict(const char *path) { return verdict_fit(path, 0); }
 static int same_as(const char *path) {   /* the accepted bytes equal this file */
     static unsigned char b[1 << 20];
     FILE *f = fopen(path, "rb");
@@ -53,6 +54,18 @@ int main(int argc, char **argv) {
         char p[512];
         snprintf(p, sizeof p, "%s/%s", dir, c[k].file);
         CHECK(c[k].what, verdict(p) == c[k].want);
+    }
+    {   /* a screenshot's limits: 1280 x 800, one pixel past either side refused */
+        char p[512];
+        snprintf(p, sizeof p, "%s/shot1280.png", dir);
+        CHECK("a 1280x800 screenshot accepted at the screenshot limits", verdict_fit(p, 1) == 1);
+        CHECK("CONTROL: the same picture refused as an icon (512 max)", verdict_fit(p, 0) == 0);
+        snprintf(p, sizeof p, "%s/shot1281.png", dir);
+        CHECK("1281 wide refused at the screenshot limits", verdict_fit(p, 1) == 0);
+        snprintf(p, sizeof p, "%s/shot801.png", dir);
+        CHECK("801 high refused at the screenshot limits", verdict_fit(p, 1) == 0);
+        snprintf(p, sizeof p, "%s/rgba256.png", dir);
+        CHECK("an icon passes the screenshot limits too", verdict_fit(p, 1) == 1);
     }
     {   /* the metadata is gone and the picture is untouched: exactly the plain icon */
         char p[512], q[512];

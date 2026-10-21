@@ -37,7 +37,7 @@ static struct {
 #define RS_PL_MAX 2000
 static _Atomic int g_rs_busy; /* a playlist is being queued on its worker */
 static int rs_arm(unsigned media, unsigned cid, unsigned pl) { /* message thread */
-    if (!g_rs_on)
+    if (!__atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
         return -70;
     if (__atomic_load_n(&g_drag_on, __ATOMIC_RELAXED))
         return -1;
@@ -412,6 +412,82 @@ static int rs_status_banner(char *buf) {
     return strstr(buf, "failed") || strstr(buf, "not found") || strstr(buf, "Turn on") ||
            strstr(buf, "missing") || strstr(buf, "cannot") || strstr(buf, "already");
 }
+/* Does any stick under <root> hold a queued request, a .req file in
+ * <root>/<stick>/MODS/azstems-queue?
+ * Directory reads on a USB stick can block for as long as the stick is busy, so this runs on
+ * the stem-marks worker, never on the message thread. */
+static int rs_queue_has_req(const char *root) {
+    DIR *rd = opendir(root);
+    if (!rd)
+        return 0;
+    struct dirent *de;
+    int work = 0;
+    while (!work && (de = readdir(rd))) {
+        if (de->d_name[0] == '.')
+            continue;
+        char q[300];
+        if (snprintf(q, sizeof q, "%s/%s/MODS/azstems-queue", root, de->d_name) >= (int) sizeof q)
+            continue;
+        DIR *d = opendir(q);
+        if (!d)
+            continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (l > 4 && !strcmp(e->d_name + l - 4, ".req")) {
+                work = 1;
+                break;
+            }
+        }
+        closedir(d);
+    }
+    closedir(rd);
+    return work;
+}
+/* The scan's result, from the worker to the message thread: 1 = a request is queued. */
+static int g_rs_work; /* __atomic only */
+static void rs_scan_publish(const char *root) {
+    __atomic_store_n(&g_rs_work, rs_queue_has_req(root), __ATOMIC_RELEASE);
+}
+static int rs_work_take(void) {
+    return __atomic_exchange_n(&g_rs_work, 0, __ATOMIC_ACQ_REL);
+}
+/* The scan's own thread: every RS_SCAN_MS while the feature is on, one scan. It belongs to
+ * Remote Stems alone (started from its install path), so it runs whether or not any other mod's
+ * worker exists. It runs at idle priority: a busy stick delays only this thread. */
+#define RS_SCAN_MS 10000
+static void rs_scan_loop(const char *root, const int *stop, const int *on, int period_ms) {
+    long long next = 0;
+    while (!__atomic_load_n(stop, __ATOMIC_ACQUIRE)) {
+        long long now = drag_now_ms();
+        if (now >= next && __atomic_load_n(on, __ATOMIC_RELAXED)) {
+            next = now + period_ms;
+            rs_scan_publish(root);
+        }
+        usleep(100000);
+    }
+}
+static int g_rs_scan_stop; /* __atomic only; never set in production, the loop runs for the process */
+static void *rs_scan_thread(void *arg) {
+    (void) arg;
+    struct sched_param sp = {0};
+    pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+    rs_scan_loop("/media/usb", &g_rs_scan_stop, &g_rs_on, RS_SCAN_MS);
+    return NULL;
+}
+static void rs_scan_start(void) {
+    static int started; /* __atomic only: install may run more than once */
+    if (__atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL))
+        return;
+    pthread_t t;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int e = az_thread_create(&t, &at, rs_scan_thread, NULL);
+    pthread_attr_destroy(&at);
+    if (e)
+        __atomic_store_n(&started, 0, __ATOMIC_RELEASE);
+}
 /* Message thread, from msg_tick: surfaces the helper's status line on EP147's
  * top strip and restarts the helper when a stick holds queued work (after an
  * EP147 restart, or a stick from another deck). One stat a second; a directory
@@ -424,11 +500,12 @@ static void rs_tick(void) {
         long long now = drag_now_ms();
         if (now - at >= 500) {
             at = now;
-            g_rs_on = az_on(AZF_REMOTE_STEMS) &&
-                      az_active(AZF_REMOTE_STEMS);
+            __atomic_store_n(&g_rs_on,
+                             az_on(AZF_REMOTE_STEMS) && az_active(AZF_REMOTE_STEMS),
+                             __ATOMIC_RELAXED);
         }
     }
-    if (!g_rs_on)
+    if (!__atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
         return;
     if (__atomic_exchange_n(&g_rs_pl_done, 0,
                             __ATOMIC_ACQ_REL)) { /* a playlist finished queueing */
@@ -446,7 +523,7 @@ static void rs_tick(void) {
         if (rc || !n)
             az_banner_strip(msg, RS_MSG_MS); /* queued: the rows animate, no banner */
     }
-    static long long next, next_scan;
+    static long long next;
     static time_t mt;
     static off_t sz;
     long long now = drag_now_ms();
@@ -472,36 +549,10 @@ static void rs_tick(void) {
         if (line[0] && !first && problem)
             az_banner_strip(line, RS_MSG_MS);
     }
-    if (now < next_scan)
-        return;
-    next_scan = now + 10000;
-    if (rs_helper_running())
-        return;
-    DIR *rd = opendir("/media/usb");
-    if (!rd)
-        return;
-    struct dirent *de;
-    int work = 0;
-    while (!work && (de = readdir(rd))) {
-        if (de->d_name[0] == '.')
-            continue;
-        char q[300];
-        snprintf(q, sizeof q, "/media/usb/%s/MODS/azstems-queue", de->d_name);
-        DIR *d = opendir(q);
-        if (!d)
-            continue;
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            size_t l = strlen(e->d_name);
-            if (l > 4 && !strcmp(e->d_name + l - 4, ".req")) {
-                work = 1;
-                break;
-            }
-        }
-        closedir(d);
-    }
-    closedir(rd);
-    if (work)
+    /* A queued request is found by the scan thread (rs_scan_publish), so no directory on
+     * a stick is read here. Taking the flag clears it; the next scan sets it again while the
+     * request is still queued. */
+    if (rs_work_take())
         rs_start_helper();
 }
 
@@ -523,6 +574,8 @@ static void install_remotestems(void) {
     if (!g_has_stems_fn)
         *(void **) &g_has_stems_fn = dlsym(RTLD_DEFAULT, "azstem_has_stems");
     g_rs_inst = sel == 1 && lib == 1 && pc == 1; /* g_rs_on follows the Mod Menu toggle (rs_tick) */
+    if (g_rs_inst)
+        rs_scan_start();
     drag_log("remote stems: selection=%d library=%d paintCell=%d -> %s\n", sel, lib, pc,
              g_rs_inst ? "installed" : "OFF");
 }
@@ -536,7 +589,7 @@ static struct {
 } g_smp[SM_PEND]; /* pct -1 = waiting; g_sm_mu */
 static int g_smp_n;
 static void sm_pend_scan(void) {
-    if (!g_rs_on)
+    if (!__atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
         return;
     struct {
         unsigned cid, h;

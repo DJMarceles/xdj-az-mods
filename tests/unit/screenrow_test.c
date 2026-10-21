@@ -148,6 +148,10 @@ static int select_row(azmod_state *s, int item) {
     return 0;
 }
 static int on_page(azmod_state *s) { return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_MOD && seen("TESTMOD SCREEN"); }
+/* the Installed tab's split: the mod selected in the list, its own page (not the row's screen) beside it */
+static int on_split_page(azmod_state *s) {
+    return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_HOME && g_cm_isel == (CMC_MOD << 16 | 0) && seen("TESTMOD SCREEN") && !seen("ROW SCREEN");
+}
 static int on_row_page(azmod_state *s) { return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_MOD && seen("ROW SCREEN") && !seen("TESTMOD SCREEN"); }
 static int count_seen(const char *t) {
     char k[96];
@@ -262,9 +266,7 @@ int main(void) {
     cm_ctl c = {CMC_MOD, 0, 0, 0, 0, 0};
     cm_fire(&c);
     settle(&s);
-    CHECK("from the Mod Index afterwards: the mod's own page, not the row's", on_page(&s));
-    azmod_back(&s);
-    settle(&s);
+    CHECK("from the Mod Index afterwards: the mod's own page beside the list, not the row's", on_split_page(&s));
     azmod_back(&s);
     settle(&s);
 

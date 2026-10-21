@@ -138,7 +138,7 @@ static bool input_pad_colors(azmod_state *s, const azmod_fb *fb, int touch_x, in
     return true; /* consume everything while the screen is up */
 }
 
-/* Overlays or the Clock: row 0 is the switch, the rest are the rows under it. */
+/* Overlays, the Clock or Browse View Mods: the switch first (a group has none), then the rows under it. */
 static bool input_overlays(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, bool touched, int enc_delta,
                            bool enc_click) {
     int ovr[OVERLAYS_MAX], OVERLAYS_ROWS = overlays_rows(sub_head(s->mode), ovr);
@@ -383,7 +383,7 @@ bool azmod_input(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, b
     if (s->mode == AZ_COLORS)
         return input_pad_colors(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 
-    if (s->mode == AZ_OVERLAYS || s->mode == AZ_CLOCK)
+    if (sub_mode(s->mode))
         return input_overlays(s, fb, touch_x, touch_y, touched, enc_delta, enc_click);
 
     if (s->mode == AZ_COLOR_PICK)
@@ -400,12 +400,13 @@ bool azmod_input(azmod_state *s, const azmod_fb *fb, int touch_x, int touch_y, b
 
 static bool cm_tick(azmod_state *s);
 bool azmod_tick(azmod_state *s) {
+    bool glide = c_glide_tick(s); /* the Mod Menu's lists in motion */
     if (s->mode == AZ_UPDATE && cl_animate(s))
         return true; /* changelog easing: redraw */
     if (cm_tick(s))
         return true; /* Community: the fetcher's files */
     if (s->pressed_item < 0)
-        return false;
+        return glide;
     if (s->pressed_ticks > 0) {
         s->pressed_ticks--;
         return true;

@@ -9,15 +9,20 @@
  *   - the same id elsewhere (fields 17-19): a line whose id another installed copy holds says so
  *     on its tile and page and offers no Install; a line others also offer says so; the name of
  *     an installed id never comes from another author's line;
- *   - Browse (field 20 and cm_browse.h through the real screen): the category buttons and their
- *     counts, the orders, the search field and its keyboard page, the clear square, and Add
- *     repository's keyboard still typing the address.
+ *   - Browse (field 20 and cm_browse.h through the real screen): the view buttons and their
+ *     counts, the orders, and Add repository's keyboard typing the address;
+ *   - the download count (field 21): read, drawn on a tile and a mod page only when there is
+ *     one; the Downloads order; Home's shelves (one row each, the tiles that fit), See all, a
+ *     shelf tile, the knob scrolling the page (no focus); the mod page's header, buttons and
+ *     Permissions.
  * menu.c is #included (MENU_C) so its statics are visible; CM_CATALOG points at a temp file.
+ * CM_NOW pins the clock a mod page's "updated N days ago" is counted from.
  * Text is captured through azmod_ttf_menu, which every c_text call goes through first. */
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "check.h"
+#define CM_NOW() 1950134400LL /* 2031-10-19 UTC: a mod page's "updated N days ago" draws the same every day */
 #include MENU_C
 
 static char g_seen[1 << 16];
@@ -48,6 +53,20 @@ int azmod_ttf_menu2(const azmod_fb *fb, int x, int y, int w, int h, const char *
     return azmod_ttf_menu(fb, x, y, w, h, s, px, track, bold, c);
 }
 static int seen(const char *s) { return strstr(g_seen, s) != NULL; }
+/* how many drawn texts are a count alone ("1,840", "0"): a tile's download line */
+static int ncounts(void) {
+    int k = 0;
+    for (const char *p = g_seen; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t L = e ? (size_t) (e - p) : strlen(p);
+        int digits = L > 0;
+        for (size_t i = 0; i < L; i++)
+            if (!(p[i] >= '0' && p[i] <= '9') && p[i] != ',') digits = 0;
+        k += digits;
+        p += L + (e ? 1 : 0);
+    }
+    return k;
+}
 
 #define W 1280
 #define H 800
@@ -73,10 +92,10 @@ static int nkind(int kind) {
     for (int i = 0; i < g_nctl; i++) k += g_ctl[i].kind == kind;
     return k;
 }
-static uint32_t corner(int tile_idx) {   /* the pixel just inside a tile's top-right corner */
+static uint32_t tile_px(int tile_idx, int left) {   /* the pixel just inside a tile's top corner */
     for (int i = 0; i < g_nctl; i++)
         if (g_ctl[i].kind == CMC_TILE && g_ctl[i].idx == tile_idx) {
-            int x = g_ctl[i].x + g_ctl[i].w - 2, y = g_ctl[i].y + 1;
+            int x = left ? g_ctl[i].x + 1 : g_ctl[i].x + g_ctl[i].w - 2, y = g_ctl[i].y + 1;
             if (x < 0 || y < 0 || x >= W || y >= H) return 0xFFFFFFFFu;
             uint32_t v;
             memcpy(&v, g_px + (size_t) y * g_fb.stride + (size_t) x * 4, 4);
@@ -84,15 +103,19 @@ static uint32_t corner(int tile_idx) {   /* the pixel just inside a tile's top-r
         }
     return 0xFFFFFFFFu;
 }
+static uint32_t corner(int tile_idx) { return tile_px(tile_idx, 0); }
 
 static void write_catalog(int nrepo, int nmod, int more) {
     FILE *f = fopen(CM_CATALOG ".new", "w");
     fprintf(f, "v1\n");
     for (int r = 0; r < nrepo; r++)   /* repository 0 is in the Mod Index, the rest were added */
         fprintf(f, "repo|https://example.com/r%d/azmods-repo.json|Repo %d|1|%d|\n", r, r, r == 0);
-    for (int i = 0; i < nmod; i++)    /* mod 1 comes from an added repository, every other from repo 0 */
-        fprintf(f, "mod|https://example.com/r%d/azmods-repo.json|mod-%03d|Mod %d|1.0.0|someone|Does a thing|tools|0|any|1000|||||0\n",
-                i == 1 ? 1 : 0, i, i);
+    /* mod 1 comes from an added repository, every other from repo 0; mod 2 is beta (field 22) and
+     * names two screenshots, one of them a path the fetcher never writes (field 23) */
+    for (int i = 0; i < nmod; i++)
+        fprintf(f, "mod|https://example.com/r%d/azmods-repo.json|mod-%03d|Mod %d|1.0.0|someone|Does a thing|tools|0|any|1000|||||0%s\n",
+                i == 1 ? 1 : 0, i, i,
+                i == 2 ? "||||||1|" CM_SHOTDIR "0123456789abcdef.png /tmp/elsewhere/0123456789abcdef.png" : "");
     if (more) fprintf(f, "more|%d\n", more);
     fclose(f);
     rename(CM_CATALOG ".new", CM_CATALOG);
@@ -127,18 +150,38 @@ int main(void) {
     CHECK("all 96 repositories the fetcher can list are held", g_ncr == 96 && g_cr_more == 0);
     CHECK("the first 128 mod lines are held", g_ncc == 128);
     CHECK("mods past the array and the fetcher's more| line are counted (72 + 50)", g_cc_more == 122);
+    CHECK("Browse opens on Home", g_cm_fcat == CMB_HOME);
+    g_cm_fcat = CMB_ALL;   /* the grid: All mods (Home is checked below) */
     layout(CMV_HOME, 1, -1);
     CHECK("Browse says it shows only the first ones", seen("Showing the first 128 of 250 mods."));
     CHECK("every one of the 128 tiles can be touched", nkind(CMC_TILE) == 128);
-    CHECK("a mod from an added repository has the corner mark on its tile", corner(1) == C_AVAIL);
-    CHECK("CONTROL: a mod from the Mod Index has none", corner(0) != C_AVAIL && corner(0) != 0xFFFFFFFFu);
+    CHECK("a mod from an added repository has the orange corner mark on its tile", corner(1) == C_HI);
+    CHECK("CONTROL: a mod from the Mod Index has none", corner(0) != C_HI && corner(0) != 0xFFFFFFFFu);
+    CHECK("a beta mod (field 22) is read as beta; CONTROL: the others are not", g_cc[2].beta && !g_cc[0].beta && !g_cc[1].beta);
+    CHECK("a beta mod has the blue mark in its top-left corner", tile_px(2, 1) == CM_BETA_BG);
+    CHECK("CONTROL: a mod that is not beta has none", tile_px(0, 1) != CM_BETA_BG && tile_px(1, 1) != CM_BETA_BG);
+    CHECK("BETA is written inside the mark", seen("BETA"));
+    CHECK("screenshots (field 23): only the fetcher's own directory is taken", g_cc[2].nshots == 1 &&
+                                                                                   !strcmp(g_cc[2].shots[0], CM_SHOTDIR "0123456789abcdef.png") && g_cc[0].nshots == 0);
+    layout(CMV_CAT, 0, 2);
+    CHECK("a beta mod's page says so", seen("BETA: This mod may not be stable yet."));
+    layout(CMV_CAT, 0, 0);
+    CHECK("CONTROL: a mod that is not beta does not", !seen("BETA:") && seen("Permissions"));
+    g_cm_fcat = CMB_ALL;
+    layout(CMV_HOME, 1, -1);
+    layout(CMV_CAT, 0, 2);
+    CHECK("a beta mod's page says so", seen("BETA: This mod may not be stable yet."));
+    layout(CMV_CAT, 0, 0);
+    CHECK("CONTROL: a mod that is not beta does not", !seen("BETA:") && seen("Permissions"));
+    g_cm_fcat = CMB_ALL;
+    layout(CMV_HOME, 1, -1);
     layout(CMV_HOME, 2, -1);
     CHECK("every added repository has its Remove control (95)", nkind(CMC_DELREPO) == 95);
     CHECK("no repository note when none was dropped", !seen("repositories."));
     layout(CMV_CAT, 0, 1);
     CHECK("an added repository's mod page says \"" CM_UNLISTED "\"", seen(CM_UNLISTED));
     layout(CMV_CAT, 0, 0);
-    CHECK("CONTROL: a listed repository's mod page does not", !seen(CM_UNLISTED) && seen("Works on this deck."));
+    CHECK("CONTROL: a listed repository's mod page does not", !seen(CM_UNLISTED) && seen("Permissions"));
 
     /* a small catalog: everything shown, nothing to say */
     write_catalog(2, 3, 0);
@@ -163,24 +206,29 @@ int main(void) {
     layout(CMV_CAT, 0, 1);
     CHECK("a line others also offer says how many", seen("someone/loops and 1 more also offer a mod with this ID. Only one can be installed."));
     layout(CMV_CAT, 0, 2);
-    CHECK("CONTROL: a line nobody else offers carries neither note", !seen("this ID") && seen("Works on this deck."));
+    CHECK("CONTROL: a line nobody else offers carries neither note", !seen("this ID") && seen("Permissions"));
     CHECK("the name of a held id is not taken from the other author's line", !strcmp(cm_cat_name("beat-tool"), "beat-tool"));
     CHECK("CONTROL: an id nobody holds is named from its line", !strcmp(cm_cat_name("plain-tool"), "Plain Tool"));
     write_raw("mod|https://example.com/r0/azmods-repo.json|beat-tool|Beat Tool|1.0.0|alice|s|tools|0|any|1000|||||0\n");
     layout(CMV_CAT, 0, 0);
     CHECK("CONTROL: a 16-field line (an older fetcher) still reads, with no notes", g_ncc == 1 && !g_cc[0].held[0] && g_cc[0].nalso == 0 && !seen("this ID"));
 
-    /* Browse: field 20 (updated), the category row, the orders and the search (cm_browse.h) */
+    /* Browse: field 20 (updated), the category row and the orders (cm_browse.h) */
     write_raw("mod|https://example.com/r0/azmods-repo.json|echo-out|Echo Out|1.0.0|dubwise|s|audio|0|any|1000|||||0||||2019-09-14\n"
               "mod|https://example.com/r0/azmods-repo.json|big-clock|Big Clock|1.0.0|nightowl|s|visual|0|any|1000|||||0||||2019-10-12\n"
               "mod|https://example.com/r0/azmods-repo.json|old-date|Aged|1.0.0|dubwise|s|tools|0|any|1000|||||0||||20191008\n");
     CHECK("field 20 is read; a malformed date is dropped", !strcmp(g_cc[0].upd, "2019-09-14") && !strcmp(g_cc[1].upd, "2019-10-12") && !g_cc[2].upd[0]);
     layout(CMV_HOME, 1, -1);
-    CHECK("Browse: a search field, three orders and six category buttons", nkind(CMC_SEARCH) == 1 && nkind(CMC_SORT) == 3 && nkind(CMC_FCAT) == 6 && nkind(CMC_QCLEAR) == 0);
-    CHECK("Browse: the buttons count the mods", seen("All  3") && seen("Audio  1") && seen("Visual  1") && seen("Tools  1") && seen("Other  0"));
+    CHECK("Browse: the Sort button, its orders closed, and six view buttons (Other has no mods: none)",
+          nkind(CMC_SORTBTN) == 1 && nkind(CMC_SORT) == 0 && nkind(CMC_FCAT) == 6 && ctl_of(CMC_FCAT, CMB_OTHER) < 0);
+    cm_fire(ctl_p(CMC_SORTBTN, 0));
+    layout(CMV_HOME, 1, -1);
+    CHECK("Sort opens the four orders", nkind(CMC_SORT) == 4 && g_cm_sortpop);
+    CHECK("Browse: the buttons count the mods", seen("Home") && seen("All mods  3") && seen("Audio  1") && seen("Visual  1") && seen("Tools  1") && !seen("Other"));
     CHECK("A-Z: Aged, Big Clock, Echo Out", ctl_p(CMC_TILE, 2)->x < ctl_p(CMC_TILE, 1)->x && ctl_p(CMC_TILE, 1)->x < ctl_p(CMC_TILE, 0)->x);
     cm_fire(ctl_p(CMC_SORT, CMB_SORT_UPDATED));
     layout(CMV_HOME, 1, -1);
+    CHECK("an order picked: the orders close", !g_cm_sortpop && nkind(CMC_SORT) == 0);
     CHECK("Updated: the newest first, the undated last", g_cm_sort == CMB_SORT_UPDATED && ctl_p(CMC_TILE, 1)->x < ctl_p(CMC_TILE, 0)->x &&
                                                              ctl_p(CMC_TILE, 0)->x < ctl_p(CMC_TILE, 2)->x);
     g_cm_scroll = 300;
@@ -188,30 +236,112 @@ int main(void) {
     CHECK("a category button picks it and goes back to the top", g_cm_fcat == 0 && g_cm_scroll == 0);
     layout(CMV_HOME, 1, -1);
     CHECK("Visual: only its mod", nkind(CMC_TILE) == 1 && ctl_of(CMC_TILE, 1) >= 0);
-    cm_fire(ctl_p(CMC_SEARCH, 0));
-    CHECK("the search field opens the keyboard for the search", g_cm_view == CMV_KBD && g_cm_kbsearch);
-    for (const char *k = "dub"; *k; k++) cm_fire(&(cm_ctl) {CMC_KEY, (unsigned char) *k, 0, 0, 1, 1});
-    CHECK("keys go into the search, not the repository address", !strcmp(g_cm_q, "dub") && !g_cm_kb[0]);
-    g_cm_fcat = CMB_ALL;
-    layout(CMV_KBD, 1, -1);
-    CHECK("the keyboard page shows the matches as they are typed", seen("2 mods match: Echo Out, Aged") && seen("Done") && seen("Clear") && !seen("github.com/"));
-    layout(CMV_HOME, 1, -1);
-    CHECK("the search narrows the grid and the counts; the field can be cleared", nkind(CMC_TILE) == 2 && seen("All  2") && seen("Visual  0") && nkind(CMC_QCLEAR) == 1);
-    snprintf(g_cm_q, sizeof g_cm_q, "zzz");
-    layout(CMV_HOME, 1, -1);
-    CHECK("nothing found: said", nkind(CMC_TILE) == 0 && seen("No mods match the search here. Try All, or clear the search."));
-    cm_fire(ctl_p(CMC_QCLEAR, 0));
-    CHECK("the clear square empties the search", !g_cm_q[0]);
-    snprintf(g_cm_q, sizeof g_cm_q, "dub");
-    g_cm_view = CMV_KBD;
-    cm_fire(&(cm_ctl) {CMC_KB_NO, 0, 0, 0, 1, 1});
-    CHECK("Clear on the keyboard empties the search and stays", !g_cm_q[0] && g_cm_view == CMV_KBD);
-    cm_fire(&(cm_ctl) {CMC_KB_OK, 0, 0, 0, 1, 1});
-    CHECK("Done goes back to the grid", g_cm_view == CMV_HOME);
     cm_fire(&(cm_ctl) {CMC_ADDREPO, 0, 0, 0, 1, 1});
     cm_fire(&(cm_ctl) {CMC_KEY, 'a', 0, 0, 1, 1});
-    CHECK("CONTROL: Add repository's keyboard still types the address", !g_cm_kbsearch && !strcmp(g_cm_kb, "a") && !g_cm_q[0]);
+    CHECK("Add repository's keyboard types the address", g_cm_view == CMV_KBD && !strcmp(g_cm_kb, "a"));
     g_cm_kb[0] = 0;
+    g_cm_sort = CMB_SORT_NAME;
+
+    /* the download count (field 21) and Home. Echo Out 1840, Big Clock 12 (an older version
+     * installed), Aged 0, Loop Kit a damaged count, Hand Made from a repository the catalog does not
+     * list and a 20-field line (no count) */
+    write_raw("mod|https://example.com/r0/azmods-repo.json|echo-out|Echo Out|1.0.0|dubwise|s|audio|0|any|1000|||||0||||2031-10-10|1840\n" /* UTC */
+              "mod|https://example.com/r0/azmods-repo.json|big-clock|Big Clock|1.0.0|nightowl|s|visual|0|any|1000||0.9.0|||0||||2031-10-18|12\n" /* UTC */
+              "mod|https://example.com/r0/azmods-repo.json|old-date|Aged|1.0.0|dubwise|s|tools|0|any|1000|||||0|||||0\n"
+              "mod|https://example.com/r0/azmods-repo.json|loop-kit|Loop Kit|1.0.0|carol|s|audio|0|any|1000|||||0||||2031-10-01|1e3\n" /* UTC */
+              "mod|https://example.com/r1/azmods-repo.json|hand-made|Hand Made|1.0.0|eve|s|visual|0|any|1000|||||0||||2031-08-01\n" /* UTC */);
+    CHECK("field 21 is read: a count, 0 too; a damaged one or none is no count",
+          g_ncc == 5 && g_cc[0].counted && g_cc[0].dl == 1840 && g_cc[2].counted && g_cc[2].dl == 0 && !g_cc[3].counted && !g_cc[4].counted);
+    g_cm_fcat = CMB_ALL;
+    g_cm_sort = CMB_SORT_DOWNLOADS;
+    layout(CMV_HOME, 1, -1);
+    CHECK("Downloads: most first, then the mods with no count by name", ctl_p(CMC_TILE, 0)->x < ctl_p(CMC_TILE, 1)->x &&
+                                                                            ctl_p(CMC_TILE, 1)->x < ctl_p(CMC_TILE, 2)->x &&
+                                                                            ctl_p(CMC_TILE, 2)->x < ctl_p(CMC_TILE, 4)->x &&
+                                                                            ctl_p(CMC_TILE, 4)->x < ctl_p(CMC_TILE, 3)->x);
+    CHECK("a tile shows its count (\"1,840\", \"12\", and \"0\"), the two with none show nothing", seen("1,840") && ncounts() == 3);
+    g_cm_fcat = CMB_HOME;
+    g_cm_sort = CMB_SORT_NAME;
+    layout(CMV_HOME, 1, -1);
+    CHECK("Home: Most downloaded, New & updated, Visual, Audio (Tools holds one mod: not shown)",
+          nkind(CMC_SEEALL) == 4 && ctl_of(CMC_SEEALL, CMB_SH_TOP) >= 0 && ctl_of(CMC_SEEALL, CMB_SH_NEW) >= 0 &&
+              ctl_of(CMC_SEEALL, CMB_SH_CAT + 0) >= 0 && ctl_of(CMC_SEEALL, CMB_SH_CAT + 2) >= 0 && seen("Most downloaded") && seen("New & updated"));
+    CHECK("Home: each tile once per shelf (2 + 4 + 2 + 2), no grid tile, no orders", nkind(CMC_STILE) == 10 && nkind(CMC_TILE) == 0 && nkind(CMC_SORT) == 0 && nkind(CMC_SORTBTN) == 0);
+    CHECK("Home: Most downloaded holds only counts above 0, most first",
+          ctl_p(CMC_STILE, CMB_SH_TOP << 8 | 0)->x < ctl_p(CMC_STILE, CMB_SH_TOP << 8 | 1)->x && ctl_of(CMC_STILE, CMB_SH_TOP << 8 | 2) < 0);
+    CHECK("Home: New & updated, the newest first", ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 1)->x < ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 0)->x &&
+                                                       ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 0)->x < ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 3)->x &&
+                                                       ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 3)->x < ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 4)->x);
+    CHECK("Home: no note about the counts below the shelves", !seen("how many times"));
+    cm_fire(ctl_p(CMC_SEEALL, CMB_SH_TOP));
+    CHECK("See all on Most downloaded: All mods by downloads", g_cm_fcat == CMB_ALL && g_cm_sort == CMB_SORT_DOWNLOADS);
+    g_cm_fcat = CMB_HOME;
+    layout(CMV_HOME, 1, -1);
+    cm_fire(ctl_p(CMC_SEEALL, CMB_SH_NEW));
+    CHECK("See all on New & updated: All mods by date", g_cm_fcat == CMB_ALL && g_cm_sort == CMB_SORT_UPDATED);
+    g_cm_fcat = CMB_HOME;
+    layout(CMV_HOME, 1, -1);
+    cm_fire(ctl_p(CMC_SEEALL, CMB_SH_CAT + 0));
+    CHECK("See all on Visual: Visual by downloads", g_cm_fcat == 0 && g_cm_sort == CMB_SORT_DOWNLOADS);
+    g_cm_fcat = CMB_HOME;
+    layout(CMV_HOME, 1, -1);
+    cm_fire(ctl_p(CMC_STILE, CMB_SH_NEW << 8 | 3));
+    CHECK("a shelf's tile opens that mod's page", g_cm_view == CMV_CAT && g_cm_cat == 3);
+    g_cm_view = CMV_HOME;
+    /* the knob on Home: it scrolls the whole page and focuses nothing; its press does nothing */
+    cm_input(&g_s, &g_fb, 0, 0, false, 1, false);
+    CHECK("knob on Home: a detent scrolls the page down", (g_cm_gl.on ? g_cm_gl.goal : (float) g_cm_scroll) > 0.f);
+    cm_input(&g_s, &g_fb, 0, 0, false, -1, false);
+    CHECK("knob on Home: and back up", (g_cm_gl.on ? g_cm_gl.goal : (float) g_cm_scroll) == 0.f);
+    {
+        int sort0 = g_cm_sort;
+        cm_input(&g_s, &g_fb, 0, 0, false, 0, true);
+        CHECK("knob on Home: a press opens nothing and changes no view or order", g_cm_view == CMV_HOME && g_cm_fcat == CMB_HOME && g_cm_sort == sort0);
+    }
+    glide_stop(&g_cm_gl);
+    /* the mod page */
+    layout(CMV_CAT, 1, 0);
+    CHECK("page: \"author  .  category  .  version, updated N days ago\"", seen("dubwise  \xb7  Audio  \xb7  v1.0.0, updated 9 days ago"));
+    CHECK("page: the download count and where it comes from", seen("1,840 downloads") && seen("from https://example.com/r0/azmods-repo.json"));
+    CHECK("page: Install, Permissions beside the description", ctl_of(CMC_ACT, CMA_INSTALL) >= 0 && seen("Permissions") && seen("Firmware: any") &&
+                                                                   seen("Uses only AZ-MODS features (no hooks)"));
+    layout(CMV_CAT, 1, 1);
+    /* (the stub's azcm_ver_newer never says newer, so "Update to <version>" is checked on the emulator) */
+    CHECK("page: an installed mod names its version, offers Disable and Remove", seen("Installed: v0.9.0") && seen("updated yesterday") &&
+                                                                                     ctl_of(CMC_ACT, CMA_DISABLE) >= 0 && ctl_of(CMC_ACT, CMA_REMOVE) >= 0);
+    layout(CMV_CAT, 1, 2);
+    CHECK("page: a count of 0 is said; no date, no \"updated\"", seen("0 downloads") && seen("dubwise" CM_DOT "Tools" CM_DOT "v1.0.0") && !seen("updated"));
+    layout(CMV_CAT, 1, 3);
+    CHECK("page: no count, no download line", !seen("downloads") && !seen(" download\n"));
+    /* a shelf longer than a row: the tiles that fit, no more (See all shows the rest) */
+    {
+        char cat[4096];
+        int o = 0;
+        for (int i = 0; i < 8; i++)
+            o += snprintf(cat + o, sizeof cat - o, "mod|https://example.com/r0/azmods-repo.json|aud-%d|Aud %d|1.0.0|a|s|audio|0|any|1000|||||0|||||%d\n", i, i, 100 - i);
+        write_raw(cat);
+    }
+    g_cm_fcat = CMB_HOME;
+    layout(CMV_HOME, 1, -1);
+    int k2 = CMB_SH_CAT + 2, bx, by, bw, bh;
+    cm_box(&g_fb, &bx, &by, &bw, &bh);
+    {
+        int n5 = 0, in = 1;
+        for (int i = 0; i < g_nctl; i++)
+            if (g_ctl[i].kind == CMC_STILE && g_ctl[i].idx >> 8 == k2) n5++, in &= g_ctl[i].x >= bx && g_ctl[i].x + g_ctl[i].w <= bx + bw;
+        CHECK("a shelf of 8, the full screen: the 5 that fit, each whole inside the grid", n5 == 5 && in);
+    }
+    g_cm_full = 0;   /* 3 columns */
+    g_nctl = cm_layout(&g_s, &g_fb, g_ctl, 0);
+    cm_box(&g_fb, &bx, &by, &bw, &bh);
+    {
+        int n3 = 0, in = 1;
+        for (int i = 0; i < g_nctl; i++)
+            if (g_ctl[i].kind == CMC_STILE && g_ctl[i].idx >> 8 == k2) n3++, in &= g_ctl[i].x >= bx && g_ctl[i].x + g_ctl[i].w <= bx + bw;
+        CHECK("the same shelf on the smaller screen: the 3 that fit, each whole inside the grid", n3 == 3 && in);
+    }
+    g_cm_full = 1;
+    g_cm_fcat = CMB_ALL;
     g_cm_sort = CMB_SORT_NAME;
     unlink(CM_CATALOG);
     /* the header: the breadcrumb on every page, the trust note on the Installed tab only */
@@ -235,27 +365,21 @@ int main(void) {
         CHECK("its install confirmation: \"...  >  <name>  >  Install\"", seen(want));
     } else
         CHECK("the catalog has a mod for the breadcrumb checks", 0);
-    g_cm_kbsearch = 1;
-    layout(CMV_KBD, 1, -1);
-    CHECK("the search keyboard: \"Community Mods  >  Browse  >  Search\"", seen("Community Mods  >  Browse  >  Search"));
-    g_cm_kbsearch = 0;
     layout(CMV_KBD, 2, -1);
     CHECK("Add repository: \"Community Mods  >  Repositories  >  Add repository\"",
           seen("Community Mods  >  Repositories  >  Add repository"));
     {
         char t[CM_CRUMB_MAX];
         g_cm_view = CMV_KBD;
-        g_cm_tab = 1;
-        g_cm_kbsearch = 1;
+        g_cm_tab = 2;
         cm_crumbs(t, sizeof t, 0, 20);
-        CHECK("room: the whole path", !strcmp(t, "Community Mods  >  Browse  >  Search"));
-        cm_crumbs(t, sizeof t, cm_tw("Community Mods  >  Search", 20) + 2, 20);
-        CHECK("too narrow for the tab: the tab left out, the page kept", !strcmp(t, "Community Mods  >  Search"));
+        CHECK("room: the whole path", !strcmp(t, "Community Mods  >  Repositories  >  Add repository"));
+        cm_crumbs(t, sizeof t, cm_tw("Community Mods  >  Add repository", 20) + 2, 20);
+        CHECK("too narrow for the tab: the tab left out, the page kept", !strcmp(t, "Community Mods  >  Add repository"));
         g_cm_view = CMV_RELOAD;
         cm_crumbs(t, sizeof t, 0, 20);
         CHECK("the reload page: \"Community Mods  >  Reload\"", !strcmp(t, "Community Mods  >  Reload"));
         g_cm_view = CMV_HOME;
-        g_cm_kbsearch = 0;
     }
     return ut_summary();
 }

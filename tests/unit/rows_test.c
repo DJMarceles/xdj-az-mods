@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Registered Mod Menu rows (azfeatures.c azf_register, behind the SDK's register_row), driven through the same menu code as the official rows:
  *   - one row of each kind (TOGGLE, GROUP, ACTION, SCREEN, CHOICE of 2 and of 3) plus a child
- *     grayed by its parent: they list after every official row and before the utilities, are
+ *     grayed by its parent: they list right under Community Mods, before the other utilities, are
  *     drawn by the full-screen menu, and a knob press does to them what it does to an
  *     official row of their kind;
  *   - row_value: TOGGLE = own and every parent, CHOICE = the index, -1 = a bad handle;
@@ -198,8 +198,8 @@ int main(void) {
         if (tops[k] == AZI_COMMUNITY) pos_comm = k;
         if (tops[k] == AZF_THEMES) pos_them = k;
     }
-    CHECK("left list: the mod's top rows after the official ones, before Community Mods",
-          pos_fx > pos_them && pos_comm > pos_fx && tops[pos_fx + 1] == grp && tops[pos_fx + 2] == act &&
+    CHECK("left list: the mod's top rows right under Community Mods (after every official row)",
+          pos_fx > pos_them && pos_fx == pos_comm + 1 && tops[pos_fx + 1] == grp && tops[pos_fx + 2] == act &&
               tops[pos_fx + 3] == scr);
     CHECK("left list: a child is not a left entry", !c_tops(tops) || (({ int in = 0; for (int k = 0; k < nt; k++) in |= tops[k] == wet; in; }) == 0));
     CHECK("knob reaches FX Bus", select_left(&s, "FX Bus"));
@@ -270,8 +270,9 @@ int main(void) {
     az_feature_v2 fn = {.size = sizeof fn, .key = "noic", .label = "No icon", .kind = AZ_ROW_TOGGLE};
     int nic = azf_register("iconmod", &fn);
     memset(ic, 0, sizeof ic); /* the mod's buffer changes afterwards: the menu keeps its copy */
-    CHECK("a registered row's icon is drawn, from the core's copy", ici >= 0 && icon_ink(ici) > 500);
-    CHECK("a registered row without an icon draws none", nic >= 0 && icon_ink(nic) == 0);
+    CHECK("a registered row's icon is drawn, from the core's copy (a full block)", ici >= 0 && icon_ink(ici) > 2000);
+    CHECK("a registered row without an icon draws the placeholder (a square with a plus: some ink, far less than a full icon)",
+          nic >= 0 && icon_ink(nic) > 100 && icon_ink(nic) < icon_ink(ici) / 2);
 
     /* a mod that is not running (init() failed after register_row): its rows leave the menu
      * and none of its callbacks is called again; its values stay */

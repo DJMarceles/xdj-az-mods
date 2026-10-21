@@ -381,7 +381,8 @@ ok "only-disabled: listed, no quarantine count" '[ "$(st was-on)" = 2 ] && ! [ -
 for kind in INITHANG INITCRASH CTORCRASH; do
     reset; mod good-any; manifest good-any '["any"]' false
     mod stuck -DMOD_$kind; manifest stuck '["any"]' false; enable good-any stuck
-    timeout 5 $W/harness init > $W/out 2>&1; RC=$?
+    # SIGTERM, then SIGKILL as systemd stops EP147: under TSan a SIGTERM waits for a libc call the spin never makes
+    timeout -k 2 5 $W/harness init > $W/out 2>&1; RC=$?
     ok "$kind: the start does not finish" '[ $RC -ne 0 ]'
     ok "$kind: the starting marker names the mod" '[ "$(cat $W/root/azmod-community/.initing 2>/dev/null)" = stuck ]'
     $W/harness init > $W/out

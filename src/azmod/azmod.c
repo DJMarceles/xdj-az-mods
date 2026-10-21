@@ -93,6 +93,8 @@ static int g_ep147_build;        /* EPB_* from ep147build.h, set in azmod_init *
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/shape.h>
+#include <X11/extensions/XShm.h> /* the overlay's frames through a shared segment */
+#include <sys/shm.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <sys/syscall.h>
@@ -685,6 +687,7 @@ static inline uint64_t bus_cfg(void) {
     return __atomic_load_n(&g_bus_cfg, __ATOMIC_ACQUIRE);
 }
 #include "azmod_internal.h"
+#include "touch_read_guard.h"
 #include "bus_interpose.c"
 #include "drum_roll_display.c"
 
@@ -1950,6 +1953,7 @@ static void setvis_hook(long self, int on) {
 #include "library_db.c"
 #include "library_edits.c"
 #include "remote_stems.c"
+#include "libfd.h" /* the library fds azmod's own workers hold, by owner */
 #include "stem_marks.c"
 #include "folder_preview.c" /* a selected folder's preview pane fills (2.00 never publishes its page) */
 
@@ -2430,14 +2434,17 @@ static void msg_tick(void) {
 #include "bluetooth.c"
 #include "font_size.c"
 #include "streaming_key.c"
+#include "key_pane.c"
 #include "spin_back.c"
-#include "browse_remember.c"
+#include "browse_columns.c" /* PREVIEW and the sub column remembered; Column Edit's columns */
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
+static void bf_tick(void); /* browse_fields.c */
 static void calltimers_hook(void *self) {
     msg_tick();
     bt_mods_tick();
-    br_tick();
+    bc_tick();
     cn_tick();
+    bf_tick();
     sk_tick();
     mp_anim_tick();
     cm_icons_tick();
@@ -2827,6 +2834,8 @@ static int g_last_click_bit = 0, g_last_back_bit = 0;
 #include "probe_menu.c"   /* opt-in azmod-menuprobe.on: who reads the browse MENU model */
 #include "touch_accum.c"  /* opt-in azmod-touchaccum.on: slow touch drags scroll */
 #include "menu_popup.c"   /* playlist editing in EP147's own MENU panel */
+#include "browse_fields.c" /* Column Edit: a library field on a column */
+#include "browse_edit.c"  /* Column Edit: the COLUMN EDIT button and its edit mode */
 #include "vinyl_slider.c" /* SHORTCUT: Vinyl Speed Adjust Time as a stepless slider */
 #include "jog_display.c"  /* stem state on the jog display */
 #include "onelibrary_key_emulator.c"
@@ -2890,12 +2899,14 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_azm_inert = 0;
     }
     bt_uart_recover(); /* before EP147 can open /dev/ttyS0 (synchronous, <= ~1 s) */
-    install_browse_remember(); /* EP147's PREVIEW and sub column choice remembered */
+    install_browse_columns();  /* PREVIEW and the sub column remembered; Column Edit's columns */
+    install_browse_edit();     /* Column Edit (after browse_columns.c: it hooks its layout) */
     install_clock_native();    /* the Clock in the place of EP147's status bar readout */
     install_bt_mods(); /* Bluetooth Auto-Connect / Remember Selected Channel: inert
                           while off */
     install_font_size(); /* Remember Font Size: before EP147 loads its settings */
     install_streaming_key(); /* streaming keys in Camelot */
+    install_key_pane();  /* the deck screen's key displays in Camelot */
     install_spin_back(); /* Extended Lead-In: inert while off */
     /* The reporter's handlers are SA_ONSTACK. This is EP147's main thread (JUCE's message
      * thread): give it an alternate stack so a stack overflow there is still recorded. Our

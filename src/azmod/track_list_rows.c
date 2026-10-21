@@ -211,6 +211,10 @@ static long reqan_hook(long self, long tid, long file, long req) {
     return r;
 }
 static void (*g_orig_paintcell)(void *, void *, int, int, int, int, int);
+/* browse_fields.c: a column showing a library field, drawn by EP147's sub column painter (1 =
+ * the cell was handled); unset without it */
+static int (*g_tlr_field_paint)(void *model, void *g, int row, int col, int w, int h, int sel);
+static int sm_reserve_w(void *model, int col, int w, int h); /* stem_marks.c */
 /* The paintCell vtable slot is shared by Playlist Editing's drag view and the stems
  * mark. A slot can be patched only once, so whichever feature asks first installs
  * it and paintcell_hook serves both, each behind its own flag; neither depends on
@@ -236,7 +240,11 @@ static void paintcell_hook(void *model, void *g, int row, int col, int w, int h,
     /* the track list, for "is a track row selected" (vtable-checked at use) */
     drag_capture_widget(
         model);
-    g_orig_paintcell(model, g, row, col, w, h, sel);
+    /* the stems mark's column: EP147 lays its text out clear of the mark (its own Key text is
+     * short and left-aligned, already clear of it) */
+    int rs = sm_reserve_w(model, col, w, h);
+    if (!g_tlr_field_paint || !g_tlr_field_paint(model, g, row, col, w - rs, h, sel))
+        g_orig_paintcell(model, g, row, col, col == ep_off(7, 8) ? w : w - rs, h, sel);
     g_in_grabcell = 0;
     if (g_sm_on && model)
         sm_after_paint((char *) model - 0x30, g, row, col, w, h); /* model = widget+0x30 */

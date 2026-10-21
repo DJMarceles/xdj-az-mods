@@ -96,8 +96,27 @@ static void draw(azmod_state *s) {
     g_ntxt = 0;
     azmod_composite(s, &g_fb);
 }
-static void knob(azmod_state *s, int d, bool click) { azmod_input(s, &g_fb, 0, 0, false, d, click); }
 static long g_t = 1000;
+/* the lists' glides run on the menu's clock here, which the test steps */
+static long glide_clock(void) { return g_mnow; }
+/* the menu's tick at 60 Hz until both lists' glides have stopped */
+static void glide_settle(azmod_state *s) {
+    for (int k = 0; k < 600 && (g_lgl.on || g_rgl.on); k++) {
+        azmod_menu_clock(g_mnow + 16);
+        azmod_tick(s);
+    }
+    if (g_t < g_mnow) g_t = g_mnow;
+}
+static void glide_tick(azmod_state *s) {
+    azmod_menu_clock(g_mnow + 16);
+    azmod_tick(s);
+}
+static void knob_step(azmod_state *s, int d, bool click) { azmod_input(s, &g_fb, 0, 0, false, d, click); }
+/* a knob step, then its glide to the end */
+static void knob(azmod_state *s, int d, bool click) {
+    knob_step(s, d, click);
+    glide_settle(s);
+}
 /* a touch as the deck sends it: press, then release (no motion between) */
 static int touch(azmod_state *s, int x0, int y0, int x1, int y1, long ms) {
     g_t += 1000;
@@ -106,8 +125,9 @@ static int touch(azmod_state *s, int x0, int y0, int x1, int y1, long ms) {
     azmod_menu_clock(g_t + ms);
     return azmod_pane_drag(s, &g_fb, x1, y1, 2);
 }
-/* the same with motion events on the way (the emulator's stream) */
-static int touch_moving(azmod_state *s, int x0, int y0, int x1, int y1) {
+/* the same with motion events on the way (the emulator's stream), 10 ms apart; the lift comes
+ * lift_ms after the last one, at the same point */
+static int touch_moving_lift(azmod_state *s, int x0, int y0, int x1, int y1, long lift_ms) {
     g_t += 1000;
     azmod_menu_clock(g_t);
     azmod_input(s, &g_fb, x0, y0, true, 0, false);
@@ -115,8 +135,11 @@ static int touch_moving(azmod_state *s, int x0, int y0, int x1, int y1) {
         azmod_menu_clock(g_t + 10 * k);
         azmod_pane_drag(s, &g_fb, x0 + (x1 - x0) * k / 4, y0 + (y1 - y0) * k / 4, 1);
     }
-    azmod_menu_clock(g_t + 50);
+    azmod_menu_clock(g_t + 40 + lift_ms);
     return azmod_pane_drag(s, &g_fb, x1, y1, 2);
+}
+static int touch_moving(azmod_state *s, int x0, int y0, int x1, int y1) {
+    return touch_moving_lift(s, x0, y0, x1, y1, 10);
 }
 static void settle(azmod_state *s) {
     for (int k = 0; k < 400 && (azmod_tick(s), cm_animating()); k++) {
@@ -179,6 +202,7 @@ int main(void) {
     az_defaults();
     azmod_state s;
     azmod_state_init(&s);
+    g_glide_ms = glide_clock;
 
     /* ---- before any mod row: today's geometry, and no scroll bar ---- */
     open_full(&s);
@@ -209,9 +233,10 @@ int main(void) {
             more0++;
             mt0 = g_txt[i].s;
         }
-    /* the official rows alone run two past the card (Extended Lead-In, Camelot Keys) */
-    CHECK("no mod rows: the preview card's one \"more\" line counts the official rows past it",
-          more0 == 1 && strcmp(mt0, "+2 more") == 0);
+    /* the official rows alone fit the card (Column Edit and Preview Hot Cues live on Browse View
+     * Mods' own screen, like the Overlays readouts), so there is no "more" line; the registered
+     * rows below overflow it */
+    CHECK("no mod rows: the official rows fit the preview card, no \"more\" line", more0 == 0 && !mt0[0]);
 
     /* ---- 20 registered rows: 16 from one mod (one with an icon), 4 from "testmod" (a SCREEN) ---- */
     memset(g_icon, 255, sizeof g_icon);
@@ -372,7 +397,10 @@ int main(void) {
                 for (int xx = 0; xx < lw; xx++) ok_bot &= px_at(xx, yy) == 0;
             c_left_rect(&g_fb, k, &x, &y, &w, &h);
             int ih = h - (h / 14 < 2 ? 2 : h / 14), isz = ih * 3 / 5, iy = y + (ih - isz) / 2 + isz / 2;
-            if (pos == 0) ok_row &= px_at(icw / 2, iy) == C_TEXT && px_at(icw / 2, iy - rh0) != C_TEXT && px_at(icw / 2, iy + rh0) != C_TEXT;
+            /* a point the solid test icon covers and a placeholder (a square with a plus, on the
+             * rows around it) leaves empty: off the plus's arms, inside the square's outline */
+            int qx = icw / 2 + isz / 4, qy = iy - isz / 4;
+            if (pos == 0) ok_row &= px_at(qx, qy) == C_TEXT && px_at(qx, qy - rh0) != C_TEXT && px_at(qx, qy + rh0) != C_TEXT;
         }
         free(hdr0);
         CHECK("icon: drawn on its own row (and not on its neighbors)", ok_row);
@@ -444,6 +472,98 @@ int main(void) {
         CHECK("compact end: the footer is drawn and no row reaches under it", fy >= 0 && !clash);
     }
     azmod_set_docked(true);
+
+    /* ---- the glide (scroll_glide.h, as on the Community Mods home page) ---- */
+    open_full(&s);
+    draw(&s);
+    {
+        int lrh = c_lrowh(&g_fb), ly = vtop() + 8 * lrh + lrh / 2, sel = s.left_sel;
+        /* the left list: a lift while moving flings it on */
+        g_lscroll = 0;
+        snap();
+        r = touch_moving(&s, 200, ly, 200, ly - 200);
+        int at = g_lscroll;
+        CHECK("glide: on a moving lift the list is at the finger, nothing selected",
+              at == 200 && s.left_sel == sel && unchanged() && r != 2 && g_lgl.on);
+        glide_settle(&s);
+        CHECK("glide: a moving lift flings the list on; it stops, in range", g_lscroll > at && bounds_ok() && !g_lgl.on);
+        /* a finger that stopped before lifting: no fling (the other answer) */
+        g_lscroll = 0;
+        r = touch_moving_lift(&s, 200, ly, 200, ly - 200, 200);
+        glide_settle(&s);
+        CHECK("glide: a finger that stopped before the lift does not fling", g_lscroll == 200 && r != 2);
+        /* a finger on a flinging list catches it and selects nothing */
+        g_lscroll = 0;
+        touch_moving(&s, 200, ly, 200, ly - 200);
+        glide_tick(&s);
+        int caught = g_lscroll, tx = 200, ty = vtop() + 2 * lrh + lrh / 2;
+        r = touch(&s, tx, ty, tx, ty, 60);
+        glide_settle(&s);
+        CHECK("glide: a tap on a flinging list stops it where it shows and selects nothing",
+              caught > 200 && g_lscroll == caught && s.left_sel == sel && unchanged() && r != 2);
+        r = touch(&s, tx, ty, tx, ty, 60);
+        CHECK("glide: the next tap there selects (the other answer)", r == 2 && s.left_sel != sel);
+        /* a knob step glides to the row it shows */
+        open_full(&s);
+        draw(&s);
+        knob_step(&s, -1, false); /* wraps to the last entry: the end of the list */
+        CHECK("glide: a knob step has not jumped; it glides", g_lscroll == 0 && g_lgl.on);
+        glide_settle(&s);
+        CHECK("glide: the knob's glide ends with the selection in view, at the end",
+              sel_visible(&s) && g_lscroll == c_lmax(&g_fb) && !g_lgl.on);
+
+        /* the right pane (Extras): a fling, a catch, and a new pane at its top */
+        open_full(&s);
+        c_select(&s, AZF_EXTRAS);
+        draw(&s);
+        int rx = c_lw(&g_fb) + 300, ry = vtop() + (vbot() - vtop()) * 3 / 4, rmx = c_rmax(&g_fb, AZF_EXTRAS);
+        CHECK("glide: the Extras pane scrolls here", rmx > 0);
+        int span = rmx < 200 ? rmx / 2 : 100;
+        snap();
+        r = touch_moving(&s, rx, ry, rx, ry - span);
+        at = g_rscroll;
+        glide_settle(&s);
+        CHECK("glide: the right pane flings on after a moving lift; it stops, in range",
+              at == span && g_rscroll > at && g_rscroll <= rmx && !g_rgl.on && unchanged() && r != 2);
+        c_glide_put(&g_rgl, &g_rglpx, &g_rscroll, 0);
+        touch_moving(&s, rx, ry, rx, ry - span);
+        glide_tick(&s);
+        caught = g_rscroll;
+        r = touch(&s, rx, ry, rx, ry, 60);
+        glide_settle(&s);
+        CHECK("glide: a tap on the flinging pane stops it and fires nothing",
+              g_rscroll == caught && unchanged() && r != 2);
+        c_glide_put(&g_rgl, &g_rglpx, &g_rscroll, 0);
+        touch_moving(&s, rx, ry, rx, ry - span);
+        c_select(&s, tops[0] == AZF_EXTRAS ? tops[1] : tops[0]);
+        c_select(&s, AZF_EXTRAS);
+        glide_settle(&s);
+        CHECK("glide: another pane stops the fling; coming back, the pane is at its top", g_rscroll == 0 && !g_rgl.on);
+    }
+
+    /* ---- Reload: a press under a second restarts, one held a full second is taken back ---- */
+    {
+        open_full(&s);
+        draw(&s);
+        int k = idx_of(AZI_RELOAD), rx, ry, rw, rh;
+        c_lshow(&g_fb, k);
+        c_left_rect(&g_fb, k, &x, &y, &w, &h);
+        touch(&s, 150, y + h / 2, 150, y + h / 2, 60);
+        draw(&s);
+        int r0[AZI_COUNT], m = c_detail(c_pane(&s), r0), rk = -1;
+        for (int i = 0; i < m; i++)
+            if (r0[i] == AZI_RELOAD) rk = i;
+        CHECK("Reload: its pane is open, with its button", s.left_sel == AZI_RELOAD && rk >= 0);
+        c_detail_rect(&g_fb, c_pane(&s), rk, &rx, &ry, &rw, &rh);
+        long holds[] = {60, 700, 999, 1000, 1500};
+        int want[] = {1, 1, 1, 0, 0}, ok = 1;
+        for (int i = 0; i < 5; i++) {
+            s.last_action = -1;
+            touch(&s, rx + rw / 2, ry + rh / 2, rx + rw / 2, ry + rh / 2, holds[i]);
+            ok &= (s.last_action == AZI_RELOAD) == want[i];
+        }
+        CHECK("Reload: held 60, 700, 999 ms restarts; 1000 and 1500 ms do nothing", ok);
+    }
 
     /* ---- the preview card ---- */
     s.menu_focused = 0;

@@ -47,24 +47,41 @@ trap 'rm -rf "$W"' EXIT
 OUTD=${FZ_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/azfuzz-out.XXXXXX")}
 mkdir -p "$OUTD"
 rc=0
+# fz_fail <label> <why> [log]: one FAIL line (plus the end of the log, indented) and a non-zero exit
+fz_fail() {
+    echo "FAIL  fuzz $1: $2"
+    [ -z "${3:-}" ] || [ ! -s "$3" ] || tail -30 "$3" | sed 's/^/      /'
+    rc=1
+}
+# Every harness is reported: a step that cannot finish (extract, build, run) is a FAIL for that
+# harness, never a silent stop, so one broken harness cannot hide behind a passing run.
 for n in $names; do
-    fz_prepare "$n" "$W/$n/src"
+    mkdir -p "$W/$n"
+    if [ $mode = replay ]; then label="replay $n"; else label=$n; fi
+    if ! fz_prepare "$n" "$W/$n/src" > "$W/$n/prepare.log" 2>&1; then
+        fz_fail "$label" "could not prepare the source" "$W/$n/prepare.log"; continue
+    fi
+    if [ ! -d "tools/fuzz/corpus/$n" ]; then
+        fz_fail "$label" "no seed corpus at tools/fuzz/corpus/$n"; continue
+    fi
     if [ $mode = replay ]; then
-        fz_compile "$n" "$W/$n/src" "$W/$n/bin" replay
+        if ! fz_compile "$n" "$W/$n/src" "$W/$n/bin" replay > "$W/$n/build.log" 2>&1 || [ ! -x "$W/$n/bin" ]; then
+            fz_fail "$label" "build failed" "$W/$n/build.log"; continue
+        fi
         if "$W/$n/bin" "tools/fuzz/corpus/$n" > "$W/$n/log" 2>&1; then
             echo "PASS  fuzz replay $n: $(tail -1 "$W/$n/log")"
         else
-            echo "FAIL  fuzz replay $n"; tail -30 "$W/$n/log"; rc=1
+            fz_fail "$label" "a corpus input failed" "$W/$n/log"
         fi
         continue
     fi
-    fz_compile "$n" "$W/$n/src" "$W/$n/bin" fuzz
+    if ! fz_compile "$n" "$W/$n/src" "$W/$n/bin" fuzz > "$W/$n/build.log" 2>&1 || [ ! -x "$W/$n/bin" ]; then
+        fz_fail "$label" "build failed" "$W/$n/build.log"; continue
+    fi
     mkdir -p "$OUTD/$n/corpus" "$OUTD/$n/crashes"
     echo "=== fuzz $n: ${secs}s (scratch corpus $OUTD/$n/corpus, crashes $OUTD/$n/crashes) ==="
     # the seeds are read, never written: new inputs go to the scratch corpus
-    if "$W/$n/bin" -max_total_time="$secs" -timeout=10 -rss_limit_mb=1536 \
-            -print_final_stats=1 -artifact_prefix="$OUTD/$n/crashes/" ${FZ_ARGS_EXTRA:-} \
-            "$OUTD/$n/corpus" "tools/fuzz/corpus/$n" > "$OUTD/$n/fuzz.log" 2>&1; then
+    if "$W/$n/bin" -max_total_time="$secs" -timeout=10 -rss_limit_mb=1536             -print_final_stats=1 -artifact_prefix="$OUTD/$n/crashes/" ${FZ_ARGS_EXTRA:-}             "$OUTD/$n/corpus" "tools/fuzz/corpus/$n" > "$OUTD/$n/fuzz.log" 2>&1; then
         echo "PASS  fuzz $n: $(grep -E '^#[0-9]+.*DONE' "$OUTD/$n/fuzz.log" | tail -1)"
         grep -E 'stat::number_of_executed_units|stat::new_units_added' "$OUTD/$n/fuzz.log" | sed 's/^/      /'
     else

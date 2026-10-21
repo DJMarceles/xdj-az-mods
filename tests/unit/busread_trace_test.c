@@ -37,6 +37,7 @@
 #include "bl_flip.h"
 #include "drag_handoff.h"
 #include "mm_resume.h"
+#include "touch_read_guard.h" /* a failed read on the touch device (not in this stream) */
 
 /* the community mods' filter chain (sdk_input.c): no mod registered, as in the shipped default */
 #define AZ_BUS_ERP_LED 1

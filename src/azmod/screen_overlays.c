@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* screen_overlays.c: Overlays (AZ_OVERLAYS): its rows, and the deck-screen readouts it switches (FPS, CPU, RAM, temperature, clock).
  * Part of the Mod Menu's one translation unit: #included by menu.c, in the order listed there. */
-/* The rows of a switch's own screen (AZ_OVERLAYS, AZ_CLOCK): the switch first, then the table's
- * rows under it, in their order. */
+/* The rows of an Extras row's own screen (AZ_OVERLAYS, AZ_CLOCK, AZ_BROWSE_VIEW): a switch first
+ * (a group has none), then the table's rows under it, in their order. */
 #define OVERLAYS_MAX 16
 /* The Clock's time zone: a pseudo row (not a table row; its value is azmod.conf's "clock.tz",
  * like the theme), listed right after the Clock's time format. */
@@ -10,18 +10,25 @@
 _Static_assert(C_TZ_ROW > AZI_COUNT, "the time zone pseudo row must not collide with item ids");
 /* Set Time Manually: a pseudo row after the time zone; it opens the picker (AZ_CLOCK_SET). */
 #define C_SET_ROW 0x301
-/* the switch a screen belongs to: Overlays or the Clock */
+/* the row a screen belongs to: Overlays, the Clock or Browse View Mods */
 static int sub_head(int mode) {
-    return mode == AZ_CLOCK ? AZF_CLOCK : AZF_OVERLAYS;
+    return mode == AZ_CLOCK ? AZF_CLOCK : mode == AZ_BROWSE_VIEW ? AZF_BROWSE_VIEW
+                                                                 : AZF_OVERLAYS;
 }
 /* the screen a row opens, if it is one of these */
 static int sub_screen(int it) {
-    return it == AZF_CLOCK ? AZ_CLOCK : it == AZF_OVERLAYS ? AZ_OVERLAYS
-                                                           : 0;
+    return it == AZF_CLOCK ? AZ_CLOCK : it == AZF_OVERLAYS  ? AZ_OVERLAYS
+                                    : it == AZF_BROWSE_VIEW ? AZ_BROWSE_VIEW
+                                                            : 0;
+}
+/* is this one of those screens */
+static bool sub_mode(int mode) {
+    return mode == AZ_OVERLAYS || mode == AZ_CLOCK || mode == AZ_BROWSE_VIEW;
 }
 static int overlays_rows(int head, int *out) {
     int ord[AZI_COUNT], n = menu_order(ord), m = 0;
-    out[m++] = head;
+    if (az_kind(head) == AZ_ROW_TOGGLE)
+        out[m++] = head;
     for (int p = 0; p < n && m < OVERLAYS_MAX; p++)
         if (az_parent(ord[p]) == head && !(az_row(ord[p])->d.flags & AZ_ROW_HIDDEN)) {
             out[m++] = ord[p];
@@ -471,8 +478,8 @@ static bool input_clock_set(azmod_state *s, const azmod_fb *fb, int touch_x, int
     return true; /* consume everything while the screen is up */
 }
 
-static const char *overlays_label(int r, int it) {
-    if (r == 0)
+static const char *overlays_label(int it) {
+    if (az_screen(it) >= 0) /* the switch at the top: the row that opened the screen */
         return it == AZF_CLOCK ? "Show Clock" : "Show Overlays";
     return it == C_TZ_ROW ? "Time Zone" : it == C_SET_ROW ? "Set Time Manually"
                                                           : az_label(it);

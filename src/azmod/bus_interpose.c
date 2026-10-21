@@ -104,6 +104,7 @@ static void bus_fd_forget(int fd) {
     bus_fd_drop(&g_deckbus_fd[0], fd);
     bus_fd_drop(&g_deckbus_fd[1], fd);
     bus_fd_drop(&g_touchin_fd, fd);
+    tg_forget(fd);
 }
 /* Called by open() with every descriptor it returns: a number that comes back from
  * open() is no longer whatever was tracked under it, so forget first, then record
@@ -112,6 +113,7 @@ static void bus_fd_note(int fd, const char *path) {
     bus_fd_forget(fd);
     if (!path)
         return;
+    tg_note(fd, path);
     if (strcmp(path, "/dev/subucom_spi3.0") == 0) {
         g_mixer_fd = fd; /* panel-input bus: knob position @34, click @31 */
         dbg("[%ld] open(%s) -> fd=%d (g_mixer_fd set)\n", (long) time(NULL), path, fd);
@@ -1452,7 +1454,9 @@ ssize_t read(int fd, void *buf, size_t n) {
     if (g_debug < 0)
         g_debug = getenv("AZMOD_DEBUG") ? 1 : 0;
     gpiodrv_note(fd, buf, r);
-    if (r <= 0 || fd < 0)
+    if (r < 0) /* a failed read: EP147's touch reader cannot take the -1 (touch_read_guard.h) */
+        return tg_result(fd, r);
+    if (r == 0 || fd < 0)
         return r;
     if (fd == g_mixer_fd)
         bus_mixer_frame(buf, r, cfg);

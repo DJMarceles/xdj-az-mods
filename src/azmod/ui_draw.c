@@ -377,8 +377,10 @@ static void aa_icon(const azmod_fb *fb, int x, int y, int sz, const struct aa_sh
         }
 }
 /* One glyph per main-menu item (its AZF_* / AZI_* item id),
- * drawn in a square box (x,y,sz,sz). */
-static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, uint32_t c) {
+ * drawn in a square box (x,y,sz,sz). Every frame asks for the same icons again, and the
+ * anti-aliased shapes cost more than the rest of a frame together, so draw_item_icon serves
+ * them from icon_cache below; this is the drawing itself. */
+static void draw_item_icon_raw(const azmod_fb *fb, int x, int y, int sz, int item, uint32_t c) {
     int t = sz / 8;
     if (t < 1)
         t = 1;
@@ -483,20 +485,30 @@ static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, u
         aa_icon(fb, x, y, sz, sh, 5, c);
         break;
     }
-    case AZF_PREVIEW_HOT_CUES: { /* a preview line with three hot cue flags (Preview Hot Cues) */
-        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
-        float l = X + S * .10f, r = X + S * .90f, m = Y + S * .62f, t = Y + S * .22f,
-              b = Y + S * .80f, f = S * .10f;
-        struct aa_shape sh[7] = {
-            {0, l, m, r, m, w},
-            {0, X + S * .26f, t, X + S * .26f, b, w},
-            {0, X + S * .26f, t, X + S * .26f + f, t, w},
-            {0, X + S * .52f, t, X + S * .52f, b, w},
-            {0, X + S * .52f, t, X + S * .52f + f, t, w},
-            {0, X + S * .78f, t, X + S * .78f, b, w},
-            {0, X + S * .78f, t, X + S * .78f - f, t, w},
+    case AZF_PREVIEW_HOT_CUES: { /* a plain waveform with three hot cue lines standing above it */
+        static const float P[14] = {.15f, .45f, .30f, .70f, .50f, .85f, .55f, 1.0f, .60f, .80f, .40f, .65f, .35f, .20f};
+        float S = (float) sz, mid = S * .63f, half = S * .25f;
+        for (int px = 0; px < sz; px++) { /* the waveform: one column per pixel, its top and bottom edges anti-aliased */
+            float f = (((float) px + .5f) / S - .10f) / .80f;
+            if (f < 0 || f > 1)
+                continue;
+            float p = f * 13;
+            int k = (int) p;
+            float t = p - (float) k, h = (P[k] * (1 - t) + P[k < 13 ? k + 1 : 13] * t) * half;
+            float top = mid - h, bot = mid + h;
+            for (int py = (int) top; py <= (int) bot && py < sz; py++) {
+                float cov = (bot < (float) (py + 1) ? bot : (float) (py + 1)) - (top > (float) py ? top : (float) py);
+                if (cov > 0)
+                    blend_px(fb, x + px, y + py, c, (uint8_t) (cov > 1 ? 255 : cov * 255));
+            }
+        }
+        float X = (float) x, Y = (float) y, w = S * .025f, lt = Y + S * .14f, lb = Y + mid;
+        struct aa_shape sh[3] = {
+            {0, X + S * .24f, lt, X + S * .24f, lb, w},
+            {0, X + S * .50f, lt, X + S * .50f, lb, w},
+            {0, X + S * .78f, lt, X + S * .78f, lb, w},
         };
-        aa_icon(fb, x, y, sz, sh, 7, c);
+        aa_icon(fb, x, y, sz, sh, 3, c);
         break;
     }
     case AZF_EXTENDED_LEAD_IN: { /* a platter, the track's start and a long arrow back */
@@ -598,6 +610,34 @@ static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, u
         aa_icon(fb, x, y, sz, sh, n, c);
         break;
     }
+    case AZF_BROWSE_VIEW: { /* a track list: three rows, each an artwork square and a line */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.045f, r = S * 0.07f;
+        struct aa_shape sh[6] = {
+            {0, X + S * .20f, Y + S * .28f, X + S * .20f, Y + S * .28f, r},
+            {0, X + S * .38f, Y + S * .28f, X + S * .86f, Y + S * .28f, w},
+            {0, X + S * .20f, Y + S * .50f, X + S * .20f, Y + S * .50f, r},
+            {0, X + S * .38f, Y + S * .50f, X + S * .86f, Y + S * .50f, w},
+            {0, X + S * .20f, Y + S * .72f, X + S * .20f, Y + S * .72f, r},
+            {0, X + S * .38f, Y + S * .72f, X + S * .86f, Y + S * .72f, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 6, c);
+        break;
+    }
+    case AZF_COLUMN_EDIT: { /* a table: an outline split into three columns */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float l = X + S * .14f, r = X + S * .86f, t = Y + S * .22f, b = Y + S * .78f;
+        struct aa_shape sh[7] = {
+            {0, l, t, r, t, w},
+            {0, l, b, r, b, w},
+            {0, l, t, l, b, w},
+            {0, r, t, r, b, w},
+            {0, l, Y + S * .36f, r, Y + S * .36f, w},
+            {0, X + S * .38f, t, X + S * .38f, b, w},
+            {0, X + S * .62f, t, X + S * .62f, b, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 7, c);
+        break;
+    }
     case AZI_PAD_COLORS: { /* a 2x2 of color squares = palette */
         static const uint32_t g[4] = {0xFF2020u, 0xFFD400u, 0x22E022u, 0x2040FFu};
         int inset =
@@ -616,15 +656,95 @@ static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, u
         fill_rect(fb, x + sz - q, y + sz - q, q, q, g[3]);
         break;
     }
-    default: { /* a community mod's row: its own icon, if it gave one */
+    default: { /* a community mod's row: its own icon, or (none given) a square with a plus, the
+                * Community Mods icon's own strokes on the same span */
         const struct az_row *r = item >= AZI_REG0 && item < AZI_ACT0 ? az_row(item) : NULL;
-        if (r && r->d.icon)
+        if (r && r->d.icon) {
             blit_icon(fb, x, y, sz, c, r->d.icon);
+            break;
+        }
+        if (!r)
+            break;
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.045f, a = 0.14f, b = 0.86f, m = 0.5f, p = 0.17f;
+        struct aa_shape sh[6] = {
+            {0, X + S * a, Y + S * a, X + S * b, Y + S * a, w}, {0, X + S * b, Y + S * a, X + S * b, Y + S * b, w}, {0, X + S * b, Y + S * b, X + S * a, Y + S * b, w}, {0, X + S * a, Y + S * b, X + S * a, Y + S * a, w}, {0, X + S * m, Y + S * (m - p), X + S * m, Y + S * (m + p), w}, {0, X + S * (m - p), Y + S * m, X + S * (m + p), Y + S * m, w}};
+        aa_icon(fb, x, y, sz, sh, 6, c);
         break;
     }
     }
     (void) cx;
     (void) cy;
+}
+
+/* ---- icon cache ----------------------------------------------------------------------------
+ * An official icon is a pure function of its item, size and ink, the theme's palette, and the
+ * pixels under it. Drawn on a band of one color (every menu row), its finished pixels are a
+ * function of that color too, so they are kept and copied back the next time the same icon is
+ * asked for on the same color: the same pixels, without the shapes. Not kept: a community mod's
+ * icon (its own bitmap, which the mod can change), an icon clipped by the buffer's edge, and one
+ * on anything but a single color; those draw every time. Overlay thread only, like every caller
+ * of the menu's drawing (azmod_composite). */
+#define IC_CACHE_N 48    /* entries: every row icon of the left list and the largest pane */
+#define IC_CACHE_MAX 96  /* px: larger icons draw every time */
+static struct {
+    int item, sz;
+    uint32_t ink, ground;
+    unsigned theme;
+    unsigned long used; /* 0 = empty */
+    uint32_t px[IC_CACHE_MAX * IC_CACHE_MAX];
+} *g_icache;
+static unsigned long g_icache_clock;
+static uint32_t *ic_row(const azmod_fb *fb, int x, int y) {
+    return (uint32_t *) (fb->px + (size_t) y * fb->stride + (size_t) x * 4);
+}
+/* the one color under the box, or 0 with *ok false when it is not one color */
+static uint32_t ic_ground(const azmod_fb *fb, int x, int y, int sz, bool *ok) {
+    uint32_t g = *ic_row(fb, x, y);
+    for (int j = 0; j < sz; j++) {
+        const uint32_t *r = ic_row(fb, x, y + j);
+        for (int i = 0; i < sz; i++)
+            if (r[i] != g) {
+                *ok = false;
+                return 0;
+            }
+    }
+    *ok = true;
+    return g;
+}
+static void draw_item_icon(const azmod_fb *fb, int x, int y, int sz, int item, uint32_t c) {
+    if (sz <= 0 || x >= fb->w || y >= fb->h || x + sz <= 0 || y + sz <= 0)
+        return; /* wholly outside the buffer: every pixel would be clipped, after all the shapes */
+    bool ok = !(item >= AZI_REG0 && item < AZI_ACT0) && sz > 0 && sz <= IC_CACHE_MAX && x >= 0 &&
+              y >= 0 && x + sz <= fb->w && y + sz <= fb->h;
+    uint32_t ground = ok ? ic_ground(fb, x, y, sz, &ok) : 0;
+    if (ok && !g_icache)
+        g_icache = calloc(IC_CACHE_N, sizeof *g_icache);
+    if (!ok || !g_icache) {
+        draw_item_icon_raw(fb, x, y, sz, item, c);
+        return;
+    }
+    unsigned theme = azm_theme_key();
+    int slot = 0;
+    for (int k = 0; k < IC_CACHE_N; k++) {
+        if (g_icache[k].used && g_icache[k].item == item && g_icache[k].sz == sz && g_icache[k].ink == c &&
+            g_icache[k].ground == ground && g_icache[k].theme == theme) {
+            g_icache[k].used = ++g_icache_clock;
+            for (int j = 0; j < sz; j++)
+                memcpy(ic_row(fb, x, y + j), g_icache[k].px + (size_t) j * sz, (size_t) sz * 4);
+            return;
+        }
+        if (g_icache[k].used < g_icache[slot].used)
+            slot = k; /* an empty entry, else the least recently used */
+    }
+    draw_item_icon_raw(fb, x, y, sz, item, c);
+    g_icache[slot].item = item;
+    g_icache[slot].sz = sz;
+    g_icache[slot].ink = c;
+    g_icache[slot].ground = ground;
+    g_icache[slot].theme = theme;
+    g_icache[slot].used = ++g_icache_clock;
+    for (int j = 0; j < sz; j++)
+        memcpy(g_icache[slot].px + (size_t) j * sz, ic_row(fb, x, y + j), (size_t) sz * 4);
 }
 
 void azmod_draw_text_at(const azmod_fb *fb, int x, int y, const char *s, int scale, uint32_t c) {

@@ -41,6 +41,12 @@
 #define WATT_GAIN_MIN_MS 30
 /* ...and refreshes the deck's overview tiles at most this often (EP147 re-renders each one). */
 #define WATT_OV_MIN_MS 100
+/* While a load decodes, azstem's frame count grows on every overlay tick and the envelope fills
+ * in behind it. The curve follows that at most this often, and its overview tiles refresh on the
+ * gain cadence (WATT_OV_MIN_MS) rather than at once: rebuilding and re-rendering every tile on
+ * every tick kept EP147's message thread busy for the whole decode. A pad toggle, a track change
+ * or a new envelope is never delayed. */
+#define WATT_PROG_MIN_MS 500
 
 /* A stem gain x1000 (azstem_stem_gain) -> 0..WATT_GQ_MAX, rounded. */
 static inline int watt_gain_q(int gk) {
@@ -118,6 +124,12 @@ static inline int watt_should_build(unsigned key, unsigned long long gkey, unsig
     if (gkey != gkey_prev)
         return now_ms - last_ms >= WATT_GAIN_MIN_MS;
     return 0;
+}
+
+/* Should the overlay tick rebuild a deck's curve for the decode's progress alone?  fr / fr_prev =
+ * azstem's frame count now and at the last rebuild. */
+static inline int watt_progress_due(long fr, long fr_prev, long now_ms, long last_ms) {
+    return fr != fr_prev && now_ms - last_ms >= WATT_PROG_MIN_MS;
 }
 
 /* Should this tick refresh the deck's overview tiles?  built = the curve was rebuilt on this

@@ -50,12 +50,18 @@ static void cm_full_close(azmod_state *s);
 static bool cm_animating(void);
 static int cm_off_now(void);
 static void cm_master_toggle(void);
+/* the preview card's own Reload square (screen_community.c cm_draw_card): its rect, and the
+ * tap that sends the same reload request the full screen's Reload does */
+static void cm_card_reload_rect(const azmod_fb *fb, int *x, int *y, int *sz);
+static int cm_card_rshow(void);
+static int cm_card_tap_reload(void);
 static void g_cm_dir_reset(void);
 static bool cm_open_row(azmod_state *s, int it); /* a mod's SCREEN row: its page (screen_community.c) */
 /* the Community Mods home page's touch gesture, decided by azmod_pane_drag (screen_community.c) */
 static bool cm_home_live(const azmod_state *s);
 static bool cm_home_scroll_to(const azmod_fb *fb, int v, int phase);
 static bool cm_home_nav(int ctl);
+static bool cm_home_reload(int ctl);
 static int cm_home_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty);
 static void cm_home_fire(azmod_state *s, const azmod_fb *fb, int ctl);
 /* the Clock's zone list (screen_overlays.c): back to the Clock; its rows under the finger */
@@ -66,15 +72,20 @@ static int tzl_row_at(const azmod_fb *fb, int tx, int ty);
 static int tzl_rowh(const azmod_fb *fb);
 static void tzl_set_first(const azmod_fb *fb, int f);
 static int g_tzl_first;
-/* the switch an Overlays or Clock screen belongs to; the screen such a row opens (screen_overlays.c) */
+/* the row an Overlays, Clock or Browse View Mods screen belongs to; the screen such a row opens;
+ * whether a mode is one of them (screen_overlays.c) */
 static int sub_head(int mode);
 static int sub_screen(int it);
-/* Pad Colors opened from its Extras row: BACK returns to the Extras pane with
+static bool sub_mode(int mode);
+/* leaving a group's screen: the Extras pane's scroll as it was (menu_full.c) */
+static void c_group_screen_leave(const azmod_state *s);
+/* Pad Colors (or another screen) opened from its Extras row: BACK returns to the Extras pane with
  * that row focused, not to the left column. AZ_COLOR_PICK -> AZ_COLORS stays its own step. */
 static bool c_back_to_extras(azmod_state *s) {
-    if ((s->mode != AZ_COLORS && s->mode != AZ_OVERLAYS && s->mode != AZ_CLOCK) || s->left_sel != AZF_EXTRAS)
+    if ((s->mode != AZ_COLORS && !sub_mode(s->mode)) || s->left_sel != AZF_EXTRAS)
         return false;
     s->menu_sel = s->mode == AZ_COLORS ? AZI_PAD_COLORS : sub_head(s->mode);
+    c_group_screen_leave(s);
     s->mode = AZ_OPEN;
     s->pane = 1;
     return true;
@@ -122,6 +133,7 @@ bool azmod_back(azmod_state *s) {
         return true;
     case AZ_OVERLAYS:
     case AZ_CLOCK:
+    case AZ_BROWSE_VIEW:
         s->menu_sel = sub_head(s->mode);
         s->mode = AZ_OPEN;
         return true;

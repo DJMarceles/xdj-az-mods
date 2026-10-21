@@ -475,13 +475,16 @@ static void decode_stem_progressive(int deck, int slot, const char *path) {
         return;
     }
 
-    /* Seed the progressive envelope with the final length and a uniform lane, so
-     * the undecoded tail reads att = on_count/NSTEM, not silence. First stem only. */
+    /* Seed the progressive envelope with the final length and a uniform lane, so the
+     * undecoded tail reads att = on_count/NSTEM, not silence: once per load (the first
+     * stem), again if a later stem is longer. A cached envelope is whole and stays as it is. */
     pthread_mutex_lock(&g_envp_lock);
-    if (g_env_total[deck] <= 0 || (long) total > g_env_total[deck]) {
+    if (!g_env_seeded[deck] || (!g_env_hit[deck] && (long) total > g_env_total[deck])) {
+        g_env_seeded[deck] = 1;
         g_env_total[deck] = (long) total;
-        g_env_filled[deck] = 0;
-        memset(g_env[deck], 128, sizeof g_env[deck]);
+        g_env_filled[deck] = g_env_hit[deck] ? AZW_N : 0;
+        if (!g_env_hit[deck])
+            memset(g_env[deck], 128, sizeof g_env[deck]);
     }
     pthread_mutex_unlock(&g_envp_lock);
     long cap = (long) total;
@@ -532,6 +535,10 @@ static void decode_stem_progressive(int deck, int slot, const char *path) {
         advance_stem_frames(deck);
         if (got < want)
             break; /* short read = EOF */
+        /* The track was replaced: stop here. The loader discards these buffers once every
+         * decode thread has joined, and the next track's load waits for that join. */
+        if (atomic_load_explicit(&g_load_stale[deck], memory_order_acquire))
+            break;
     }
     free(tmp);
     stb_vorbis_close(v);
@@ -546,6 +553,10 @@ fail:
 
 static void *dth_prog(void *arg) {
     pjob_t *j = arg;
+    /* Below EP147's own normal-priority threads (its message thread draws the screen):
+     * a load decodes every stem at once, and at nice 0 they took most of the free cores
+     * from it for the whole decode. Decoding still runs well ahead of the playhead. */
+    setpriority(PRIO_PROCESS, (id_t) syscall(SYS_gettid), 10);
     decode_stem_progressive(j->deck, j->slot, j->path);
     return NULL;
 }
@@ -1053,7 +1064,27 @@ static long ms_now(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
-static void ofs_load_measure(int deck, const char *track, const char *src); /* ofsload.c */
+static void ofs_load_measure(int deck, const char *track, const char *src,
+                             unsigned long long skey); /* ofsload.c */
+/* Identity of a stem set for the offset cache: size and mtime of each present stem file,
+ * in slot order (FNV-1a). 0 = a file could not be read, and nothing is cached. */
+static unsigned long long stems_key(char paths[NSTEM][1600]) {
+    unsigned long long h = 1469598103934665603ULL;
+    for (int k = 0; k < NSTEM; k++) {
+        long long v[3] = {k, -1, -1};
+        if (paths[k][0]) {
+            struct stat st;
+            if (stat(paths[k], &st) != 0)
+                return 0;
+            v[1] = (long long) st.st_size;
+            v[2] = (long long) st.st_mtime;
+        }
+        const unsigned char *b = (const unsigned char *) v;
+        for (size_t i = 0; i < sizeof v; i++)
+            h = (h ^ b[i]) * 1099511628211ULL;
+    }
+    return h ? h : 1;
+}
 /* RAM that must remain free after a deck's stems are allocated. */
 #ifndef AZSTEM_MEM_FLOOR_MB
 #define AZSTEM_MEM_FLOOR_MB 400
@@ -1092,7 +1123,7 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
           folder, track, src ? src : "?", ident ? "this-file" : "unknown", t_folder - t_entry);
     /* Publish a cached envelope before decoding so the waveform is live at once. */
     snprintf(g_env_dir[deck], sizeof g_env_dir[deck], "%s", folder);
-    env_cache_load(deck);
+    int env_hit = env_cache_load(deck);
     t_cache = ms_now();
     struct dirent *de; /* reused by the ogg-file scan below */
 
@@ -1175,6 +1206,14 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
     /* Drop the old stems first (RT passes native audio meanwhile), then decode
      * each present stem in parallel (RK3399: 6 cores). */
     free_stems(deck);
+    /* free_stems unpublishes the envelope; a cached one loaded above is this track's, so it
+     * stays published through the decode, and the decode leaves it as it is. */
+    pthread_mutex_lock(&g_envp_lock);
+    g_env_seeded[deck] = 0;
+    g_env_hit[deck] = env_hit;
+    pthread_mutex_unlock(&g_envp_lock);
+    if (env_hit)
+        atomic_store_explicit(&g_env_ready[deck], 1, memory_order_release);
     deck_stems *dk = &g_dk[deck];
     unsigned present = 0;
     for (int k = 0; k < NSTEM; k++) {
@@ -1207,7 +1246,7 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
             else
                 nth++;
         }
-        ofs_load_measure(deck, track, src); /* always releases the hold */
+        ofs_load_measure(deck, track, src, stems_key(paths)); /* always releases the hold */
         for (int i = 0; i < nth; i++)
             pthread_join(th[i], NULL);
     }
@@ -1223,8 +1262,15 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
         logln("stems: no decodable .ogg in '%s'", folder);
         return 0;
     }
+    /* A replaced track's decode stops early: its envelope would describe part of the track,
+     * so it is neither built nor cached. The loader discards the buffers. */
+    if (atomic_load_explicit(&g_load_stale[deck], memory_order_acquire))
+        return 0;
     atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
-    build_env(deck); /* full-buffer peak lanes: every decode has joined here */
+    /* Full-buffer peak lanes, every decode joined. Not after a cache hit: the cached
+     * envelope is already this one, and a rebuild unpublishes it while it runs. */
+    if (!env_hit)
+        build_env(deck);
     {
         long t_env = ms_now();
         logln("PHASES d%d: folder=%ldms cache=%ldms scan=%ldms decode=%ldms env=%ldms TOTAL=%ldms",

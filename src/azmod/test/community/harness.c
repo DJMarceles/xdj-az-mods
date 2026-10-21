@@ -120,6 +120,7 @@ static int crash_peek8(uintptr_t a, uintptr_t *out) {
 #define CONF_PATH CM_ROOT "/azmod.conf"
 static struct azconf *g_conf;
 static int g_conf_readonly;
+static long g_rtick_n; /* pad_leds.c's repaint tick count (the quarantine's heartbeat): none here */
 #define SDK_SURFACE_IMPL "test/community/sdk_surface_stub.c" /* no overlay thread here */
 #define SDK_DECKUI_IMPL "test/community/sdk_deckui_stub.c"  /* no azstem, no EP147 here */
 #define SDK_PROC_IMPL "test/community/sdk_proc_stub.c"      /* no audio, systemd or stick here */

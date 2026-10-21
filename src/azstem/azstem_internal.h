@@ -42,6 +42,10 @@ static long g_env_total[NDECK];
 
 static int g_env_filled[NDECK];
 
+static int g_env_seeded[NDECK];
+
+static int g_env_hit[NDECK];
+
 static pthread_mutex_t g_envp_lock;
 
 static char g_env_dir[NDECK][1024];

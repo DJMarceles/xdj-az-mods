@@ -129,7 +129,9 @@ to the settings partition.
 | `track_list_rows.c` | TrackID-to-path table, touch-scroll row cache, shared paint slots |
 | `touch_accum.c` | Lets slow touch drags scroll (opt-in, `azmod-touchaccum.on`) |
 | `bluetooth.c` | Bluetooth auto-connect, remembered CH3/CH4 input, UART speed recovery |
-| `browse_remember.c` | The Browse PREVIEW button and the track list header's sub column choice remembered across restarts |
+| `browse_columns.c` | The Browse PREVIEW button and the track list header's sub column choice remembered across restarts, and Column Edit's hidden and shown columns (through the deck's own list header) |
+| `browse_edit.c`, `browse_edit.h` | Column Edit: the COLUMN EDIT and RESET buttons, its edit mode, resizing the Browse track list columns and the saved widths |
+| `browse_fields.c`, `browse_fields.h` | Column Edit: a library field shown on a Browse track list column, drawn by the deck's own cell painter; Hide Column in the deck's field list |
 | `crash_guards.c` | Guard for a stock QR-login fault; async-signal-safe crash reporter, run on an alternate signal stack |
 | `updates.c` | Update Mods screen: version, status and changelog readers, request writer |
 | `savelogs.c` | System Info's Save Logs to USB: request writer and status reader |

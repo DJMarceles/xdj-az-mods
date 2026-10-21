@@ -101,6 +101,16 @@ def gen(root, base):
     mods.append(entry(base, "any-mod", d, firmware=["any"]))
     d = ship("core-mod", pkg("core-mod", man=manifest("core-mod", min_core="9.0.0")))
     mods.append(entry(base, "core-mod", d, min_core="9.0.0"))     # listed; the deck says it needs a newer core
+    # screenshots (fetched only by `shots`) and the beta flag
+    put("shots/s1.png", png(16, 10)); put("shots/notpng.png", b"this is not a png\n")
+    put("shots/big.png", png(4, 4) + b"\0" * (1024 * 1024))       # over the 1 MB cap
+    d = ship("shots-mod", pkg("shots-mod"))
+    mods.append(entry(base, "shots-mod", d, beta=True,
+                      screenshots=[f"{base}/shots/s1.png", f"{base}/shots/notpng.png", f"{base}/shots/big.png"]))
+    d = ship("shots2-mod", pkg("shots2-mod"))                       # an http:// screenshot: no screenshots, still listed
+    mods.append(entry(base, "shots2-mod", d, beta="yes", screenshots=[f"{base}/shots/s1.png", "http://127.0.0.1/s.png"]))
+    d = ship("shots4-mod", pkg("shots4-mod"))                       # more than 3: no screenshots, still listed
+    mods.append(entry(base, "shots4-mod", d, screenshots=[f"{base}/shots/s1.png"] * 4))
     # --- refused at install --------------------------------------------------------
     d = ship("badsha-mod", pkg("badsha-mod"))
     mods.append(entry(base, "badsha-mod", d, sha256="0" * 64))
@@ -199,7 +209,16 @@ def gen(root, base):
         f"{base}/r1/azmods-repo.json", f"{base}/big/azmods-repo.json", f"{base}/nolen/big/azmods-repo.json",
         f"{base}/broken/azmods-repo.json", f"{base}/notrepo/azmods-repo.json",
         "not a repo", "http://127.0.0.1:8443/r1/azmods-repo.json"]}))
+    # the download counts (az-mods-index stats.json): r1's are used; the r2 entry is a repository
+    # the DJ added by hand, which never shows a count; each damaged count is dropped on its own
+    put("stats.json", json.dumps(stats(base, {"good-mod": 1840, "any-mod": 0})))
+    put("stats.v2.json", json.dumps(stats(base, {"good-mod": 1841, "any-mod": 3})))
     put("expect.txt", f"skipped={SKIPPED}\n")
+
+def stats(base, r1):
+    bad = {"dd-mod": "12", "core-mod": 12345678901234, "nofw-mod": -4, "small-mod": 1.5, "Bad_Id": 9}
+    return {"azmods_stats": 1, "generated": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
+            "mods": {f"{base}/r1": dict(r1, **bad), f"{base}/nolen/r2": {"other-mod": 99}}}
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"

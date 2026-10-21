@@ -621,22 +621,197 @@ static long ofs_stems_decoded(int deck) {
 }
 
 #define OFSL_HEAD ((long) AZ_EP147_RATE * 20) /* decode the first 20 s of the source */
-#define OFSL_WAITMS 15000       /* give up waiting for the stems after 15 s */
+#define OFSL_EARLY ((long) AZ_EP147_RATE * 6) /* first pass: a window starting in the first 6 s */
+#define OFSL_WAITMS 15000                     /* give up waiting for the stems after 15 s */
+
+/* ---- Offset cache: <stems folder>/azstem.ofs ----------------------------------
+ * One line, "AZOFS1 <source size> <source mtime> <stems key> <lag>\n", written only
+ * for an applied measurement. A repeat load of the same source with the same stem
+ * files opens the gate without measuring. Any other content, or any key that differs,
+ * is a miss and the load measures as usual. Bump the magic whenever g_ofs_rules or
+ * g_aac_rules change, so no lag measured under older rules is reused. */
+#define OFSC_MAGIC "AZOFS1"
+static void ofs_cache_path(int deck, char *out, size_t n) {
+    snprintf(out, n, "%s/azstem.ofs", g_env_dir[deck]);
+}
+/* One decimal field of a cache line, then exactly one space (or, for the last field, the
+ * newline that ends the line). 0 = anything else, including a value out of range. */
+static int ofsc_field(const char **p, int last, int is_unsigned, long long *v,
+                      unsigned long long *u) {
+    const char *s = *p;
+    char *e;
+    if (!isdigit((unsigned char) s[0]) &&
+        !(s[0] == '-' && !is_unsigned && isdigit((unsigned char) s[1])))
+        return 0;
+    errno = 0;
+    if (is_unsigned)
+        *u = strtoull(s, &e, 10);
+    else
+        *v = strtoll(s, &e, 10);
+    if (errno || e == s || *e != (last ? '\n' : ' '))
+        return 0;
+    *p = e + 1;
+    return 1;
+}
+/* 1 and *lag when `line` is a cache line for exactly this source and stem set. */
+static int ofs_cache_parse(const char *line, long long size, long long mtime,
+                           unsigned long long skey, long *lag) {
+    static const char magic[] = OFSC_MAGIC " ";
+    if (strncmp(line, magic, sizeof magic - 1) != 0)
+        return 0;
+    const char *p = line + sizeof magic - 1;
+    long long sz, mt, l;
+    unsigned long long k, unused;
+    if (!ofsc_field(&p, 0, 0, &sz, &unused) || !ofsc_field(&p, 0, 0, &mt, &unused) ||
+        !ofsc_field(&p, 0, 1, &l, &k) || !ofsc_field(&p, 1, 0, &l, &unused) || *p != '\0')
+        return 0;
+    if (sz != size || mt != mtime || k != skey || l < -OFS_LAGMAX || l > OFS_LAGMAX)
+        return 0;
+    *lag = (long) l;
+    return 1;
+}
+static int ofs_cache_load(int deck, long long size, long long mtime, unsigned long long skey,
+                          long *lag) {
+    if (!g_env_dir[deck][0])
+        return 0;
+    char path[1152], line[128];
+    ofs_cache_path(deck, path, sizeof path);
+    FILE *f = fopen(path, "re");
+    if (!f)
+        return 0;
+    int ok = fgets(line, sizeof line, f) != NULL && ofs_cache_parse(line, size, mtime, skey, lag);
+    fclose(f);
+    return ok;
+}
+static void ofs_cache_save(int deck, long long size, long long mtime, unsigned long long skey,
+                           long lag) {
+    if (!g_env_dir[deck][0])
+        return;
+    char path[1152], tmp[1160];
+    ofs_cache_path(deck, path, sizeof path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path); /* the stick can be pulled: whole or not at all */
+    FILE *f = fopen(tmp, "we");
+    if (!f)
+        return;
+    int ok = fprintf(f, OFSC_MAGIC " %lld %lld %llu %ld\n", size, mtime, skey, lag) > 0;
+    ok = fflush(f) == 0 && ok;
+    ok = fsync(fileno(f)) == 0 && ok;
+    ok = fclose(f) == 0 && ok;
+    if (!ok || rename(tmp, path) != 0)
+        unlink(tmp);
+}
+
+/* The source head the way EP147 decodes it, resampled to 44.1k, into x[maxn].
+ * Returns the frames written; 0 with *why set when nothing usable came out. */
+static long ofs_source_head(const char *src, int is_mp3, long maxn, float *x, int *rate,
+                            char *vendor, size_t vn, char *kind, size_t kn, int *proven,
+                            const char **why, int deck) {
+    float *nat = NULL;
+    long got = 0, n = 0;
+    *proven = 0;
+    if (is_mp3) {
+        int cls = mp3_probe(src, rate, vendor, vn);
+        snprintf(kind, kn, "MP3 %s", mp3_cls_name(cls));
+        if (cls == MP3_CLS_NONE) {
+            *why = "no Layer III frame found";
+            return 0;
+        }
+        const ofs_rule_t *rule = ofs_rule_for(cls, *rate, vendor);
+        long cal = rule ? rule->cal44 : 0;
+        nat = mp3_decode_native(src, *rate, rule ? rule->frame : ofs_guess_frame(vendor),
+                                ofs_need_native(maxn, *rate, cal), &got);
+        if (nat)
+            n = ofs_to44(nat, got, *rate, cal, x, maxn);
+        *proven = rule != NULL;
+    } else {
+        int aot = 0, sbr = 0;
+        char desc[64];
+        nat = m4a_decode_native(src, maxn, rate, &aot, &sbr, desc, sizeof desc, &got);
+        snprintf(kind, kn, "M4A aot=%d%s", aot, sbr ? " SBR" : "");
+        snprintf(vendor, vn, "%.15s", desc);
+        logln("STEMOFS-LOAD d%d   m4a: %s", deck, desc);
+        if (!nat) {
+            *why = "m4a: no decodable AAC track";
+            return 0;
+        }
+        const aac_rule_t *rule = aac_rule_for(*rate, aot, sbr);
+        n = ofs_to44(nat, got, *rate, rule ? rule->cal44 : 0, x, maxn);
+        *proven = rule != NULL;
+    }
+    free(nat);
+    if (n < OFS_N + 2 * OFS_LAGMAX) {
+        *why = "source decode too short";
+        return 0;
+    }
+    return n;
+}
+
+/* Correlates the loudest OFS_N window that starts at or before `blim` against the stem
+ * sum, once every stem is decoded past it. 1 = *rr holds a result (confident or not);
+ * 0 = no result, *why says why. */
+static int ofs_try(int deck, const float *x, long n, long blim, long t0, long long *base,
+                   ofs_res_t *rr, long *waitms, const char **why) {
+    deck_stems *dk = &g_dk[deck];
+    /* the loudest OFS_N window: silence or a fade-in correlates with anything */
+    double be = -1;
+    *base = -1;
+    for (long b = OFS_LAGMAX; b + OFS_N <= n && b <= blim; b += 22050) {
+        double e = 0;
+        for (long i = 0; i < OFS_N; i += 4)
+            e += (double) x[b + i] * x[b + i];
+        if (e > be) {
+            be = e;
+            *base = b;
+        }
+    }
+    if (*base < 0 || be / (OFS_N / 4) < 1e-6) {
+        *why = "source head is silent";
+        *base = -1;
+        return 0;
+    }
+    /* wait for every stem to be decoded past the search window */
+    long want = *base + OFS_N + OFS_LAGMAX + 64, w0 = ms_now();
+    for (;;) {
+        if (atomic_load_explicit(&g_load_stale[deck], memory_order_acquire)) {
+            *why = "track replaced during load";
+            return 0;
+        }
+        if (ofs_stems_decoded(deck) >= want)
+            break;
+        if (!atomic_load_explicit(&g_stem_present[deck], memory_order_relaxed)) {
+            *why = "no stem decoded";
+            return 0;
+        }
+        if (ms_now() - t0 > OFSL_WAITMS) {
+            *why = "stems not decoded in time";
+            return 0;
+        }
+        usleep(20000);
+    }
+    *waitms += ms_now() - w0;
+    ofs_correlate(dk, want, x + *base, *base, rr);
+    return 1;
+}
 
 /* Loader thread, while this load's stem decode threads run. Measures and sets
- * dk->stem_off, then opens the gate. Every path ends in the release at `out`. */
-static void ofs_load_measure(int deck, const char *track, const char *src) {
+ * dk->stem_off, then opens the gate. Every path ends in the release at `out`.
+ * The gate stays closed for as long as this runs, so a stem toggled meanwhile is not
+ * heard until it returns: a cached result opens it at once, and the first pass looks
+ * only at the first seconds so that it needs only the first seconds of decoded stems.
+ * The second pass, over the whole 20 s head, runs only when the first finds no
+ * confident peak. `skey` identifies the stem files (stems_key). */
+static void ofs_load_measure(int deck, const char *track, const char *src,
+                             unsigned long long skey) {
     deck_stems *dk = &g_dk[deck];
-    long t0 = ms_now();
+    long t0 = ms_now(), waitms = 0;
     char vendor[16] = "", kind[64] = "not-mp3/m4a";
-    int rate = 0, proven = 0;
-    float *x = NULL, *nat = NULL;
+    int rate = 0, proven = 0, pass = 0, cached = 0;
+    float *x = NULL;
     const char *why = NULL;
     long lag = 0;
     double fine = 0, coarse = 0, second = 0;
-    long long base = -1;
+    long long base = -1, ssize = -1, smtime = -1;
     int apply = 0;
-    long n = 0;
 
     if (!src || !src[0]) {
         why = "no source path";
@@ -649,84 +824,48 @@ static void ofs_load_measure(int deck, const char *track, const char *src) {
         why = "not mp3/m4a (FLAC/WAV/AIFF have no decoder delay)";
         goto out;
     }
+    {
+        struct stat st;
+        if (stat(src, &st) == 0) {
+            ssize = (long long) st.st_size;
+            smtime = (long long) st.st_mtime;
+        }
+    }
+    if (ssize >= 0 && skey && !dev_flag(NOSTEMOFS_PATH) &&
+        ofs_cache_load(deck, ssize, smtime, skey, &lag)) {
+        snprintf(kind, sizeof kind, "cached");
+        cached = apply = 1;
+        goto out;
+    }
     x = malloc((size_t) OFSL_HEAD * sizeof(float));
     if (!x) {
         why = "no memory";
         goto out;
     }
-    long got = 0;
-    if (is_mp3) {
-        int cls = mp3_probe(src, &rate, vendor, sizeof vendor);
-        snprintf(kind, sizeof kind, "MP3 %s", mp3_cls_name(cls));
-        if (cls == MP3_CLS_NONE) {
-            why = "no Layer III frame found";
-            goto out;
-        }
-        const ofs_rule_t *rule = ofs_rule_for(cls, rate, vendor);
-        long cal = rule ? rule->cal44 : 0;
-        nat = mp3_decode_native(src, rate, rule ? rule->frame : ofs_guess_frame(vendor),
-                                ofs_need_native(OFSL_HEAD, rate, cal), &got);
-        if (nat)
-            n = ofs_to44(nat, got, rate, cal, x, OFSL_HEAD);
-        proven = rule != NULL;
-    } else {
-        int aot = 0, sbr = 0;
-        char desc[64];
-        nat = m4a_decode_native(src, OFSL_HEAD, &rate, &aot, &sbr, desc, sizeof desc, &got);
-        snprintf(kind, sizeof kind, "M4A aot=%d%s", aot, sbr ? " SBR" : "");
-        snprintf(vendor, sizeof vendor, "%.15s", desc);
-        logln("STEMOFS-LOAD d%d   m4a: %s", deck, desc);
-        if (!nat) {
-            why = "m4a: no decodable AAC track";
-            goto out;
-        }
-        const aac_rule_t *rule = aac_rule_for(rate, aot, sbr);
-        n = ofs_to44(nat, got, rate, rule ? rule->cal44 : 0, x, OFSL_HEAD);
-        proven = rule != NULL;
-    }
-    if (n < OFS_N + 2 * OFS_LAGMAX) {
-        why = "source decode too short";
-        goto out;
-    }
-
-    /* the loudest OFS_N window: silence or a fade-in correlates with anything */
-    double be = -1;
-    for (long b = OFS_LAGMAX; b + OFS_N <= n; b += 22050) {
-        double e = 0;
-        for (long i = 0; i < OFS_N; i += 4)
-            e += (double) x[b + i] * x[b + i];
-        if (e > be) {
-            be = e;
-            base = b;
-        }
-    }
-    if (base < 0 || be / (OFS_N / 4) < 1e-6) {
-        why = "source head is silent";
-        base = -1;
-        goto out;
-    }
-
-    /* wait for every stem to be decoded past the search window */
-    long want = base + OFS_N + OFS_LAGMAX + 64;
-    for (;;) {
-        if (atomic_load_explicit(&g_load_stale[deck], memory_order_acquire)) {
-            why = "track replaced during load";
-            goto out;
-        }
-        if (ofs_stems_decoded(deck) >= want)
+    static const long head[2] = {OFSL_EARLY + OFS_N + OFS_LAGMAX, OFSL_HEAD};
+    static const long blim[2] = {OFSL_EARLY, OFSL_HEAD};
+    ofs_res_t rr = {0};
+    int have = 0;
+    for (pass = 1; pass <= 2; pass++) {
+        why = NULL;
+        long n = ofs_source_head(src, is_mp3, head[pass - 1], x, &rate, vendor, sizeof vendor, kind,
+                                 sizeof kind, &proven, &why, deck);
+        if (!n)
+            break; /* the longer head cannot decode better */
+        have = ofs_try(deck, x, n, blim[pass - 1], t0, &base, &rr, &waitms, &why);
+        if (!have && (atomic_load_explicit(&g_load_stale[deck], memory_order_acquire) ||
+                      !atomic_load_explicit(&g_stem_present[deck], memory_order_relaxed) ||
+                      ms_now() - t0 > OFSL_WAITMS))
             break;
-        if (!atomic_load_explicit(&g_stem_present[deck], memory_order_relaxed)) {
-            why = "no stem decoded";
-            goto out;
-        }
-        if (ms_now() - t0 > OFSL_WAITMS) {
-            why = "stems not decoded in time";
-            goto out;
-        }
-        usleep(20000);
+        if (have && rr.fine >= OFS_MINCORR && rr.coarse - rr.second >= OFS_MARGIN)
+            break;
+        if (n < head[pass - 1])
+            break; /* the source is shorter than this head: a second pass sees nothing new */
     }
-    ofs_res_t rr;
-    ofs_correlate(dk, want, x + base, base, &rr);
+    if (pass > 2)
+        pass = 2;
+    if (!have)
+        goto out;
     lag = rr.lag;
     fine = rr.fine;
     coarse = rr.coarse;
@@ -748,13 +887,12 @@ out:
     atomic_store_explicit(&dk->stem_off, apply ? lag : 0, memory_order_relaxed);
     g_ofs_load[deck] = apply ? lag : 0;
     logln("STEMOFS-LOAD d%d '%s' %s %dHz tag='%s' base=%lld lag=%ld (%.1f ms) fine=%.3f "
-          "coarse=%.3f runnerup=%.3f -> %s [%ldms]",
+          "coarse=%.3f runnerup=%.3f -> %s [%ldms, pass %d, stems wait %ldms]",
           deck, track, kind, rate, vendor, base, lag, lag / 44.1, fine, coarse, second,
-          apply ? "APPLIED" : "0 (see reason)", ms_now() - t0);
+          apply ? "APPLIED" : "0 (see reason)", ms_now() - t0, pass, waitms);
     if (why)
         logln("STEMOFS-LOAD d%d   reason: %s", deck, why);
     free(x);
-    free(nat);
     /* Open the gate, unless the track was replaced meanwhile (drop_stems): then
      * the hold stays and the loader frees these buffers after its threads join. */
     pthread_mutex_lock(&g_adv_lock);
@@ -762,4 +900,6 @@ out:
         atomic_store_explicit(&g_gate_hold[deck], 0, memory_order_release);
     pthread_mutex_unlock(&g_adv_lock);
     advance_stem_frames(deck); /* publishes whatever is decoded now (no-op while held) */
+    if (apply && !cached && ssize >= 0 && skey)
+        ofs_cache_save(deck, ssize, smtime, skey, lag);
 }

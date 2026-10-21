@@ -60,6 +60,9 @@ static void sdk_deck_tick(long now) {
     g_deck_ticks++;
 }
 static void sdk_rows_tick(void) { g_rows_ticks++; }
+/* the quarantine's heartbeat (cm_orderly.h has its own suite) */
+static long g_rtick_n;
+static void cmo_note(long count, long now) { (void) count, (void) now; }
 /* the dialog's surface: shown or not */
 static int g_shown, g_surface_up;
 static void *g_sdk_ovc;

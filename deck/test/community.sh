@@ -61,11 +61,11 @@ STK=/deck/media/usb/sda1/MODS; COMM=$STK/community-mods
 st() { sed -n "s/^$1=//p" "$S"; }
 # catalog lines (az-community CATALOG): repo|text|name|ok|listed|error
 #   mod|repo|id|name|version|author|summary|category|hooks|firmware|size|icon|installed|
-#       min_core|description|assets_kb|held|also|nalso|updated
+#       min_core|description|assets_kb|held|also|nalso|updated|downloads|beta|shots
 rf() { awk -F'|' -v u="$1" -v k="$2" '$1=="repo"&&$2==u{ print $k; exit }' "$CAT"; }
 mf() { awk -F'|' -v id="$1" -v k="$2" -v u="${3:-}" '$1=="mod"&&$3==id&&(u==""||$2==u){ print $k; exit }' "$CAT"; }
 nrec() { awk -F'|' -v id="$1" -v u="$2" '$1=="mod"&&$3==id&&$2==u{ n++ } END{ print n+0 }' "$CAT"; }
-fields_ok() { awk -F'|' 'NR==1{ if($0!="v1") bad=1; next } $1=="repo"{ if(NF!=6) bad=1; next } $1=="mod"{ if(NF!=20||more) bad=1; next } $1=="more"{ if(NF!=2||$2 !~ /^[1-9][0-9]*$/||more) bad=1; more=1; next } { bad=1 } END{ exit bad }' "$CAT"; }
+fields_ok() { awk -F'|' 'NR==1{ if($0!="v1") bad=1; next } $1=="repo"{ if(NF!=6) bad=1; next } $1=="mod"{ if(NF!=23||more) bad=1; next } $1=="more"{ if(NF!=2||$2 !~ /^[1-9][0-9]*$/||more) bad=1; more=1; next } { bad=1 } END{ exit bad }' "$CAT"; }
 stick_ro() { grep " /deck/media/usb/sda1 " /proc/mounts | grep -q "[ ,]ro[ ,]"; }
 nothing_half() { ! for x in "$COMM"/.[!.]*; do printf '%s\n' "${x##*/}"; done | grep -qE '^\.[a-z0-9-]+\.(new|old)$'; }
 # a mod's switch in MODS/azmods.cfg (community-mods.<id> = on|off)
@@ -83,7 +83,8 @@ pkgsha() { unzip -p "/srv/pkg/$1-$2.azmod" "$1.so" | sha256sum | cut -d' ' -f1; 
 appr() { grep "^$1 " "$AP" 2>/dev/null; }
 appr_fmt() { [ -f "$AP" ] && ! grep -qvE '^[a-z0-9-]{3,32} [0-9a-f]{64}$' "$AP" && [ "$(cut -d' ' -f1 "$AP" | sort | uniq -d)" = "" ]; }
 R1=$B/r1/azmods-repo.json; R2N=$B/nolen/r2/azmods-repo.json
-
+# shellcheck disable=SC2034 # read by the eval'd assertions below
+TAB=$(printf '\t')
 for SHC in "/bin/busybox ash" "/bin/sh"; do
 SHN=${SHC##*/}; SHN=${SHN%% *}; [ "$SHN" = busybox ] && SHN=ash
 echo "== [$SHN] fresh state"
@@ -98,9 +99,19 @@ cp /srv/r1/azmods-repo.json /srv/r1/cur.json 2>/dev/null; cp /srv/r1/azmods-repo
 echo "== [$SHN] refresh: Mod Index + user repo, good and broken repos in the SAME round"
 t0=$(date +%s); run refresh; t1=$(date +%s)
 chk "refresh ends done" '[ "$(st state)" = done ] && [ "$(st op)" = refresh ]'
-chk "refresh message counts the catalog's mod lines (was always 0: grep for mod= on mod| lines)" '[ "$(st msg | sed -n "s/^Found \([0-9]*\) mods*\..*/\1/p")" = "$(grep -c "^mod|" $CAT)" ] && [ "$(grep -c "^mod|" $CAT)" -gt 0 ]'
+chk "refresh message names only problems: the unreadable repositories, no mod count (the screen counts the catalog)" '! st msg | grep -q Found && st msg | grep -q "^[0-9]* of [0-9]* repositories could not be read\.$" && [ "$(grep -c "^mod|" $CAT)" -gt 0 ]'
 chk "status carries stamp= (seconds since boot) and msg last" '[ -n "$(st stamp)" ] && tail -1 $S | grep -q ^msg='
-chk "catalog is 6.1: v1 first, repo lines 6 fields, mod lines 19 fields, nothing else" 'fields_ok'
+chk "catalog is 6.1: v1 first, repo lines 6 fields, mod lines 22 fields, nothing else" 'fields_ok'
+chk "beta: 1 for beta true (shots-mod), 0 without it (good-mod) and for a non-boolean \"yes\" (shots2-mod) -- CONTROL" '[ "$(mf shots-mod 22)" = 1 ] && [ "$(mf good-mod 22 $R1)" = 0 ] && [ "$(mf shots2-mod 22)" = 0 ]'
+chk "screenshots: three local paths under /tmp/az-community/shots for shots-mod; none without (good-mod) -- CONTROL" '[ "$(mf shots-mod 23 | tr " " "\n" | grep -c "^/tmp/az-community/shots/[0-9a-f]\{16\}\.png$")" = 3 ] && [ "$(mf shots-mod 23 | tr " " "\n" | sort -u | wc -l)" = 3 ] && [ -z "$(mf good-mod 23 $R1)" ]'
+chk "a screenshot list with an http:// URL, or more than 3, drops the screenshots, never the mod" '[ -z "$(mf shots2-mod 23)" ] && [ -z "$(mf shots4-mod 23)" ] && [ "$(mf shots2-mod 5)" = 1.0.0 ] && [ "$(mf shots4-mod 5)" = 1.0.0 ]'
+chk "a refresh downloads no screenshots" '! ls /deck/tmp/az-community/shots/*.png >/dev/null 2>&1'
+run shots "$R1" shots-mod
+chk "shots: done, op shots, id shots-mod, no message" '[ "$(st state)" = done ] && [ "$(st op)" = shots ] && [ "$(st id)" = shots-mod ] && [ -z "$(st msg)" ]'
+chk "shots: the PNG is at the catalog's first path (same bytes); the non-PNG and the one over 1 MB are not -- CONTROL" 'p=$(mf shots-mod 23); cmp -s /deck$(echo $p | cut -d" " -f1) /srv/shots/s1.png && [ ! -e /deck$(echo $p | cut -d" " -f2) ] && [ ! -e /deck$(echo $p | cut -d" " -f3) ] && clog | grep -q "screenshot refused or failed: .*notpng" && clog | grep -q "screenshot refused or failed: .*big.png"'
+chk "shots: nothing partial left, nothing written to the stick" '! ls /deck/tmp/az-community/shots/*.part >/dev/null 2>&1 && stick_ro && [ "$(outside_stick)" = "$OUT0" ]'
+run shots "$R1" 'bad;id'
+chk "shots: a bad id is refused" '[ "$(st state)" = error ]'
 chk "min_core carried in field 14 (core-mod 9.0.0), empty when the repository file has none (good-mod) -- CONTROL" '[ "$(mf core-mod 14 $R1)" = 9.0.0 ] && [ -z "$(mf good-mod 14 $R1)" ]'
 chk "a malformed min_core skips the entry" '! grep -q "^mod|[^|]*|badcore-mod|" $CAT'
 chk "a version that is not MAJOR.MINOR.PATCH (1.2) skips the entry (CONTROL: good-mod 1.0.0 is listed)" '! grep -q "^mod|[^|]*|badver-mod|" $CAT && [ "$(mf good-mod 5 $R1)" = 1.0.0 ] && clog | grep -q "skipped entry: SKIP.*version"'
@@ -119,6 +130,10 @@ chk "an unknown category is dropped, a known one kept" '[ -z "$(mf other-mod 8)"
 # the fixture's well-formed date, read from the served index so the test names no date itself
 UPD=$(sed -n 's/.*"updated": "\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)".*/\1/p' /srv/r1/azmods-repo.json | head -1)
 chk "the index's updated date is field 20; CONTROL: a malformed one (one-digit month and day) is empty" '[ -n "$UPD" ] && [ "$(mf good-mod 20 $R1)" = "$UPD" ] && [ -z "$(mf dd-mod 20)" ] && [ "$(mf any-mod 20)" = "$UPD" ]'
+chk "the download count is field 21 (good-mod 1840, any-mod 0); CONTROL: a mod stats.json has no count for is empty" '[ "$(mf good-mod 21 $R1)" = 1840 ] && [ "$(mf any-mod 21)" = 0 ] && [ -z "$(mf case-mod 21)" ]'
+chk "a damaged count (a string, 14 digits, negative, a fraction) is dropped, not guessed" '[ -z "$(mf dd-mod 21)" ] && [ -z "$(mf core-mod 21)" ] && [ -z "$(mf nofw-mod 21)" ] && [ -z "$(mf small-mod 21)" ]'
+chk "a repository added by hand never shows a count, even one stats.json lists (other-mod 99)" '[ -z "$(mf other-mod 21)" ] && [ "$(rf $R2N 5)" = 0 ]'
+chk "the counts are kept on the stick (MODS/community-mods/.stats; the hand-added one kept, never shown), the stick read-only again" '[ "$(grep -c . $COMM/.stats)" = 3 ] && grep -q "${TAB}good-mod${TAB}1840\$" $COMM/.stats && grep -q "${TAB}other-mod${TAB}99\$" $COMM/.stats && stick_ro && nothing_half'
 chk "good-mod listed with its fields" '[ "$(mf good-mod 5 $R1)" = 1.0.0 ] && [ "$(mf good-mod 6 $R1)" = fixture ] && [ "$(mf good-mod 9 $R1)" = 0 ] && [ "$(mf good-mod 10 $R1)" = ep147-679e1b451e5fe82b ] && [ "$(mf good-mod 11 $R1)" -gt 0 ] && [ -z "$(mf good-mod 13 $R1)" ]'
 chk "good-mod icon: a local PNG under /tmp/az-community/icons" 'f=$(mf good-mod 12 $R1); case "$f" in /tmp/az-community/icons/*.png) ;; *) false ;; esac && [ "$(head -c 8 /deck$f | od -An -tx1 | tr -d " \n")" = 89504e470d0a1a0a ]'
 chk "any-mod listed with firmware any; its non-PNG icon refused (icon empty)" '[ "$(mf any-mod 10)" = any ] && [ -z "$(mf any-mod 12)" ]'
@@ -331,7 +346,7 @@ chk "the catalog holds exactly 128 mod lines" '[ "$(grep -c "^mod|" $CAT)" = 128
 chk "more| counts the rest ($NBEFORE + 140 - 128)" '[ "$(sed -n "s/^more|//p" $CAT)" = $((NBEFORE + 140 - 128)) ]'
 chk "the installed mod from the end of the big repository is kept, with its installed version" '[ "$(mf many-139 13 $MANY)" = 1.0.0 ]'
 chk "CONTROL: an uninstalled mod from the end of it is cut" '[ -z "$(mf many-138 3 $MANY)" ] && [ -n "$(mf many-000 3 $MANY)" ]'
-chk "the refresh message says only the first ones are shown" 'st msg | grep -q "^Found $((NBEFORE + 140)) mods; showing the first 128\."'
+chk "the refresh message counts nothing (the screen says it shows the first 128 from the more| line)" '! st msg | grep -q "Found\|showing"'
 run remove many-139; run delrepo "$MANY"; run refresh
 chk "CONTROL: without it, no more| line again" '! grep -q "^more|" $CAT && [ "$(grep -c "^mod|" $CAT)" = "$NBEFORE" ] && fields_ok'
 
@@ -377,6 +392,49 @@ mv /srv/list.json /srv/list.json.off; run refresh
 chk "404 list: refresh done, no listed repos, user repo still there" '[ "$(st state)" = done ] && ! awk -F"|" "\$1==\"repo\"&&\$5==1{f=1} END{exit !f}" $CAT && [ "$(rf $R2N 4)" = 1 ]'
 mv /srv/list.json.off /srv/list.json; run refresh
 chk "CONTROL: list back -> r1 listed again" '[ "$(rf $R1 5)" = 1 ]'
+
+echo "== [$SHN] download counts: offline, missing, changed, a damaged stick copy"
+SC=/deck/tmp/az-community/cache/stats.tsv
+rm -f $SC; PING=https://127.0.0.1:9/ping; run refresh; PING=$B/ping
+chk "a new boot offline: the stick's last counts are shown" '[ "$(st state)" = error ] && [ "$(mf good-mod 21 $R1)" = 1840 ] && fields_ok'
+mv /srv/stats.json /srv/stats.json.off; run refresh
+chk "stats.json not reachable: refresh done, the last counts kept" '[ "$(st state)" = done ] && [ "$(mf good-mod 21 $R1)" = 1840 ] && clog | grep -q "download counts: download failed"'
+rm -f $SC; rwst 'rm -f .stats'; run refresh
+chk "none ever fetched: no count at all, never 0" '[ -z "$(mf good-mod 21 $R1)" ] && [ -z "$(mf any-mod 21)" ] && fields_ok'
+cp /srv/stats.v2.json /srv/stats.json; run refresh
+chk "a changed stats.json: the new counts, on the stick too" '[ "$(mf good-mod 21 $R1)" = 1841 ] && [ "$(mf any-mod 21)" = 3 ] && grep -q "${TAB}good-mod${TAB}1841\$" $COMM/.stats && stick_ro'
+rwst 'printf "x\ty\tz\n%s\tany-mod\t-1\n%s\tdd-mod\t0012\n" "$(head -1 .stats | cut -f1)" "$(head -1 .stats | cut -f1)" >> .stats'
+rm -f $SC; run catalog
+chk "a damaged line on the stick is dropped, the good ones read (leading zeros trimmed)" '[ "$(mf good-mod 21 $R1)" = 1841 ] && [ "$(mf any-mod 21)" = 3 ] && [ "$(mf dd-mod 21)" = 12 ] && ! grep -q "^x" $SC'
+echo '{"azmods_stats": 2, "mods": {}}' > /srv/stats.json; run refresh
+chk "a stats.json of another format is refused, the last counts kept" '[ "$(mf good-mod 21 $R1)" = 1841 ] && clog | grep -q "not azmods_stats 1"'
+mv /srv/stats.json.off /srv/stats.json; run refresh
+chk "CONTROL: the first stats.json again" '[ "$(mf good-mod 21 $R1)" = 1840 ] && [ "$(mf any-mod 21)" = 0 ] && [ -z "$(mf dd-mod 21)" ]'
+
+echo "== [$SHN] download counts: damaged stats.json (community_statsfuzz.py, fixed seeds)"
+# every count in the catalog is digits (at most 13) or nothing; every kept line is "key TAB id TAB count"
+counts_ok() { awk -F'|' '$1=="mod"&&$21!=""&&$21!~/^[0-9]+$/{ bad=1 } $1=="mod"&&length($21)>13{ bad=1 } END{ exit bad }' "$CAT" &&
+    awk -F "$TAB" 'NF!=3||$1!~/^https:\/\/[!-~]+$/||$2!~/^[a-z0-9-]+$/||$3!~/^[0-9]+$/{ bad=1 } END{ exit bad || NR > 16384 }' "$SC"; }
+cp /srv/stats.json /srv/stats.good
+FZBAD=0; FZKEPT=0
+for seed in $(seq 0 47); do
+    python3 /t/community_statsfuzz.py /srv/stats.good /srv/stats.json "$seed"
+    run refresh
+    if ! { [ "$(st state)" = done ] && fields_ok && counts_ok && [ -z "$(mf other-mod 21)" ] && stick_ro && nothing_half; }; then
+        FZBAD=$((FZBAD + 1)); echo "  seed $seed: state=$(st state) msg=$(st msg | cut -c1-60)"
+    fi
+    # the last good counts survive a file that is refused as a whole
+    [ "$(mf good-mod 21 $R1)" = 1840 ] && FZKEPT=$((FZKEPT + 1))
+    cp /srv/stats.good /srv/stats.json; run refresh
+done
+chk "48 damaged stats.json: every refresh done, the catalog well formed, each count digits or nothing, never a hand-added repository's" '[ "$FZBAD" = 0 ]'
+chk "the refused ones keep the last counts (CONTROL: at least the 16 cut short, nested too deep, over the cap or not the format)" '[ "$FZKEPT" -ge 16 ]'
+python3 /t/community_statsfuzz.py /srv/stats.good /srv/stats.json 6; echo "test: over-cap stats.json" >> /deck/tmp/az-community/log; run refresh
+chk "a stats.json over 256 KB is refused, the last counts kept" '[ "$(st state)" = done ] && [ "$(mf good-mod 21 $R1)" = 1840 ] && clog | sed -n "/^test: over-cap stats.json/,\$p" | grep -q "download counts: download failed"'
+python3 /t/community_statsfuzz.py /srv/stats.good /srv/stats.json 7; run refresh
+chk "a stats.json of thousands of entries is read within the bounds, the listed counts still right" '[ "$(st state)" = done ] && counts_ok && [ "$(wc -l < $SC)" -gt 1000 ] && [ "$(mf good-mod 21 $R1)" = 1840 ]'
+cp /srv/stats.good /srv/stats.json; rm -f /srv/stats.good; run refresh
+chk "CONTROL: the first stats.json again after the damaged ones" '[ "$(mf good-mod 21 $R1)" = 1840 ] && [ "$(mf any-mod 21)" = 0 ] && [ "$(wc -l < $SC)" -lt 10 ] && counts_ok'
 
 echo "== [$SHN] /tmp/az-community stays bounded (RAM)"
 I=/deck/tmp/az-community/icons; C=/deck/tmp/az-community/cache

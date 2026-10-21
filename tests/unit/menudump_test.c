@@ -36,16 +36,24 @@ static void txt_add(const char *fmt, ...) {
     if (n > 0 && g_txt_n + (size_t) n < sizeof g_txt)
         g_txt_n += (size_t) n;
 }
+/* Text whose box lies wholly outside the buffer is never seen, so it is not part of a frame: a
+ * pane taller than the screen may draw its rows past the bottom edge, or skip them. */
+static int txt_in_buffer(const azmod_fb *fb, int y, int h) {
+    return !fb || (y < fb->h && y + (h > 0 ? h : 1) > 0);
+}
 int azmod_ttf_menu(const azmod_fb *fb, int x, int y, int w, int h, const char *s, int px, int track,
                    int bold, uint32_t c) {
-    (void) fb;
     (void) track;
+    if (!txt_in_buffer(fb, y, h))
+        return 1;
     txt_add("  T %d,%d %dx%d px%d b%d #%06x \"%s\"\n", x, y, w, h, px, bold, c & 0xffffffu, s);
     return 1;
 }
 int azmod_ttf_menu2(const azmod_fb *fb, int x, int y, int w, int h, const char *s, int px, int track,
                     int bold, uint32_t c, int split, uint32_t c2) {
     (void) c2;
+    if (!txt_in_buffer(fb, y, h))
+        return 1;
     txt_add("  T2 split%d ", split);
     return azmod_ttf_menu(fb, x, y, w, h, s, px, track, bold, c);
 }
@@ -140,6 +148,9 @@ static const char *mode_name(int m) {
 #ifdef AZMOD_HAVE_CLOCK_SET /* Set Time Manually: likewise */
     case AZ_CLOCK_SET: return "clockset";
 #endif
+#ifdef AZMOD_HAVE_BROWSE_VIEW_SCREEN /* Browse View Mods' screen: likewise */
+    case AZ_BROWSE_VIEW: return "browseview";
+#endif
     default: return "?";
     }
 }
@@ -219,7 +230,21 @@ static void frame(const char *what, azmod_state *s) {
     }
     memcpy(prev, g_txt, g_txt_n + 1);
 }
-static void knob(azmod_state *s, int d, bool click) { azmod_input(s, &g_fb, 0, 0, false, d, click); }
+/* the lists' glides run on a clock the dump steps: each frame is a knob step's resting place */
+static long g_glide_now = 1000;
+static long glide_clock(void) { return g_glide_now; }
+static void knob(azmod_state *s, int d, bool click) {
+#ifdef AZMOD_HAVE_MENU_GLIDE
+    g_glide_ms = glide_clock;
+#endif
+    azmod_input(s, &g_fb, 0, 0, false, d, click);
+#ifdef AZMOD_HAVE_MENU_GLIDE
+    for (int k = 0; k < 600 && (g_lgl.on || g_rgl.on); k++) {
+        g_glide_now += 16;
+        c_glide_tick(s);
+    }
+#endif
+}
 
 /* the full-screen menu, as the knob walks it */
 static void walk_full(azmod_state *s) {
@@ -282,6 +307,18 @@ static void press_all(const char *cfg, azmod_state *s) {
                 snprintf(nm, sizeof nm, "after.left%d.row%d", k, j);
                 frame(nm, s);
             }
+#ifdef AZMOD_HAVE_BROWSE_VIEW_SCREEN
+            if (s->mode == AZ_BROWSE_VIEW) { /* its screen in the full-screen menu: rows, knob, BACK */
+                frame("browse.in", s);
+                for (int i = 0; i < 3; i++) {
+                    knob(s, 1, false);
+                    snprintf(nm, sizeof nm, "browse.knob%d", i);
+                    frame(nm, s);
+                }
+                azmod_back(s);
+                frame("browse.back", s);
+            }
+#endif
         }
     }
 }

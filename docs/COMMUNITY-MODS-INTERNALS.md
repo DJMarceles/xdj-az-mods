@@ -106,6 +106,7 @@ argument; the script splits it on spaces with globbing off.
 | `addrepo <repo>` | add a repository to `repos.txt`, then refresh |
 | `delrepo <repo>` | remove a repository from `repos.txt`, rebuild the catalog |
 | `apply` | ask the watcher to apply the USB's community folder (state `reloading`) |
+| `shots <repo> <id>` | download the mod's screenshots (the mod's page asks when it opens; a refresh never does) |
 | `catalog` | rebuild the catalog from the caches, without the network |
 | `settle` | run by the watcher after an apply: turns `reloading` into `done` or `error` |
 
@@ -159,6 +160,7 @@ mark at the start is skipped.
 | Item | Limit | Beyond it |
 |---|---|---|
 | Curated list `azmods-repos.json` | 64 KB | the list is not updated (the last good copy is kept) |
+| Download counts `stats.json` | 256 KB, 16384 counts | the counts are not updated (the last good copy is kept) |
 | Repositories taken from the curated list | the first 64 entries | ignored |
 | Repositories in `repos.txt` | 32 | `addrepo` refuses ("at most 32 repositories"); extra lines are not read |
 | Repository address | 256 characters | refused |
@@ -190,8 +192,13 @@ repository lines past the array as "Showing the first N of M repositories."
 
 ### Refresh
 
+The Mod Menu asks for a refresh when the full Community Mods screen opens: the first time after
+each start, then at most once every 10 minutes, at once again when the last refresh did not end
+clean (an error, or a repository or the Mod Index not read), and never while the fetcher is busy.
+There is no Refresh button; while a refresh runs, the screen's left rail shows it, turning.
+
 1. Probe the network. Offline: rebuild the catalog from the caches and report "No internet:
-   showing mods from the last refresh. Connect the deck to WiFi, then press Refresh."
+   showing mods from the last refresh. Connect the deck to WiFi, then open Community Mods again."
 2. Fetch the curated list (`LIST_URL`, overridden by `AZ_COMMUNITY_LIST`; default
    `https://raw.githubusercontent.com/Kyle-Hosman/az-mods-index/HEAD/azmods-repos.json`).
    HTTP 404 means "no curated repositories", an answer rather than a failure. Any other
@@ -202,9 +209,10 @@ repository lines past the array as "Showing the first N of M repositories."
 5. Fetch and parse every repository file. A repository that fails keeps its last good
    parse; its state records why.
 6. Fetch the icons the catalog can show, within the time and size budget.
-7. Write the catalog and report "Found N mods." ("Found M mods; showing the first N." when
-   the catalog was cut), followed by "K of R repositories could not be read." and "The
-   Mod Index did not load: press Refresh." when those apply.
+7. Write the catalog. A clean refresh reports nothing (the screen counts the catalog itself,
+   "N mods" in its header); otherwise the message names only the problems: "K of R
+   repositories could not be read." and "The Mod Index did not load. Open Community Mods again
+   to retry."
 
 ### The repository file rules
 
@@ -260,6 +268,7 @@ hex digits of the SHA-256 of its normalized repository file URL.
 | `<h>.count` | `valid TAB skipped` entry counts |
 | `<h>.state` | `ok TAB <note>` or `error TAB <reason> [TAB <HTTP code>]` |
 | `icons.want` | icon URL and hash per icon the catalog can show; rewritten at every refresh |
+| `stats.tsv` | the download counts from the last good `stats.json`: `repository TAB id TAB count` |
 
 The raw repository file and its flattened form are deleted as soon as they are parsed. Icons are
 stored as `/tmp/az-community/icons/<hash>.png`, `<hash>` being the first 16 hex digits of the
@@ -280,7 +289,7 @@ line per repository and one per mod, fields separated by `|`:
 ```
 v1
 repo|<repo>|<name>|<ok>|<listed>|<error>
-mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>|<updated>
+mod|<repo>|<id>|<name>|<version>|<author>|<summary>|<category>|<hooks>|<firmware>|<size>|<icon>|<installed>|<min_core>|<description>|<assets_kb>|<held>|<also>|<nalso>|<updated>|<downloads>|<beta>|<shots>
 more|<n>
 ```
 
@@ -312,7 +321,7 @@ Repository line:
 | 5 | listed | | `1` when the repository is on the curated list |
 | 6 | error | 111 | why it could not be read (`not read yet` before the first fetch); empty when ok |
 
-Mod line (20 fields):
+Mod line (23 fields):
 
 | # | Field | Cap | Meaning |
 |---|---|---|---|
@@ -336,6 +345,9 @@ Mod line (20 fields):
 | 18 | also | 256 | the first other repository offering the same id, as in its `repo` line; empty when none |
 | 19 | nalso | | how many other repositories offer the same id |
 | 20 | updated | | the repository file's `updated` date, `YYYY-MM-DD`, or empty |
+| 21 | downloads | | the mod's download count from the Mod Index (see below), digits only; empty when there is none |
+| 22 | beta | | `1` when the repository file says `"beta": true` (the author's word that the mod is not proven stable yet), else `0` |
+| 23 | shots | | the local paths its screenshots are downloaded to (`/tmp/az-community/shots/<hash>.png`, space-separated, at most 3), or empty. The repository file's `screenshots` are 1 to 3 `https://` URLs; a list that breaks a rule drops the screenshots, never the mod. `shots` downloads them (PNG, at most 1 MB each, a PNG signature check); the deck shows them at most 1280 x 800 |
 
 Fields are only ever added at the end. A reader accepts a `mod` line with 13 or more fields
 (a `repo` line with 6 or more) and treats missing trailing fields as empty; the Mod Menu
@@ -345,22 +357,53 @@ The Mod Menu decides "works on this deck" itself: the firmware field is `any`, o
 the running firmware's tag. It offers Install only when the mod works on this deck and its
 `min_core` is not above the core's `AZ_CORE_VERSION`. Browse lists those mods first.
 
-**Browse controls.** Above the grid, a search field and three orders sit beside Refresh, and a
-row of category buttons follows: All, Visual, Controls, Audio, Tools and Other, each with the
-number of mods it holds under the search. Other holds the mods with no category. The search
-matches when every word typed (split on spaces) appears in the name, the author, the summary or
-the description, ignoring the case of ASCII letters; a tap on the field opens the keyboard,
-which shows the matches as they are typed. The orders:
+**Browse controls.** A row of view buttons: Home, All mods, Visual, Controls, Audio and Tools,
+then Other when it holds any mod; each but Home with the number of mods it holds. Other holds the
+mods with no category. A Sort menu at the end of the row picks the order.
+
+**Home** (the view Browse opens on) is a list of shelves, each a title, "See all" and a row of
+at most 12 tiles, five on screen; a sideways drag scrolls a row, an up or down drag the page:
+
+| Shelf | Mods | See all opens |
+|---|---|---|
+| Most downloaded | mods with a download count above 0, most first | All mods, by Downloads |
+| New & updated | mods with a valid `updated` date, newest first | All mods, by Updated |
+| Visual, Controls, Audio, Tools, Other | that category's mods, by Downloads | that category, by Downloads |
+
+A shelf with fewer than 2 mods is not shown. Turning the
+browse knob moves a focus through the tiles in reading order (shelf by shelf, left to right),
+scrolling the row and the page to keep it in view; pressing it opens the focused mod.
+
+**All mods** and each category show the mods as a grid, in one of four orders (the Sort menu):
 
 | Order | Mods |
 |---|---|
 | A-Z | by name, ignoring the case of ASCII letters |
 | Updated | by the `updated` date, newest first; mods without a valid date after the dated ones |
 | Installed | installed mods first, then by name |
+| Downloads | by download count, most first; mods without a count after the counted ones, by name |
 
-In every order the mods that cannot be installed here follow the ones that can, except that
-Installed keeps every installed mod first; mods that compare equal keep the catalog's order.
-The category, order and search last until EP147 restarts.
+In every order, and on every shelf, the mods that cannot be installed here follow the ones that
+can, except that Installed keeps every installed mod first; mods that compare equal keep the
+catalog's order. The view and order last until EP147 restarts.
+
+A tile shows the mod's icon, name and author, its state (Installed, Update available, ...) and
+its download count; a mod with no count shows none, never 0. Its page shows the icon, the name,
+"author . category . version, updated N days ago" (the date itself while the deck's clock is not
+set), the download count, the repository, Install / Update to X / Disable / Remove, the summary,
+whether it works on this deck, then the description with Permissions beside it (whether it uses
+hooks, its firmware tags, its download size and the files it keeps on the USB).
+
+**Download counts.** The Mod Index publishes `stats.json` beside its list:
+`{"azmods_stats": 1, "generated": "YYYY-MM-DDTHH:MMZ", "mods": {"https://github.com/OWNER/REPO":
+{"<id>": <downloads>}}}`. Each count is GitHub's download count of the mod's `<id>-<version>.azmod`
+release assets over all its versions (from decks, the desktop app or by hand, updates and
+reinstalls included), taken every 6 hours by a scheduled workflow in the index's repository.
+The fetcher downloads it with the list on every refresh and keeps the last good copy, in `/tmp`
+and on the USB as `MODS/community-mods/.stats` (a dot file: the loader never copies it to the
+deck, and no id starts with a dot), so a deck that starts offline still shows the last counts.
+A count is used only for a repository on the curated list and only as 1 to 13 digits; anything
+else is dropped, never guessed. Decks never call the GitHub API.
 
 ### The status file
 
@@ -536,7 +579,7 @@ After the refresh, `addrepo` reports on that repository alone:
 | Outcome | Message |
 |---|---|
 | read | `Added owner/name: N mods.` |
-| no internet | `Added owner/name. No internet to read it yet: press Refresh on WiFi.` |
+| no internet | `Added owner/name. No internet to read it yet: open Community Mods again on WiFi.` |
 | HTTP 404 | `Not found at owner/name. Check the spelling.`, and the line is removed from `repos.txt` again |
 | any other failure | `Added owner/name, but it could not be read: <reason>` |
 
@@ -953,18 +996,31 @@ update.
 
 | Where | Shown |
 |---|---|
-| a tile from a repository not in the Mod Index | a yellow mark in its top-right corner; its page says "Not in the Mod Index. Install only what you trust." |
+| a tile from a repository not in the Mod Index | an orange mark with the Repositories icon in its top-right corner; its page says "Not in the Mod Index" beside the repository |
+| a tile for a mod marked beta | a blue mark with BETA in its top-left corner; its page says "BETA: This mod may not be stable yet." |
+| a mod's page with screenshots | a row of them under the summary; a tap opens one large, the sides step through them, the middle or BACK closes it |
 | the repository list | each repository marked Mod Index, Added by you, or the reason it could not be read |
 | a mod's page, other repositories offer its id | "<repository> also offers a mod with this ID. Only one can be installed." |
 | a mod's page, another mod holds its id | "A different mod with this ID is installed (from <repository>). Remove it first." or "A different mod with this ID is on the USB (copied there by hand). Remove it first.", and no Install |
 | every tile and installed mod | its author, which tells apart two mods with the same name |
+
+**The screen.** The left rail holds Installed, Browse and Repositories at the top and Updates at
+the bottom ("Updates N" while there are updates). Installed is split as the Mod Menu is: the list on
+the left (each row with its checkbox, which turns the mod on or off at once, and its `>`), the
+selected mod's page on the right (its info, buttons and its own settings screen); the knob moves the
+selection, a press goes into the page and BACK comes out. Updates lists every installed mod with an
+update this deck can take, with Update all (one install after another, stopped by an error). The
+header shows the number of mods listed, and Reload, one square at its top right whenever a reload
+is due ("Changes take effect after a reload"); once pressed it shows "Please wait..." until the
+deck restarts. The Mod Menu's own Community Mods page offers the same Reload when its switch is
+toggled, and never reloads by itself.
 
 ## Failure modes
 
 | What happens | What the user sees | Where the detail is |
 |---|---|---|
 | No WiFi during refresh | "No internet: showing mods from the last refresh. ..." and the cached catalog | `/tmp/az-community/log` |
-| Curated list unreachable (not 404) | "... The Mod Index did not load: press Refresh." The last good list is used | fetcher log |
+| Curated list unreachable (not 404) | "... The Mod Index did not load. Open Community Mods again to retry." The last good list is used | fetcher log |
 | A repository 404s or is unreachable | its row says "not found (check the address)" or "could not be reached (check the address, or try again later)" | `<h>.state` |
 | A repository file is not JSON or not `azmods_repo` 1 | its row says why; its mods are not listed | `<h>.state` |
 | Some repository file entries break the rules | "N entries skipped (invalid)" on the repository; the rest listed | fetcher log, one line per skipped entry |

@@ -21,6 +21,7 @@
 #             (guest/azmod/bus_interpose.c)
 #   drumwav   Drum Roll WAV samples and file names (guest/azstem/drumroll.c)
 #   stemname  STEMS folder names, stem file names, source.json (guest/azstem/stem_playback.c)
+#   ofscache  the stem offset cache line, azstem.ofs (guest/azstem/ofsload.c)
 #   sdklib    the SDK's library rows from a fake SQLite (NULLs, long text, errors, the row cap),
 #             /proc/mounts and sysfs paths (guest/azmod/sdk_lib.c)
 #   pdbsync   a destination and a source export.pdb (guest/azmod/pdb_sync.c)
@@ -29,10 +30,13 @@
 #   hcanlz    a track's analysis file, for its hot cues (guest/azmod/hc_anlz.h)
 #   clocktz   a time zone file for the Clock readout (guest/azmod/clock_tz.h)
 #   inputmem  the deck's settings file, for Channel Input Select Memory (guest/azmod/input_memory.h)
-#   cmbrowse  Community Mods > Browse: a mod's category and updated values, the search and the
+#   cmbrowse  Community Mods > Browse: a mod's category and updated values and the
 #             orders over them (guest/azmod/cm_browse.h)
 #   fcopy     folder and file names from a stick, for the FOLDER-view copy plan (folder_copy.h)
-FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname sdklib pdbsync elfcheck mp4 hcanlz clocktz cmbrowse inputmem fcopy"
+#   colwidths Column Edit's saved column widths (guest/azmod/browse_edit.h)
+#   colfields Column Edit's saved column fields, and a library text as a field shows it
+#             (guest/azmod/browse_fields.h)
+FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname ofscache sdklib pdbsync elfcheck mp4 hcanlz clocktz cmbrowse inputmem fcopy colwidths colfields"
 FZ_T=tools/fuzz
 FZ_UT=tools/unit-tests
 
@@ -65,13 +69,19 @@ fz_prepare() {
             grep -q 'static void cm_approved_read' "$dir/cmjson.inc" && grep -q 'cm_is_approved' "$dir/cmjson.inc" ;;
     png)
         awk '/^static uint32_t cmi_crc/ {p=1} p {print} p && /no IEND/ {q=1} q && /^}$/ {exit}' guest/azmod/community_icons.c > "$dir/png.inc"
-        grep -q 'static int cmi_png_ok' "$dir/png.inc" && grep -q 'no IEND' "$dir/png.inc" ;;
+        grep -q 'static int cmi_png_fit(unsigned char \*b, int n, uint32_t maxw, uint32_t maxh) {' "$dir/png.inc" &&
+            grep -q 'int cmi_png_ok' "$dir/png.inc" && grep -q 'no IEND' "$dir/png.inc" ;;
     pdbsync)
         cp guest/azmod/pdb_sync.c "$dir/" ;;
     clocktz)
         cp guest/azmod/clock_tz.h "$dir/" ;;
     inputmem)
         cp guest/azmod/input_memory.h "$dir/" ;;
+    colwidths)
+        cp guest/azmod/browse_edit.h "$dir/" ;;
+    colfields)
+        cp guest/azmod/browse_fields.h "$dir/"
+        grep -q 'static int b2_fields_parse' "$dir/browse_fields.h" ;;
     fcopy)
         cp guest/azmod/folder_copy.h "$dir/"
         grep -q 'static inline int fc_plan_make' "$dir/folder_copy.h" ;;
@@ -88,6 +98,9 @@ fz_prepare() {
         } > "$dir/stemname.inc"
         grep -q 'static int json_str' "$dir/stemname.inc" && grep -q 'file_fingerprint(src)' "$dir/stemname.inc" &&
             grep -q 'strcasestr(name, "vocal")' "$dir/stemname.inc" ;;
+    ofscache)
+        awk '/^#define OFSC_MAGIC / {p=1} p {print} p && /^static int ofs_cache_parse\(/ {q=1} q && /^}$/ {exit}' guest/azstem/ofsload.c > "$dir/ofscache.inc"
+        grep -q 'static int ofsc_field' "$dir/ofscache.inc" && grep -q 'k != skey' "$dir/ofscache.inc" ;;
     drumwav)
         { awk '/^#define DRUM_MAX_SECONDS / {p=1} p {print} p && /^static float \*drum_decode_wav\(/ {q=1} q && /^}$/ {exit}' guest/azstem/drumroll.c
           awk '/^static int drum_slot_for_name\(/ {p=1} p {print} p && /^}$/ {exit}' guest/azstem/drumroll.c
@@ -128,10 +141,13 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
     pdbsync) FZ_ARGS=(-I"$dir" $FZ_T/pdbsync_fuzz.c) ;;
     clocktz) FZ_ARGS=(-I"$dir" $FZ_T/clocktz_fuzz.c) ;;
     inputmem) FZ_ARGS=(-I"$dir" $FZ_T/inputmem_fuzz.c) ;;
+    colwidths) FZ_ARGS=(-I"$dir" $FZ_T/colwidths_fuzz.c) ;;
+    colfields) FZ_ARGS=(-I"$dir" $FZ_T/colfields_fuzz.c) ;;
     fcopy) FZ_ARGS=(-I"$dir" $FZ_T/fcopy_fuzz.c) ;;
     cmbrowse) FZ_ARGS=(-I"$dir" $FZ_T/cmbrowse_fuzz.c) ;;
     elfcheck) FZ_ARGS=(-I"$dir" -DELFCHECK_INC="\"$dir/elfcheck.inc\"" $FZ_T/elfcheck_fuzz.c) ;;
     stemname) FZ_ARGS=(-DSTEMNAME_INC="\"$dir/stemname.inc\"" $FZ_T/stemname_fuzz.c) ;;
+    ofscache) FZ_ARGS=(-DOFSCACHE_INC="\"$dir/ofscache.inc\"" $FZ_T/ofscache_fuzz.c) ;;
     drumwav) FZ_ARGS=(-I"$dir" -DDRUMWAV_INC="\"$dir/drumwav.inc\"" $FZ_T/drumwav_fuzz.c) ;;
     cmcat)  FZ_ARGS=(-I"$dir/azmod" -DMENU_C="\"$dir/azmod/menu.c\"" $FZ_T/cmcat_fuzz.c)
             # the rest of azmod: lanetest.c's stand-ins, its own object (as the unit suites build it)

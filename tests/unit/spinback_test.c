@@ -27,6 +27,7 @@ static int own_q(uintptr_t a, uintptr_t *out) {
     *out = __atomic_load_n((uintptr_t *) a, __ATOMIC_RELAXED);
     return 1;
 }
+static int img_q(uintptr_t a, uintptr_t *out) { return own_q(a, out); }
 static int azm_install_hook(uintptr_t f, void *h, void **o) {
     (void) f;
     (void) h;
@@ -51,6 +52,11 @@ static void fake_clamp(long strategy, long a1, long pos, long readable, long fla
 }
 #define EP_14a3e10 ((uintptr_t) fake_clamp)
 #define EP_2874158 ((uintptr_t) g_core_vt)
+/* the beat jump's checks and their return addresses (the lead-in jump, leadin_jump.h has its own suite) */
+#define EP_1453e80 ((uintptr_t) 0x1453e80)
+#define EP_14553d8 ((uintptr_t) 0x14553d8)
+#define EP_1457b4c ((uintptr_t) 0x1457b4c)
+#define EP_14574f8 ((uintptr_t) 0x14574f8)
 #include SB_SRC
 
 static void model(long preroll) {

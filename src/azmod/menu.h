@@ -33,10 +33,13 @@ typedef enum {
     AZ_CLOCK_TZ,   /* the Clock's time zones by region, opened from the Clock screen (screen_overlays.c) */
     AZ_CLOCK,      /* the Clock: its switch, time format and time zone (screen_overlays.c) */
     AZ_CLOCK_SET,  /* Set Time Manually: the date and time picker, opened from the Clock (screen_overlays.c) */
+    AZ_BROWSE_VIEW, /* Browse View Mods: one row per Browse track list change (screen_overlays.c) */
 } azmod_mode;
 #define AZMOD_HAVE_CLOCK_TZ_LIST 1 /* AZ_CLOCK_TZ exists (the menu dump names it) */
 #define AZMOD_HAVE_CLOCK_SCREEN 1  /* AZ_CLOCK exists (likewise) */
 #define AZMOD_HAVE_CLOCK_SET 1     /* AZ_CLOCK_SET exists (likewise) */
+#define AZMOD_HAVE_BROWSE_VIEW_SCREEN 1 /* AZ_BROWSE_VIEW exists (likewise) */
+#define AZMOD_HAVE_MENU_GLIDE 1 /* the lists glide on g_glide_ms (the menu dump steps that clock) */
 
 /* Deck count (bus/LED geometry). */
 #define AZMOD_DECK_COUNT 4
@@ -285,6 +288,8 @@ bool azmod_back(azmod_state *s);
  * Returns true while a drag the box owns is in progress. */
 bool azmod_changelog_drag(azmod_state *s, const azmod_fb *fb, int y, int phase);
 bool azmod_cm_drag(azmod_state *s, const azmod_fb *fb, int y, int phase);
+/* Community Mods: Update all's next step, every overlay tick (the menu open or closed) */
+__attribute__((visibility("hidden"))) void azmod_cm_bg_tick(void);
 void azmod_menu_clock(long ms);        /* ms now, before each touch event (tap timing) */
 const char *azmod_menu_last_hit(void); /* the last touch decision, for the touch log */
 int azmod_pane_drag(

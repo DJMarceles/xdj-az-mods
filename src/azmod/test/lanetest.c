@@ -123,6 +123,14 @@ const uint32_t *azcm_icon(const char *path, int sz, int *pending) {
     *pending = 0;
     return NULL;
 }
+const uint32_t *azcm_shot(const char *path, int bw, int bh, int *ow, int *oh, int *pending) {
+    (void) path;
+    (void) bw;
+    (void) bh;
+    *ow = *oh = 0;
+    *pending = 0;
+    return NULL;
+}
 unsigned azcm_icons_done(void) {
     return 0;
 }

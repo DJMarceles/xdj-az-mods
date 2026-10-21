@@ -299,6 +299,9 @@ def cmcat():
            b"repo|https://example.invalid/r1/azmods-repo.json|Added|0|0|could not fetch\n"
            b"mod|https://example.invalid/r0/azmods-repo.json|beat-meter|Beat Meter|1.0.2|someone|Shows the beat|tools|1|any|12000|icon.png||1.2.0|A longer text.|64|||0|2019-10-08\n"
            b"mod|https://example.invalid/r1/azmods-repo.json|other-mod|Other|0.1.0|x|y|fun|0|ep147-0123456789abcdef,ep147-1|5|||||0|https://example.invalid/r9/azmods-repo.json|other|2|20191008\n"
+           b"mod|https://example.invalid/r0/azmods-repo.json|echo-out|Echo Out|1.0.0|dubwise|s|audio|0|any|1000|||||0||||2019-09-14|1840\n"
+           b"mod|https://example.invalid/r0/azmods-repo.json|big-clock|Big Clock|1.0.0|nightowl|s|audio|0|any|1000||0.9.0|||0||||2019-10-12|0012|extra\n"
+           b"mod|https://example.invalid/r0/azmods-repo.json|loop-kit|Loop Kit|1.0.0|carol|s|visual|0|any|1000|||||0||||2019-10-01|99999999999999\n"
            b"more|3\n")
     status = b"state=running\nop=install\nid=beat-meter\nmsg=Downloading\ndone=10\ntotal=100\n"
     yield "home", b"\x00\x00" + cat + b"\0" + status
@@ -308,7 +311,10 @@ def cmcat():
     yield "full-modpage", b"\x0b\x00" + cat
     yield "badversion", b"\x01\x00v2\nmod|a|b\n"
     yield "browse-sorted", b"\x59\x03" + cat
-    yield "search-keyboard", b"\x4f\x00" + cat
+    yield "add-repository-keyboard", b"\x0f\x00" + cat
+    yield "home-shelves", b"\x09\x00" + cat
+    yield "home-knob", b"\x89\x04" + cat
+    yield "all-downloads", b"\x39\x01" + cat
 
 
 @seed("sdklib")
@@ -355,6 +361,36 @@ def clocktz():
     yield "quoted", b"\3" + tzif([0], [0], [-3 * 3600], b"\n<-03>3\n")
     yield "no-footer", b"\4" + tzif(us[:3], [1, 0, 1], [-7 * 3600, -6 * 3600], b"")
     yield "v1-only", b"\5" + tzif([], [], [0], b"", ver=b"\0")
+
+@seed("colwidths")
+def colwidths():
+    yield "two", b"5:300 6:120\n"
+    yield "all", b"2:52 3:78 5:345 6:110 7:90 8:60\n"
+    yield "squeeze", b"5:900 6:900 7:900\n"
+    yield "empty", b""
+    yield "bad-dup", b"6:100 6:120\n"
+    yield "bad-range", b"6:20\n"
+
+@seed("colfields")
+def colfields():
+    yield "two", b"3 GENRE\n7 COMMENTS\n"
+    yield "all", (b"1 RATING\n2 COLOR\n3 TIME\n7 BITRATE\n8 DJ PLAY COUNT\n9 ORIGINAL ARTIST\n"
+                  b"10 DATE ADDED\n")
+    yield "crlf", b"\r\n3 LABEL\r\n8 REMIXER"
+    yield "empty", b""
+    yield "bad-dup", b"3 GENRE\n3 ALBUM\n"
+    yield "bad-track", b"3 TRACK\n"
+    yield "bad-range", b"11 GENRE\n"
+    yield "text-utf8", b"Caf\xc3\xa9 \xe2\x98\x85 \xf0\x9f\x8e\xb5 \xc0\xaf\xed\xa0\x80\x01"
+
+@seed("ofscache")
+def ofscache():
+    yield "taken", b"AZOFS1 1000 2000 3000 1042\n"
+    yield "negative", b"AZOFS1 1000 2000 3000 -8192\n"
+    yield "other-size", b"AZOFS1 1001 2000 3000 1042\n"
+    yield "past-window", b"AZOFS1 1000 2000 3000 8193\n"
+    yield "no-newline", b"AZOFS1 1000 2000 3000 1042"
+    yield "huge", b"AZOFS1 99999999999999999999 2000 3000 1042\n"
 
 @seed("inputmem")
 def inputmem():
@@ -473,21 +509,25 @@ def hcanlz():
 
 @seed("cmbrowse")
 def cmbrowse():
-    mods = (b"Echo Out|dubwise|One-press echo out.|A tempo-synced tail.|audio|2019-09-14|1|1\n"
-            b"Beat Counter|djmara|Counts beats.||visual|2019-10-12|1|1\n"
-            b"Auto Gain|levels|Suggests a TRIM.||controls|2019-10-18|0|1\n"
-            b"Old Deck|prism|Needs a newer core.||controls|2019-10-19|0|0\n"
-            b"Mystery|someone|No category.||||0|1\n"
-            b"Echo Out|other|Same name.||audio|2019-09-14|0|1")
-    yield "all-az", b"\0\n" + mods
-    yield "effects-updated", b"\x0f\n" + mods
-    yield "installed-search", b"\x1eecho dub\n" + mods
-    yield "unknown-sort", b"\xff  ECHO  \n" + mods
-    yield "bad-values", (b"\x14\n"
-                         b"A|b|c|d|Visual|2019-13-01|1|1\nB|b|c|d|visuals|2019-10-190|0|1\n"
-                         b"C|b|c|d|synths|2019-10-1|0|1\nD|b|c|d|audio|2019/10/19|0|1\n"
-                         b"E|b|c|d|tools|2019-02-31|1|0\nF|\xc3\xa9|\xff||controls|0000-01-01")
-    yield "no-mods", b"\x05abc"
+    mods = (b"Echo Out|audio|2019-09-14|1|1|1840\n"
+            b"Beat Counter|visual|2019-10-12|1|1|12\n"
+            b"Auto Gain|controls|2019-10-18|0|1|0\n"
+            b"Old Deck|controls|2019-10-19|0|0|5000\n"
+            b"Mystery|||0|1\n"
+            b"Echo Out|audio|2019-09-14|0|1|1e3")
+    yield "all-az", b"\0" + mods
+    yield "effects-updated", b"\x0f" + mods
+    yield "installed", b"\x1e" + mods
+    yield "unknown-sort", b"\xff" + mods
+    yield "bad-values", (b"\x14"
+                         b"A|Visual|2019-13-01|1|1\nB|visuals|2019-10-190|0|1\n"
+                         b"C|synths|2019-10-1|0|1\nD|audio|2019/10/19|0|1\n"
+                         b"E|tools|2019-02-31|1|0\nF|\xc3\xa9|0000-01-01")
+    yield "no-mods", b"\x05"
+    yield "downloads", b"\x29" + mods
+    yield "bad-counts", (b"\x28"
+                         b"A|audio|2019-01-01|0|1|9999999999999\nB|audio|2019-01-02|0|1|99999999999999\n"
+                         b"C|audio|2019-01-03|0|1|-1\nD|audio|2019-01-04|0|1| 7\nE|audio||0|1|007")
 
 
 def main():

@@ -61,6 +61,7 @@
 #define CM_LOG_CAP   (256 * 1024)
 #define CM_SO_CAP    (16 * 1024 * 1024)
 #define CM_HEALTHY_MS 90000
+#include "cm_orderly.h" /* an orderly stop (SIGTERM while EP147 is alive) is not a failed start */
 #define CM_BLAME     CM_STATE "/.blame"   /* id of the mod whose code crashed EP147 */
 #define CM_INITING   CM_STATE "/.initing" /* id of the mod whose init() is running; left behind = it froze or crashed there */
 /* Approved mods: enabling a mod on the stick (MODS/azmods.cfg) is not enough to run it:
@@ -2054,6 +2055,7 @@ static void community_init(void) {
                 close(dfd);
             }
         }
+        if (cmo_install(CM_STARTING) != 0) dbg("community: no SIGTERM handler: an orderly stop counts as a failed start\n");
     }
     g_cm_t0 = now_ms();
     g_cm_timing = 1;
@@ -2073,6 +2075,7 @@ static void community_tick(void) {
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
     long now = now_ms();
+    cmo_note(__atomic_load_n(&g_rtick_n, __ATOMIC_RELAXED), now); /* EP147's message thread is alive */
     if (g_cm_timing && !g_cm_healthy && now - g_cm_t0 >= CM_HEALTHY_MS) {
         g_cm_healthy = 1;
         unlink(CM_STARTING);

@@ -30,6 +30,11 @@ static _Atomic int g_env_final[NDECK]; /* 0 = progressive prefix, 1 = final buil
 static long g_env_frames[NDECK]; /* frames the cached/built/partial env describes */
 static long g_env_total[NDECK];  /* final frames, from the OGG header */
 static int g_env_filled[NDECK];  /* buckets computed so far */
+/* Per load, under g_envp_lock: the first decoded stem seeds the progressive envelope once
+ * (g_env_seeded), and leaves it alone when the load already published the cached one
+ * (g_env_hit), which describes the whole track. */
+static int g_env_seeded[NDECK];
+static int g_env_hit[NDECK];
 static pthread_mutex_t g_envp_lock = PTHREAD_MUTEX_INITIALIZER;
 static void env_progress(int deck) {
     long total = g_env_total[deck];

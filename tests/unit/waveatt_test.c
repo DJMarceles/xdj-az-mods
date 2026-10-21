@@ -64,7 +64,15 @@ static int stem_wave_stub(int deck, const unsigned char **env, int *n, int *nste
     return __atomic_load_n(&g_have_env[deck], __ATOMIC_RELAXED);
 }
 static int (*azmod_stem_wave)(int, const unsigned char **, int *, int *, float *) = stem_wave_stub;
-static int frames_stub(int deck) { return g_have_env[deck] ? 44100 * 60 : 0; }
+static long g_fr[AZMOD_STEM_DECKS]; /* > 0: the frame count a decode in progress reports */
+static int frames_stub(int deck) {
+    long fr = __atomic_load_n(&g_fr[deck], __ATOMIC_RELAXED);
+    return fr > 0 ? (int) fr : g_have_env[deck] ? 44100 * 60
+                                                : 0;
+}
+static unsigned g_eg[AZMOD_STEM_DECKS]; /* azstem_env_gen */
+static unsigned env_gen_stub(int deck) { return __atomic_load_n(&g_eg[deck], __ATOMIC_RELAXED); }
+static unsigned (*azmod_stem_env_gen)(int) = env_gen_stub;
 static int (*g_stem_frames)(int) = frames_stub;
 static int g_gain[AZMOD_STEM_DECKS][AZMOD_STEM_COUNT]; /* azstem_stem_gain, x1000 */
 static int gain_stub(int deck, int stem) {
@@ -316,6 +324,42 @@ int main(void) {
     __atomic_store_n(&g_stop, 1, __ATOMIC_RELEASE);
     pthread_join(th, 0);
     CHECK("curve rebuilt while another thread reads it: every read within unity", bad == 0);
+
+    /* a load's decode: the frame count grows on every 10 ms tick for 6 s */
+    setup();
+    tick(1000);
+    (void) ov_take();
+    unsigned g0 = g_att_gen[2];
+    int refreshes = 0;
+    for (int t = 0; t < 600; t++) {
+        __atomic_store_n(&g_fr[2], 44100L * (t + 1), __ATOMIC_RELAXED);
+        tick(10);
+        refreshes += (ov_take() >> 2) & 1;
+    }
+    unsigned rebuilds = g_att_gen[2] - g0;
+    CHECK("a decode's progress alone rebuilds the curve at most every WATT_PROG_MIN_MS",
+          rebuilds >= 6 && rebuilds <= 6000 / WATT_PROG_MIN_MS + 1);
+    CHECK("...and refreshes the overview tiles no more often", refreshes >= 6 && refreshes <= (int) rebuilds + 1);
+    /* a pad toggle in the middle of the decode: on this tick */
+    g0 = g_att_gen[2];
+    g_state.stem_on[2][0] = false;
+    __atomic_store_n(&g_fr[2], 44100L * 700, __ATOMIC_RELAXED);
+    tick(10);
+    CHECK("a pad toggle during the decode rebuilds the curve on the same tick", g_att_gen[2] == g0 + 1);
+    CHECK("...and refreshes that deck's overview tiles on the same tick", (ov_take() >> 2) & 1);
+    /* a new envelope (a cache hit, or the final build) during the decode: on this tick */
+    g0 = g_att_gen[2];
+    g_eg[2]++;
+    __atomic_store_n(&g_fr[2], 44100L * 701, __ATOMIC_RELAXED);
+    tick(10);
+    CHECK("a new envelope rebuilds the curve on the same tick", g_att_gen[2] == g0 + 1);
+    /* the decode ends: the last frame count is reached within WATT_PROG_MIN_MS */
+    g0 = g_att_gen[2];
+    __atomic_store_n(&g_fr[2], 44100L * 702, __ATOMIC_RELAXED);
+    for (int t = 0; t < WATT_PROG_MIN_MS / 10 + 1; t++)
+        tick(10);
+    CHECK("the decode's last progress reaches the curve within WATT_PROG_MIN_MS", g_att_gen[2] == g0 + 1);
+    __atomic_store_n(&g_fr[2], 0, __ATOMIC_RELAXED);
 
     return ut_summary();
 }

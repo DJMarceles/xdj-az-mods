@@ -33,7 +33,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     unsigned char *b = malloc(n ? n : 1);
     memcpy(b, d, n);
     if (fix) fix_crcs(b, n);
+    /* the screenshot limits (1280 x 800) on a copy: never past n, and every icon it takes passes them too */
+    unsigned char *shot = malloc(n ? n : 1);
+    memcpy(shot, b, n);
+    int rs = cmi_png_fit(shot, (int) n, 1280, 800);
+    FZ_ASSERT(rs >= 0 && (size_t) rs <= n);
     int r = cmi_png_ok(b, (int) n);
+    FZ_ASSERT(!r || (rs == r && !memcmp(shot, b, (size_t) r)));
+    free(shot);
     FZ_ASSERT(r >= 0 && (size_t) r <= n);
     if (r) {
         FZ_ASSERT(r >= 8 + 25 + 12);

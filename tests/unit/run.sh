@@ -7,8 +7,12 @@
 #   crc16_x25    panel bus frame CRC (guest/azmod/bus_interpose.c)
 #   clock native the Clock in the place of EP147's status bar readout, only while it is not
 #                recording (guest/azmod/clock_native.h)
+#   browse edit  Column Edit: the width file, the divider hit test, a drag's limits, saved widths
+#                fitted into the header, what a header tap does (guest/azmod/browse_edit.h)
 #   clock_tz     the Clock readout: zone file parsing, offset at a time, 12/24-hour text; unknown,
 #                never guessed, past a zone file's last transition (guest/azmod/clock_tz.h)
+#   leadin jump  a beat jump back into the Extended Lead-In: a target before the start within the
+#                lead-in's floor at the track's sample rate, refused past it (guest/azmod/leadin_jump.h)
 #   clock set    Set Time Manually: fields wrap without carrying, local time to UTC through a zone
 #                (the skipped hour), shown only when synchronized or set (guest/azmod/clock_set.h)
 #   fd tracking  a bus fd that is closed or dup2'd over is forgotten before its number is
@@ -19,15 +23,21 @@
 #   stem_folder_rank  accepted STEMS/ folder names (guest/azstem/stem_playback.c)
 #   env cache    the stems' envelope cache on the stick: whole or not at all, a cut or impossible file
 #                rejected (guest/azstem/stem_envelopes.c)
+#   ofs cache    the stem offset cache on the stick: a lag reused only for the same source and stem
+#                set, anything else a miss (guest/azstem/ofsload.c, stem_playback.c stems_key)
 #   rs request   a Remote Stems request: the library's title and path cannot add a key line
 #                (guest/azmod/remote_stems.c rs_write_req)
 #   rs_status_banner  which Remote Stems status lines reach the banner (guest/azmod/remote_stems.c)
+#   rs scan      the Remote Stems queue scan runs on the stem-marks worker and hands one atomic flag to the
+#                message thread, also under ThreadSanitizer (guest/azmod/remote_stems.c rs_queue_has_req)
 #   decks        what azstem publishes for the loader's restart policy: empty only on proof
 #                (guest/azstem/deck_track_map.c)
 #   strip neutral  Day overview strokes: neutral ones drawn dark on the light ground (day_mode.c)
 #   drum feed    an empty deck rolls at the master deck's BPM, else 120 (guest/azmod/stems_display.c)
 #   deckid       a tile deckstate or pad container maps to a deck only through the per-deck
 #                table; before it is filled, or for any other pointer, -1 (deckid_test.c)
+#   deck screen  the pad-mode getter marks the deck screen as up only for the deck screen's own
+#                callers, never for azmod's own reads at startup (deckscreen_test.c)
 #   wave att     the stem waveform curve follows the pad toggles and the Stem Volume gains,
 #                capped at unity, rate limited per deck, overview tiles per deck on their own
 #                cadence (wave_att.h, waveform.c build_atten)
@@ -100,13 +110,24 @@
 #                handed to pdbs_sync, every copy freed (library_edits.c ls_pdb_sync_root)
 #   pdb_stock    export.pdb after EP147's own playlist writes: one sync per burst, whether or not
 #                Playlist Editing is on, none for an unknown stick (guest/azmod/pdb_stock.c)
-#   catalog      the Mod Menu's community catalog: caps, "Showing the first", the unlisted note
+#   catalog      the Mod Menu's community catalog: caps, "Showing the first", the unlisted note; the
+#                download count, Browse's Home (shelves of the tiles that fit, See all, the knob
+#                scrolling the page) and the mod page's header
+#   cmnotloaded  Community Mods not loaded this start: the notice on the Installed tab only, its wording,
+#                Load next time, and Reload after it sends the apply request like Reload now; Keep off
+#                keeps the box (cmnotloaded_test.c)
 #   cmmod        an installed mod's page: a mod refused at load is enabled (Disable, its reason)
 #   screenrow    a mod's SCREEN row opens its page by Community's path; BACK returns to the row (screenrow_test.c)
 #   clocktzlist  the Clock's time zone list: zones by region, knob and touch pick, drag scrolls, BACK; the
 #                Set Time Manually picker: knob editing, plus and minus, Set Time, BACK (clocktzlist_test.c)
+#   ovclip       an overlay window's part of the buffer, cut as XPutImage cuts it (ovclip_test.c)
+#   iconcache    the Mod Menu's icon cache: icons inside their box, a kept icon identical to its
+#                drawing, ground / ink / theme / size in the key, what is never kept (iconcache_test.c)
 #   menuscroll   rows registered past the screen: fixed row height, the lists scroll (knob, drag, tap) with
-#                EP147's own scroll bar; icons clipped to the list; a mod's page keeps the offset (menuscroll_test.c)
+#                EP147's own scroll bar; both lists glide (a fling after a moving lift, caught by a finger,
+#                knob steps glide); icons clipped to the list; a mod's page keeps the offset (menuscroll_test.c)
+#   cmorderly    the community quarantine's orderly stop: a SIGTERM while EP147 is alive clears the start
+#                count, a frozen deck's does not, the process still ends by the signal (cmorderly_test.c)
 #   cmtouch      Community Mods home page by touch: a drag scrolls and never fires, a tap fires on release at the
 #                scrolled position, the knob scrolls with no focus, EP147's scroll bar while it overflows (cmtouch_test.c)
 #   drumroll     WAV formats + length cap, stick re-discovery, bank swap vs the audio thread,
@@ -178,13 +199,27 @@
 #   spinback     Extended Lead-In: the PlayerCore pre-roll is the cap (row on) or stock (off)
 #                before EP147's jog clamp runs; other values and other classes untouched
 #                (guest/azmod/spin_back.c)
-#   brem         EP147's PREVIEW button and sub column choice remembered across restarts, through
-#                its own setters; the header's layout left as EP147's (guest/azmod/browse_remember.c)
+#   bcols        Column Edit's columns: only those the DJ has set, on full-width lists, only while its
+#                row is on, and EP147's own back when it goes off; PREVIEW and
+#                the sub column remembered; the stem marks' column from the header
+#                (guest/azmod/browse_columns.c, stem_marks.c)
+#   browse fields  Column Edit, any field: the field texts, the saved file, the columns that can show
+#                one, a pick from a column's button, the buttons placed clear of the dividers and of
+#                each other, a press near a divider the header's, the field list moved under the
+#                column, a cell drawn by EP147's sub column painter and put back, a touch on Preview
+#                the row's, the worker over fake sticks
+#                (guest/azmod/browse_fields.c, browse_fields.h)
 #   htcover      Hide Track Title takes a press only when JUCE's hit test gives it to that deck's
 #                bar, never one on a popup over it (guest/azmod/ht_cover.h)
 #   cmbrowse     Community Mods > Browse: the category of a manifest value, the updated date, the
-#                every-word search and the three orders
-#                (guest/azmod/cm_browse.h)
+#                four orders; the download count and its text; Home's
+#                shelves; a mod page's "updated N days ago" (guest/azmod/cm_browse.h)
+#   cmupd        Community Mods > Updates, Update all: the next install only after the last is done and
+#                the catalog read again, never while busy; an error stops it; a mod that stopped
+#                qualifying is skipped; the button's text (guest/azmod/cm_updall.h)
+#   cmupdtab     Community Mods > Updates: the rail's tab and count, the mods listed (those the Installed
+#                list marks "Update available"), a row's Update, Update all driven from the overlay's
+#                tick, an error stopping it, a reload ending it (guest/azmod/screen_community.c)
 #   mm resume    the Mod Menu shows again when SOURCE comes back, as it was when SOURCE was left;
 #                SOURCE with the menu up or a real source picked forgets it (guest/azmod/mm_resume.h)
 #   glide        a scrolled list stays under the finger (no lag), flings on a moving lift, stops at
@@ -651,6 +686,40 @@ for v in real ctl-carry ctl-leap ctl-gap ctl-valid; do
 done
 suite "clock set" "$d/real/t" $T/fixtures/zoneinfo
 
+# ---------------------------------------------------------------- browse edit (Column Edit)
+# guest/azmod/browse_edit.h natively, and against copies with one rule broken each.
+d="$OUT/bedit"
+BE_V="real ctl-dup ctl-zone ctl-title ctl-minw ctl-giveway ctl-tap ctl-handles ctl-partner ctl-trademax"
+for v in $BE_V; do mkdir -p "$d/$v"; done
+cp guest/azmod/browse_edit.h "$d/real/"
+mutate "$d/real/browse_edit.h" "$d/ctl-dup/browse_edit.h"     's/ \|\| o->w\[id\]\)/)/'
+mutate "$d/real/browse_edit.h" "$d/ctl-zone/browse_edit.h"    's/bestd = BE_ZONE \+ 1,/bestd = BE_ZONE + 2,/'
+mutate "$d/real/browse_edit.h" "$d/ctl-title/browse_edit.h"   's/int lok = l != title_id && /int lok = /'
+mutate "$d/real/browse_edit.h" "$d/ctl-minw/browse_edit.h"    's/    if \(w < BE_MINW\)\n        w = BE_MINW;\n//'
+mutate "$d/real/browse_edit.h" "$d/ctl-giveway/browse_edit.h" 's/            want\[i\] -= give;/            (void) 0;/'
+mutate "$d/real/browse_edit.h" "$d/ctl-tap/browse_edit.h"     's/    if \(!editing\)\n        return BE_TAP_SORT;\n//'
+mutate "$d/real/browse_edit.h" "$d/ctl-handles/browse_edit.h" 's/            if \(\(l != title_id && l >= 1/            if (1 || (l != title_id \&\& l >= 1/'
+mutate "$d/real/browse_edit.h" "$d/ctl-partner/browse_edit.h" 's/\*partner = lok && rok \? r : 0;/*partner = 0;/'
+mutate "$d/real/browse_edit.h" "$d/ctl-trademax/browse_edit.h" 's/    if \(w > hi\)\n        w = hi;\n//'
+for v in $BE_V; do
+    $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/bedit_test.c
+done
+suite "browse edit" "$d/real/t"
+
+# Beat jump into the Extended Lead-In: which targets before the track's start may be jumped to
+# (guest/azmod/leadin_jump.h), and copies with one rule broken
+d="$OUT/leadin"; mkdir -p "$d"
+cp guest/azmod/leadin_jump.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-edge.h"  's/return target >= lj_floor\(cap_ms, rate\) \? LJ_ALLOW : LJ_REFUSE;/return target > lj_floor(cap_ms, rate) ? LJ_ALLOW : LJ_REFUSE;/'
+mutate "$d/real.h" "$d/ctl-rate.h"  's/    if \(rate < LJ_RATE_MIN \|\| rate > LJ_RATE_MAX \|\| cap_ms >= 0\)\n        return LJ_REFUSE;\n//'
+mutate "$d/real.h" "$d/ctl-start.h" 's/    if \(target >= 0\)\n        return LJ_EP147;/    if (target > 0)\n        return LJ_EP147;/'
+mutate "$d/real.h" "$d/ctl-ovf.h"   's/long long f = \(long long\) cap_ms \* rate;/long long f = (long long) (int) cap_ms * (int) (rate * 1000);/'
+mutate "$d/real.h" "$d/ctl-unit.h"  's/return \(long\) \(f \/ 1000\);/return (long) (f \/ 1024);/'
+for v in real ctl-edge ctl-rate ctl-start ctl-ovf ctl-unit; do
+    $CC "${CFLAGS[@]}" -I$T -DLJ_HDR="\"$d/$v.h\"" -o "$d/$v" $T/leadin_jump_test.c
+done
+suite "leadin jump" "$d/real"
+
 # ---------------------------------------------------------------- sdk drawing logic
 # guest/azmod/sdk_surface_logic.h natively, and against copies with one rule broken each.
 d="$OUT/sdkdraw"
@@ -826,6 +895,29 @@ for v in real ctl-inplace ctl-anyframes; do
 done
 suite "envelope cache" "$d/real" "$d/scratch-real"
 
+# ---------------------------------------------------------------- the stem offset cache
+# azstem.ofs on the stick (ofsload.c ofs_cache_parse / _load / _save, stem_playback.c stems_key):
+# a lag is reused only for the same source and stem set, anything else is a miss (ofscache_test.c)
+d="$OUT/ofscache"; mkdir -p "$d"
+{ awk '/^#define OFSC_MAGIC / {p=1} p {print} p && /^static void ofs_cache_save\(/ {q=1} q && /^}$/ {exit}' guest/azstem/ofsload.c
+  extract guest/azstem/stem_playback.c '^static unsigned long long stems_key\('; } > "$d/real.inc"
+grep -q 'ofs_cache_parse' "$d/real.inc" && grep -q 'rename(tmp, path)' "$d/real.inc" && grep -q 'FNV-1a' guest/azstem/stem_playback.c &&
+    grep -q '1099511628211ULL' "$d/real.inc" || { echo "extraction of the stem offset cache failed"; exit 2; }
+# control: the source size is not compared
+mutate "$d/real.inc" "$d/ctl-nosize.inc" 's/if \(sz != size \|\| /if ((void) size, /'
+# control: the stem set is not compared
+mutate "$d/real.inc" "$d/ctl-nokey.inc" 's/ \|\| k != skey/ || ((void) skey, (void) k, 0)/'
+# control: any lag taken
+mutate "$d/real.inc" "$d/ctl-anylag.inc" 's/ \|\| l < -OFS_LAGMAX \|\| l > OFS_LAGMAX//'
+# control: text after the line taken
+mutate "$d/real.inc" "$d/ctl-trailing.inc" 's/ \|\| \*p != .\\0.\)/)/'
+# control: saved in place (a save that stops short destroys the previous file)
+mutate "$d/real.inc" "$d/ctl-inplace.inc" 's/FILE \*f = fopen\(tmp, "we"\);/FILE *f = fopen(path, "we");/; s/if \(!ok \|\| rename\(tmp, path\) != 0\)/if (!ok)/'
+for v in real ctl-nosize ctl-nokey ctl-anylag ctl-trailing ctl-inplace; do
+    $CC "${CFLAGS[@]}" -I$T -DOFSCACHE_INC="\"$d/$v.inc\"" -o "$d/$v" $T/ofscache_test.c
+done
+suite "stem offset cache" "$d/real" "$d/scratch-real"
+
 # ---------------------------------------------------------------- Remote Stems request files
 # rs_write_req (remote_stems.c): key=value lines the helper reads, the library's text unable to add
 # a line of its own (rsreq_test.c)
@@ -841,6 +933,91 @@ for v in real ctl-title ctl-path; do
 done
 suite "remote stems request" "$d/real" "$d/scratch-real"
 
+# ---------------------------------------------------------------- Remote Stems queue scan
+# rs_queue_has_req / rs_scan_publish / rs_work_take (remote_stems.c): the directory scan runs on
+# the stem-marks worker and hands one atomic flag to the message thread (rsscan_test.c). The
+# threaded case also runs under ThreadSanitizer, where a plain flag is a reported race.
+d="$OUT/rsscan"; mkdir -p "$d"
+{ extract guest/azmod/remote_stems.c '^static int rs_queue_has_req\('
+  grep -E '^static int g_rs_work;' guest/azmod/remote_stems.c
+  extract guest/azmod/remote_stems.c '^static void rs_scan_publish\('
+  extract guest/azmod/remote_stems.c '^static int rs_work_take\('
+  extract guest/azmod/remote_stems.c '^static void rs_scan_loop\('; } > "$d/real.inc"
+grep -q 'rs_scan_loop' "$d/real.inc" && grep -q 'azstems-queue' "$d/real.inc" && grep -q 'g_rs_work' "$d/real.inc" && grep -q 'rs_work_take' "$d/real.inc" ||
+    { echo "extraction of the Remote Stems scan failed"; exit 2; }
+# control: any file in the queue counts (not only *.req)
+mutate "$d/real.inc" "$d/ctl-anyfile.inc" 's/if \(l > 4 && !strcmp\(e->d_name \+ l - 4, ".req"\)\) \{/if (e->d_name[0] != 0x2e) {/'
+# control: taking the flag does not clear it (the helper start would repeat every tick)
+mutate "$d/real.inc" "$d/ctl-noclear.inc" 's/return __atomic_exchange_n\(&g_rs_work, 0, __ATOMIC_ACQ_REL\);/return __atomic_load_n(&g_rs_work, __ATOMIC_ACQUIRE);/'
+# control: a plain flag between the two threads (a data race)
+mutate "$d/real.inc" "$d/ctl-plain.inc" 's/__atomic_store_n\(&g_rs_work, rs_queue_has_req\(root\), __ATOMIC_RELEASE\);/g_rs_work = rs_queue_has_req(root);/; s/return __atomic_exchange_n\(&g_rs_work, 0, __ATOMIC_ACQ_REL\);/int v = g_rs_work; g_rs_work = 0; return v;/'
+# control: the loop scans whether or not the feature is on
+mutate "$d/real.inc" "$d/ctl-ignoreon.inc" 's/if \(now >= next && __atomic_load_n\(on, __ATOMIC_RELAXED\)\) \{/if (now >= next) {/'
+# control: the loop never scans (the scan left to another mod's worker)
+mutate "$d/real.inc" "$d/ctl-noscan.inc" 's/\brs_scan_publish\(root\);/(void) root;/'
+for v in real ctl-anyfile ctl-noclear ctl-plain ctl-ignoreon ctl-noscan; do
+    $CC "${CFLAGS[@]}" -I$T -DRSSCAN_INC="\"$d/$v.inc\"" -o "$d/$v" $T/rsscan_test.c -lpthread
+done
+suite "remote stems queue scan" "$d/real" "$d/scratch-real"
+RSS_TSAN=0
+if [ -n "$SAN" ]; then
+    echo "(sanitizer pass: the ThreadSanitizer case runs in the plain pass; this pass built the suite itself with $SAN)"
+elif AZ_CC_PROBE=1 $CC -std=gnu11 -O1 -g -fsanitize=thread -I$T -DRSSCAN_INC="\"$d/real.inc\"" -o "$d/tsan-real" $T/rsscan_test.c -lpthread 2>/dev/null &&
+   AZ_CC_PROBE=1 $CC -std=gnu11 -O1 -g -fsanitize=thread -I$T -DRSSCAN_INC="\"$d/ctl-plain.inc\"" -o "$d/tsan-ctl-plain" $T/rsscan_test.c -lpthread 2>/dev/null; then
+    RSS_TSAN=1
+    suite "remote stems queue scan (ThreadSanitizer)" env TSAN_OPTIONS=halt_on_error=1 "$d/tsan-real" "$d/scratch-tsan"
+else
+    skip "remote stems queue scan (ThreadSanitizer): $CC has no -fsanitize=thread"; echo
+fi
+# rsscan_home <guest/azmod dir>: the queue scan has its own thread, started by the Remote Stems
+# install path; no other file calls the scan, so it never depends on another mod's hooks or worker.
+rsscan_home() {
+    local G=$1 calls inst
+    calls=$(grep -nE '\brs_scan_publish\s*\(' "$G"/*.c | grep -vE '^[^:]*remote_stems\.c:[0-9]+:static ')
+    inst=$(extract "$G/remote_stems.c" '^static void install_remotestems\(')
+    [ "$(printf '%s\n' "$calls" | grep -c .)" = 1 ] &&
+        ! printf '%s\n' "$calls" | grep -qv 'remote_stems\.c' &&
+        printf '%s\n' "$inst" | grep -qE '^ +rs_scan_start\(\);' &&
+        { echo "PASS  remote stems scan: its own thread, started by its install path"; return 0; }
+    echo "FAIL  remote stems scan: called from outside remote_stems.c, or not started by its install:"
+    printf '%s\n' "$calls" | sed 's/^/      /'
+    return 1
+}
+mkdir -p "$d/ctl-guest"; cp guest/azmod/*.c "$d/ctl-guest/"
+printf '\nstatic void rs_ctl_worker(void) { rs_scan_publish("/media/usb"); }\n' >> "$d/ctl-guest/stem_marks.c"
+suite "remote stems scan home" rsscan_home guest/azmod
+
+# ---------------------------------------------------------------- touch reader guard
+# touch_read_guard.h: a failed read on EP147's touch device is reported as 0 bytes, so the
+# reader's parser never gets a -1 to widen into a huge event count (touchguard_test.c). The
+# threaded case also runs under ThreadSanitizer.
+d="$OUT/touchguard"; mkdir -p "$d"
+cp guest/azmod/touch_read_guard.h "$d/real.h"
+grep -q 'tg_result' "$d/real.h" || { echo "touch_read_guard.h not found"; exit 2; }
+# control: the guard passes a failed read through
+mutate "$d/real.h" "$d/ctl-noguard.h" 's/return \(r < 0 && tg_tracked\(fd\)\) \? 0 : r;/return r;/'
+# control: every descriptor's failed read is rewritten
+mutate "$d/real.h" "$d/ctl-everyfd.h" 's/return \(r < 0 && tg_tracked\(fd\)\) \? 0 : r;/return r < 0 ? 0 : r;/'
+# control: a closed descriptor stays tracked
+mutate "$d/real.h" "$d/ctl-noforget.h" 's/(static void tg_forget\(int fd\) \{)\n/$1\n    return;\n/'
+# control: any path that starts with the device's path counts
+mutate "$d/real.h" "$d/ctl-prefix.h" 's/strcmp\(path, TG_PATH\) != 0/strncmp(path, TG_PATH, sizeof TG_PATH - 1) != 0/'
+# control: a plain table between the threads (a data race)
+mutate "$d/real.h" "$d/ctl-plain.h" 's/__atomic_load_n\(&g_tg_fd\[i\], __ATOMIC_ACQUIRE\)/g_tg_fd[i]/; s/__atomic_compare_exchange_n\(&g_tg_fd\[i\], &cur, -1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED\);/if (g_tg_fd[i] == fd) g_tg_fd[i] = -1;/'
+for v in real ctl-noguard ctl-everyfd ctl-noforget ctl-prefix ctl-plain; do
+    $CC "${CFLAGS[@]}" -I$T -DTG_INC="\"$d/$v.h\"" -o "$d/$v" $T/touchguard_test.c -lpthread
+done
+suite "touch read guard" "$d/real"
+TG_TSAN=0
+if [ -n "$SAN" ]; then
+    echo "(sanitizer pass: the ThreadSanitizer case runs in the plain pass; this pass built the suite itself with $SAN)"
+elif AZ_CC_PROBE=1 $CC -std=gnu11 -O1 -g -fsanitize=thread -I$T -DTG_INC="\"$d/real.h\"" -o "$d/tsan-real" $T/touchguard_test.c -lpthread 2>/dev/null &&
+   AZ_CC_PROBE=1 $CC -std=gnu11 -O1 -g -fsanitize=thread -I$T -DTG_INC="\"$d/ctl-plain.h\"" -o "$d/tsan-ctl-plain" $T/touchguard_test.c -lpthread 2>/dev/null; then
+    TG_TSAN=1
+    suite "touch read guard (ThreadSanitizer)" env TSAN_OPTIONS=halt_on_error=1 "$d/tsan-real"
+else
+    skip "touch read guard (ThreadSanitizer): $CC has no -fsanitize=thread"; echo
+fi
 # ---------------------------------------------------------------- Save Logs to USB (overlay side)
 # savelogs_write_req / savelogs_parse (savelogs.c): one request through a temp file + rename, and a
 # status line that answers this press only (savelogs_test.c). The request is sent only from
@@ -1101,6 +1278,18 @@ for v in real ctl-arrival ctl-default; do
     $CC "${CFLAGS[@]}" -I$T -DDECKID_INC="\"$d/$v.inc\"" -o "$d/$v" $T/deckid_test.c
 done
 suite "deck identity" "$d/real"
+# ---------------------------------------------------------------- deck screen evidence from the pad-mode getter
+d="$OUT/deckscreen"; mkdir -p "$d"
+extract guest/azmod/stems_display.c '^static int modeget_from_deck_screen\(uintptr_t lr\) \{' > "$d/real.inc"
+grep -q 'TITLE_UPDATE_END' "$d/real.inc" || { echo "extraction of modeget_from_deck_screen failed"; exit 2; }
+# control 1: every caller counts (azmod's own startup reads map the overlays over a black screen)
+mutate "$d/real.inc" "$d/ctl-anycaller.inc" 's/    return \(lr >= WAVE_SWITCH.*?;\n/    return 1;\n/s'
+# control 2: the pad title's window dropped
+mutate "$d/real.inc" "$d/ctl-notitle.inc" 's/ \|\|\n\s*\(lr >= TITLE_UPDATE && lr < TITLE_UPDATE_END\)//'
+for v in real ctl-anycaller ctl-notitle; do
+    $CC "${CFLAGS[@]}" -I$T -DDECKSCREEN_INC="\"$d/$v.inc\"" -o "$d/$v" $T/deckscreen_test.c
+done
+suite "deck screen evidence" "$d/real"
 # ---------------------------------------------------------------- waveform scaling + zoom model by deck identity
 d="$OUT/wavezoom"; mkdir -p "$d"
 { region guest/azmod/waveform.c '^/\* The provider classes. color modes' '^/\* ---- Deck-tile overview bar'
@@ -1124,7 +1313,7 @@ suite "wave identity" "$d/real"
 # guest/azmod/wave_att.h natively, with build_atten (waveform.c) and ov_rebuild_attenuation
 # (mod_menu_overlay.c) extracted; each control breaks one rule (waveatt_test.c)
 d="$OUT/waveatt"
-for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do mkdir -p "$d/$v"; done
+for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry ctl-progress ctl-framekey; do mkdir -p "$d/$v"; done
 { region guest/azmod/waveform.c '^/\* Per track position, the fraction of the four stems' '^/\* Re-run EP147.s own "overview changed" path'
   extract guest/azmod/mod_menu_overlay.c '^static void ov_rebuild_attenuation\('; } |
     sed 's/_Atomic //' > "$d/real/watt.inc" # clang: __atomic_* on plain ints
@@ -1132,7 +1321,7 @@ grep -q '^static int build_atten(int deck, const int gq' "$d/real/watt.inc" &&
     grep -q '^static void ov_rebuild_attenuation(void)' "$d/real/watt.inc" ||
     { echo "extraction of build_atten / ov_rebuild_attenuation failed"; exit 2; }
 cp guest/azmod/wave_att.h "$d/real/"
-for v in ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do
+for v in ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry ctl-progress ctl-framekey; do
     cp "$d/real/watt.inc" "$d/real/wave_att.h" "$d/$v/"
 done
 # control 1: gains ignored, the curve follows the pad toggles only (the behavior before)
@@ -1151,7 +1340,11 @@ mutate "$d/real/wave_att.h" "$d/ctl-ovevery/wave_att.h" 's/if \(built && keyed\)
 mutate "$d/real/watt.inc" "$d/ctl-ovall/watt.inc" 's/__atomic_fetch_or\(&g_ov_refresh, 1 << d, /__atomic_fetch_or(&g_ov_refresh, (1 << AZMOD_STEM_DECKS) - 1, /'
 # control 8: the every-tick retry while the envelope is built publishes a curve each time
 mutate "$d/real/watt.inc" "$d/ctl-retry/watt.inc" 's/        if \(!had\)\n            return 0;[^\n]*\n//'
-for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry; do
+# control 9: the decode's progress rebuilds on every tick
+mutate "$d/real/wave_att.h" "$d/ctl-progress/wave_att.h" 's/return fr != fr_prev && now_ms - last_ms >= WATT_PROG_MIN_MS;/return fr != fr_prev;/'
+# control 10: the frame count back in the key (every tick of a decode a keyed rebuild and refresh)
+mutate "$d/real/watt.inc" "$d/ctl-framekey/watt.inc" 's/unsigned cur = \(fr > 0 \? 1u << 4 : 0\) \| \(\(eg & 0x07ffffffu\) << 5\);/unsigned cur = ((unsigned) fr << 5) | (eg \& 0u);/'
+for v in real ctl-nogain ctl-nocap ctl-norate ctl-deck0 ctl-coarse ctl-ovevery ctl-ovall ctl-retry ctl-progress ctl-framekey; do
     $CC "${CFLAGS[@]}" -pthread -I"$d/$v" -I$T -DWATT_INC="\"$d/$v/watt.inc\"" -o "$d/$v/t" $T/waveatt_test.c
 done
 suite "wave att" "$d/real/t"
@@ -1835,7 +2028,7 @@ d="$OUT/rows"; mkdir -p "$d"
 # the variants put a mutated azfeatures.c beside a copy of menu.c: it must be menu.c that includes it
 menu_variant "$d/probe" azfeatures.c
 cp guest/azmod/menu.c "$d/menu-real.c"; cp guest/azmod/azfeatures.c "$d/azfeatures-real.c"
-# control 1: the registered rows listed after the utilities
+# control 1: the registered rows listed after the utilities (not right under Community Mods)
 mutate guest/azmod/azfeatures.c "$d/azfeatures-ctl-order.c" 's/(#define AZ_REGISTERED_ROWS\(\) \{AZ_ORD_R, 0\},)/#define AZ_REGISTERED_ROWS()/; s/(    AZ_ORDER\[\] = \{\n)/$1/; s/(#undef AZ_RETIRED\n\};\nstatic const signed char AZ_RETIRED_SLOTS)/#undef AZ_RETIRED\n    {AZ_ORD_R, 0},\n};\nstatic const signed char AZ_RETIRED_SLOTS/'
 # control 2: row_set accepts an official row
 mutate guest/azmod/azfeatures.c "$d/azfeatures-ctl-set.c" 's/if \(handle < AZI_REG0 \|\| handle >= AZI_REG0 \+ g_nreg \|\| !az_has_value\(handle\)\)/if (handle < 0 || handle >= AZI_REG0 + g_nreg || !az_has_value(handle))/'
@@ -1845,7 +2038,7 @@ mutate guest/azmod/azfeatures.c "$d/azfeatures-ctl-parent.c" 's/    if \(f.paren
 mutate guest/azmod/azfeatures.c "$d/azfeatures-ctl-iconref.c" 's/g->r\.d\.icon = g->icon;/g->r.d.icon = f.icon;/'
 # control 5: the menu never draws a registered row's icon
 cp guest/azmod/azfeatures.c "$d/azfeatures-ctl-icondraw.c"
-mutate guest/azmod/ui_draw.c "$d/ui_draw-ctl-icondraw.c" 's/        if \(r && r->d\.icon\)\n            blit_icon\(fb, x, y, sz, c, r->d\.icon\);/        (void) r;/'
+mutate guest/azmod/ui_draw.c "$d/ui_draw-ctl-icondraw.c" 's/            blit_icon\(fb, x, y, sz, c, r->d\.icon\);\n            break;\n/            break;\n/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -c -o "$d/stubs.o" guest/azmod/lanetest.c
 # control 6: retiring a stopped mod's rows does nothing
@@ -1892,7 +2085,7 @@ suite "draw" "$d/real"
 
 # ---------------------------------------------------------------- community catalog (Mod Menu)
 d="$OUT/cmcat"; mkdir -p "$d"
-for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab; do menu_variant "$d/src-$v" screen_community.c; done
+for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab ctl-nodl ctl-dlzero ctl-nohome ctl-seeall ctl-rowall ctl-homeknob ctl-dotutf8; do menu_variant "$d/src-$v" screen_community.c; done
 # control 1: the old caps (16 repositories, 64 mods, 96 controls)
 mutate guest/azmod/screen_community.c "$d/src-ctl-oldcaps/screen_community.c" 's/#define CM_NREPO 96/#define CM_NREPO 16/; s/#define CM_NCAT  128/#define CM_NCAT  64/; s/#define CM_MAXCTL 256/#define CM_MAXCTL 96/'
 # control 2: mod lines past the array dropped without counting them (the old behavior)
@@ -1911,9 +2104,23 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-noteall/screen_community.c" 's
 mutate guest/azmod/screen_community.c "$d/src-ctl-notab/screen_community.c" 's/for \(int with_tab = 1; with_tab >= 0; with_tab--\)/for (int with_tab = 0; with_tab >= 0; with_tab--)/'
 # control 7: field 20 (updated) never read: the Updated order has no dates
 mutate guest/azmod/screen_community.c "$d/src-ctl-noupd/screen_community.c" 's/cm_cpy\(m->upd, sizeof m->upd, n >= 20 && cmb_date_ok\(fl\[19\]\) \? fl\[19\] : ""\);/cm_cpy(m->upd, sizeof m->upd, "");/'
+# control 10: field 21 (downloads) never read: no counts, no Most downloaded
+mutate guest/azmod/screen_community.c "$d/src-ctl-nodl/screen_community.c" 's/m->counted = n >= 21 && cmb_dl_parse\(fl\[20\], &m->dl\);/m->counted = 0;/'
+# control 11: a tile with no count shows 0
+mutate guest/azmod/screen_community.c "$d/src-ctl-dlzero/screen_community.c" 's/if \(m->counted\) \{   \/\* no count: nothing, never 0 \*\//if (1) {/'
+# control 12: Browse opens on All mods, not Home
+mutate guest/azmod/screen_community.c "$d/src-ctl-nohome/screen_community.c" 's/static int g_cm_fcat = CMB_HOME,/static int g_cm_fcat = CMB_ALL,/'
+# control 13: See all keeps the order it had (Most downloaded opens All mods A-Z)
+mutate guest/azmod/screen_community.c "$d/src-ctl-seeall/screen_community.c" 's/g_cm_sort = cmb_shelf_sort\(c->idx\); //'
+# control 14: a shelf draws every mod it holds, past the grid's right edge
+mutate guest/azmod/screen_community.c "$d/src-ctl-rowall/screen_community.c" 's/nf = h->n < cols \? h->n : cols;/nf = h->n;/'
+# control 15: the knob on the home page does not scroll it
+mutate guest/azmod/screen_community.c "$d/src-ctl-homeknob/screen_community.c" 's/        \} else if \(d\) \{   \/\* a row per detent, gliding/        } else if (0) {   \/* a row per detent, gliding/'
+# control 17: the mod page's separator as a UTF-8 middle dot (two glyphs in the menu font)
+mutate guest/azmod/screen_community.c "$d/src-ctl-dotutf8/screen_community.c" 's/#define CM_DOT "  \\xb7  "/#define CM_DOT "  \\xc2\\xb7  "/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -c -o "$d/stubs.o" guest/azmod/lanetest.c
-for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab; do
+for v in real ctl-oldcaps ctl-nocount ctl-silent ctl-listed ctl-noheld ctl-anyname ctl-noupd ctl-noteall ctl-notab ctl-nodl ctl-dlzero ctl-nohome ctl-seeall ctl-rowall ctl-homeknob ctl-dotutf8; do
     $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
         -o "$d/$v" $T/cmcat_test.c "$d/stubs.o"
 done
@@ -1931,6 +2138,77 @@ for v in real ctl-loaded; do
         -o "$d/$v" $T/cmmod_test.c "$d/stubs.o"
 done
 suite "installed mod page" "$d/real"
+
+# ---------------------------------------------------------------- Community Mods > Updates (Mod Menu)
+d="$OUT/cmupdtab"; mkdir -p "$d"
+for v in real ctl-removed ctl-railcount ctl-noblock ctl-noreload ctl-nobg ctl-reloadmid ctl-chkopens ctl-knobchk ctl-countunder ctl-splitopens ctl-noflight ctl-autoeach ctl-autonoretry; do menu_variant "$d/src-$v" screen_community.c; done
+mutate guest/azmod/screen_community.c "$d/src-ctl-removed/screen_community.c"   's/return k >= 0 && !cm_removed\(id\) \? k : -1;/return k;/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-railcount/screen_community.c" 's/snprintf\(ul, sizeof ul, nu \? "Updates %d" : "Updates", nu\);/snprintf(ul, sizeof ul, "Updates");/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-noblock/screen_community.c"   's/    return g_cm_ua\.on \|\| \(g_cs/    return 0 || (g_cs/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-noreload/screen_community.c"  's/    cmu_cancel\(&g_cm_ua\);   \/\* a reload ends Update all \*\/\n//'
+mutate guest/azmod/screen_community.c "$d/src-ctl-nobg/screen_community.c"      's/void azmod_cm_bg_tick\(void\) \{ cm_updall_tick\(\); \}/void azmod_cm_bg_tick(void) {}/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-reloadmid/screen_community.c" 's/\(g_cm_reloading \|\| \(cm_need_reload\(\) && !cm_busy\(\)\)\)/(g_cm_reloading || cm_need_reload())/'
+# the checkbox opens the page: no control of its own, so a touch on it is the row's
+mutate guest/azmod/screen_community.c "$d/src-ctl-chkopens/screen_community.c"  's/        if \(box\) cm_chk_ctl\(lay, &n, CMC_CHK, i, y, h\);\n//'
+# the knob's press toggles: the knob's focus lands on a checkbox (the split's list, cm_split_knob)
+mutate guest/azmod/screen_community.c "$d/src-ctl-knobchk/screen_community.c"   's/        if \(ctl\[k\]\.x >= rx \|\| ctl\[k\]\.kind == CMC_CHK\) continue;/        if (ctl[k].x >= rx) continue;/'
+# a checkbox toggles while the last toggle is unanswered (the fetcher would drop it)
+mutate guest/azmod/screen_community.c "$d/src-ctl-noflight/screen_community.c" 's/if \(!cm_busy\(\) && !g_cm_flip\.at && cm_chk/if (!cm_busy() \&\& cm_chk/'
+# every opening refreshes (no 10-minute limit)
+mutate guest/azmod/screen_community.c "$d/src-ctl-autoeach/screen_community.c" 's/    if \(cm_busy\(\) \|\| \(!retry && g_cm_auto_at && cm_ms\(\) - g_cm_auto_at < CM_AUTO_MS\)\) return;/    if (cm_busy()) return;/'
+# a failed refresh waits the full 10 minutes before the next opening tries again
+mutate guest/azmod/screen_community.c "$d/src-ctl-autonoretry/screen_community.c" 's/\(!retry && g_cm_auto_at/(g_cm_auto_at/'
+# the split's row opens the full page instead of selecting it
+mutate guest/azmod/screen_community.c "$d/src-ctl-splitopens/screen_community.c" 's/    case CMC_MOD:     if \(cm_isplit\(\) && !g_cm_row_opening\) \{ cm_split_select\(CMC_MOD << 16 \| c->idx\); break; \}[^\n]*\n/    case CMC_MOD:\n/'
+# the header's catalog count drawn before the band that covers it
+mutate guest/azmod/screen_community.c "$d/src-ctl-countunder/screen_community.c" 's/(        fill_rect\(fb, 0, top, fb->w, hh, C_HEADER_BG\);\n)(        if \(cnt\[0\]\) c_text\(fb, cntx, top, 0, hh, cnt, dpx, C_TEXT_DIM\);[^\n]*\n)/$2$1/'
+$CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
+    -Dazcm_count=lanetest_azcm_count -Dazcm_info=lanetest_azcm_info -Dazcm_ver_newer=lanetest_azcm_ver_newer \
+    -c -o "$d/stubs.o" guest/azmod/lanetest.c
+for v in real ctl-removed ctl-railcount ctl-noblock ctl-noreload ctl-nobg ctl-reloadmid ctl-chkopens ctl-knobchk ctl-countunder ctl-splitopens ctl-noflight ctl-autoeach ctl-autonoretry; do
+    $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
+        -DCM_STATUS="\"$d/status-$v\"" -DCM_REQ="\"$d/req-$v\"" -o "$d/$v" $T/cmupdtab_test.c "$d/stubs.o"
+done
+suite "community updates tab" "$d/real"
+
+# ---------------------------------------------------------------- Community Mods not loaded this start
+# cmnotloaded_test.c: the notice (Installed tab only), Load next time, and the Reload after it
+d="$OUT/cmnotloaded"; mkdir -p "$d"
+NLV="real ctl-reset ctl-alltabs ctl-nobutton ctl-resize ctl-oldrow ctl-leftline ctl-crash ctl-noreq ctl-keepoff ctl-reload400 ctl-togglereload ctl-nowait"
+for v in $NLV; do menu_variant "$d/src-$v" screen_community.c; done
+# control 1: Reload sets the page back to the question Load next time already answered
+mutate guest/azmod/screen_community.c "$d/src-ctl-reset/screen_community.c" 's/(    cm_req\("apply", 0, 0\);\n    g_cm_reload = 0;)/$1 g_cm_resumed = 0;/'
+# control 2: the notice is laid out on the Browse tab too
+mutate guest/azmod/screen_community.c "$d/src-ctl-alltabs/screen_community.c" 's/(    if \(cm_status_shown\(\) && cm_progress_line\(\)\) \{   \/\* Refresh is on the rail)/    if (azcm_suspended() && !g_cm_keptoff) { lay->y = y; lay->n = n; cm_home_notloaded(lay); y = lay->y; n = lay->n; }\n$1/'
+# control 3: no Reload in the header (the one Reload)
+mutate guest/azmod/screen_community.c "$d/src-ctl-nobutton/screen_community.c" 's/        if \(!g_cm_reloading\) CM_CTL\(CMC_APPLY, 0, rx, ry, rsz, rsz\);\n//'
+# control 4: the box shrinks after Load next time (the rows move up)
+mutate guest/azmod/screen_community.c "$d/src-ctl-resize/screen_community.c" 's/int bh2 = 3 \* lh \+ bh3 \+ 2 \* pad;/int bh2 = (g_cm_resumed ? lh : 3 * lh + bh3) + 2 * pad;/'
+# control 5: a row still says "Held back (see above)"
+mutate guest/azmod/screen_community.c "$d/src-ctl-oldrow/screen_community.c" 's/snprintf\(buf, n, "%s", "Not loaded"\);/snprintf(buf, n, "%s", "Held back (see above)");/'
+# control 6: the left-pane card carries a line about it
+mutate guest/azmod/screen_community.c "$d/src-ctl-leftline/screen_community.c" 's/(    \/\* the master state: the row.s own checkbox is the control; this just names it \*\/)/    if (azcm_suspended() \&\& !g_cm_resumed) { c_text(fb, x0 + pad, y, 0, lh, "Not loaded this time: open Community Mods.", dpx, CM_BAD); y += lh; }\n$1/'
+# control 7: the reason is always the restarts one
+mutate guest/azmod/screen_community.c "$d/src-ctl-crash/screen_community.c" 's/m0\.reason, "Suspended: the deck crashed %d times in %d minutes", &cn, &cm\) == 2/m0.reason, "Suspended: the deck crashed %d times in %d minutes", \&cn, \&cm) == 99/'
+# control 8: Reload sends nothing
+mutate guest/azmod/screen_community.c "$d/src-ctl-noreq/screen_community.c" 's/    cm_req\("apply", 0, 0\);\n//'
+# control 9: Keep off takes the notice away (the rows move up)
+mutate guest/azmod/screen_community.c "$d/src-ctl-keepoff/screen_community.c" 's/    if \(azcm_suspended\(\)\) \{\n        lay->y = y;/    if (azcm_suspended() \&\& !g_cm_keptoff) {\n        lay->y = y;/'
+# control 11: the master switch sends the reload itself
+mutate guest/azmod/screen_community.c "$d/src-ctl-togglereload/screen_community.c" 's/(    azcm_set_all_off\(off\);\n    g_cm_pending_off = off;\n)/$1    cm_req("apply", 0, 0);\n/'
+# control 12: a pressed Reload does not wait (it can be pressed again, nothing says it is coming)
+mutate guest/azmod/screen_community.c "$d/src-ctl-nowait/screen_community.c" 's/    g_cm_reloading = 1;   \/\* g_cm_resumed stays/    g_cm_reloading = 0;   \/* g_cm_resumed stays/'
+# control 10: Community's Reload held to the 400 ms of every other control
+mutate guest/azmod/screen_community.c "$d/src-ctl-reload400/screen_community.c" 's/static bool cm_home_reload\(int ctl\) \{ return \(ctl >> 16\) == CMC_APPLY; \}/static bool cm_home_reload(int ctl) { (void) ctl; return 0; }/'
+$CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
+    -Dazcm_count=lanetest_azcm_count -Dazcm_info=lanetest_azcm_info -Dazcm_suspended=lanetest_azcm_suspended \
+    -Dazcm_resume=lanetest_azcm_resume -Dazcm_any_loaded=lanetest_azcm_any_loaded \
+    -Dazcm_reload_requested=lanetest_azcm_reload_requested -c -o "$d/stubs.o" guest/azmod/lanetest.c
+for v in $NLV; do
+    $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" -DCM_REQ="\"$d/req-$v\"" \
+        -o "$d/$v" $T/cmnotloaded_test.c "$d/stubs.o"
+done
+suite "community not loaded" "$d/real"
 
 # ---------------------------------------------------------------- a mod's SCREEN row (Mod Menu)
 # screenrow_test.c: a registered SCREEN row opens its mod's page by Community's own path
@@ -1965,6 +2243,11 @@ menu_variant "$d/src-ctl-shrinkc" menu_list.c
 menu_variant "$d/src-ctl-footer" menu_list.c
 menu_variant "$d/src-ctl-offscreen" menu_full.c
 menu_variant "$d/src-ctl-dragtoggle" menu_full.c
+menu_variant "$d/src-ctl-reload400" menu_full.c
+menu_variant "$d/src-ctl-reloadkeep" menu_full.c
+menu_variant "$d/src-ctl-nofling" menu_full.c
+menu_variant "$d/src-ctl-nocatch" menu_full.c
+menu_variant "$d/src-ctl-noput" menu_full.c
 # control 1: the old scale-down path (the left list divides its space by every entry, mods' included)
 mutate guest/azmod/menu_full.c "$d/src-ctl-shrink/menu_full.c" 's/        n \+= !item_is_registered\(t\[k\]\);/        n += 1;/'
 # control 1b: the same for the compact list's budget (it moved the Updates screen too)
@@ -1972,19 +2255,61 @@ mutate guest/azmod/menu_full.c "$d/src-ctl-shrink/menu_full.c" 's/        n \+= 
 mutate guest/azmod/menu_list.c "$d/src-ctl-footer/menu_list.c" 's/return foot > half \? foot : half;/return half;/'
 mutate guest/azmod/menu_list.c "$d/src-ctl-shrinkc/menu_list.c" 's/if \(!item_hidden\(i\) && !item_is_registered\(i\)\)\n            rows\+\+;/if (!item_hidden(i))\n            rows++;/'
 # control 2: the knob scrolls nothing, so the selection walks off the screen
-mutate guest/azmod/menu_full.c "$d/src-ctl-offscreen/menu_full.c" 's/            c_lshow\(fb, k\); \/\* the list scrolls to keep the selection in view \*\//            (void) k;/'
+mutate guest/azmod/menu_full.c "$d/src-ctl-offscreen/menu_full.c" 's/            c_lglide_show\(fb, k\); \/\* the list scrolls to keep the selection in view \*\//            (void) k;/'
 # control 3: a drag still fires the control under it (the release ignores the movement)
 mutate guest/azmod/menu_full.c "$d/src-ctl-dragtoggle/menu_full.c" 's/    if \(g_rdrag\.moved\) \{\n        g_mhit = "release:drag";/    if (0) {\n        g_mhit = "release:drag";/'
+# control 4: a lift never flings (the release is one more drag step)
+mutate guest/azmod/menu_full.c "$d/src-ctl-nofling/menu_full.c" 's/        glide_release\(g, \(float\) to, ms, GLIDE_STOP_V\);/        glide_drag(g, (float) to, ms);/'
+# control 5: a finger on a flinging list fires the control under it
+mutate guest/azmod/menu_full.c "$d/src-ctl-nocatch/menu_full.c" 's/c_press\(tx, ty, caught \? -1 : ctl, false, g_rscroll\);/c_press(tx, ty, ctl, false, g_rscroll);/'
+# control 6: choosing another pane keeps the right pane's offset and glide
+mutate guest/azmod/menu_full.c "$d/src-ctl-noput/menu_full.c" 's/    if \(it != s->left_sel\)\n        c_glide_put\(&g_rgl, &g_rglpx, &g_rscroll, 0\);\n//'
+# control 7: Reload held to the 400 ms of every other control
+mutate guest/azmod/menu_full.c "$d/src-ctl-reload400/menu_full.c" 's/bool reload = g_rdrag\.ctl >= 0 && /bool reload = 0 \&\& g_rdrag.ctl >= 0 \&\& /'
+# control 8: a Reload press held a full second still restarts
+mutate guest/azmod/menu_full.c "$d/src-ctl-reloadkeep/menu_full.c" 's/held >= C_RELOAD_HOLD_MS/held >= 100000/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -Dazcm_count=lanetest_azcm_count -Dazcm_info=lanetest_azcm_info -Dazcm_screen_draw=lanetest_azcm_screen_draw \
     -Dazcm_screen_input=lanetest_azcm_screen_input -Dazcm_screen_enter=lanetest_azcm_screen_enter \
     -Dazmod_dm_on=lanetest_dm_on -Dazmod_dm_map=lanetest_dm_map -Dazmod_dm_key=lanetest_dm_key \
     -c -o "$d/stubs.o" guest/azmod/lanetest.c
-for v in real ctl-shrink ctl-shrinkc ctl-footer ctl-offscreen ctl-dragtoggle; do
+for v in real ctl-shrink ctl-shrinkc ctl-footer ctl-offscreen ctl-dragtoggle ctl-nofling ctl-nocatch ctl-noput ctl-reload400 ctl-reloadkeep; do
     $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
         -o "$d/$v" $T/menuscroll_test.c "$d/stubs.o"
 done
 suite "menu scroll" "$d/real"
+
+# iconcache_test.c: the Mod Menu's icon cache (ui_draw.c draw_item_icon)
+d="$OUT/iconcache"; mkdir -p "$d"
+for v in real ctl-noground ctl-notheme ctl-anyground ctl-nohit ctl-spill; do menu_variant "$d/src-$v" ui_draw.c; done
+# control 1: the ground color left out of the key (an icon kept on one band shown on another)
+mutate guest/azmod/ui_draw.c "$d/src-ctl-noground/ui_draw.c" 's/g_icache\[k\]\.ink == c &&\n            g_icache\[k\]\.ground == ground && /g_icache[k].ink == c \&\&\n            /'
+# control 2: the theme left out of the key (a kept icon survives a palette change)
+mutate guest/azmod/ui_draw.c "$d/src-ctl-notheme/ui_draw.c" 's/g_icache\[k\]\.ground == ground && g_icache\[k\]\.theme == theme\) \{/g_icache[k].ground == ground) {/'
+# control 3: any ground counts as one color (an icon over a pattern is kept)
+mutate guest/azmod/ui_draw.c "$d/src-ctl-anyground/ui_draw.c" 's/            if \(r\[i\] != g\) \{/            if (0) {/'
+# control 4: the cache never answers (every draw is a fresh drawing)
+mutate guest/azmod/ui_draw.c "$d/src-ctl-nohit/ui_draw.c" 's/        if \(g_icache\[k\]\.used && g_icache\[k\]\.item == item/        if (0 \&\& g_icache[k].used \&\& g_icache[k].item == item/'
+# control 5: an icon that draws past its box (Pad Colors' last square, too wide)
+mutate guest/azmod/ui_draw.c "$d/src-ctl-spill/ui_draw.c" 's/fill_rect\(fb, x \+ sz - q, y \+ sz - q, q, q, g\[3\]\);/fill_rect(fb, x + sz - q, y + sz - q, q + sz, q, g[3]);/'
+for v in real ctl-noground ctl-notheme ctl-anyground ctl-nohit ctl-spill; do
+    $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
+        -o "$d/$v" $T/iconcache_test.c "$OUT/menuscroll/stubs.o"
+done
+suite "icon cache" "$d/real"
+
+# ovclip_test.c: guest/azmod/ov_clip.h (each control: a changed copy of the header, found first)
+d="$OUT/ovclip"; mkdir -p "$d"
+for v in real ctl-nodx ctl-noright; do mkdir -p "$d/inc-$v"; done
+cp guest/azmod/ov_clip.h "$d/inc-real/ov_clip.h"
+# control 1: a part cut on the left is drawn at the window's left edge, not where it belongs
+mutate guest/azmod/ov_clip.h "$d/inc-ctl-nodx/ov_clip.h" 's/p->dx = \(int\) \(cx0 - x0\);/p->dx = 0;/'
+# control 2: no cut at the buffer's right edge (the request the server refuses)
+mutate guest/azmod/ov_clip.h "$d/inc-ctl-noright/ov_clip.h" 's/cx1 = x1 > W \? W : x1/cx1 = x1/'
+for v in real ctl-nodx ctl-noright; do
+    $CC -std=gnu11 -O1 -w -I"$d/inc-$v" -Iguest/azmod -I$T -o "$d/$v" $T/ovclip_test.c
+done
+suite "overlay put clipping" "$d/real"
 
 # clocktzlist_test.c: the Clock's time zone list (screen_overlays.c AZ_CLOCK_TZ)
 d="$OUT/clocktzlist"; mkdir -p "$d"
@@ -2015,30 +2340,51 @@ suite "clock zone list" "$d/real"
 # cmtouch_test.c: the home page's press is decided on its release (menu_full.c azmod_pane_drag), so a
 # drag scrolls it; the knob scrolls it with no focus; EP147's own scroll bar while it overflows.
 d="$OUT/cmtouch"; mkdir -p "$d"
-for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag; do menu_variant "$d/src-$v" screen_community.c menu_full.c; done
+for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag ctl-drawleft ctl-railedge; do menu_variant "$d/src-$v" screen_community.c menu_full.c menu_composite.c; done
 # control 1: the home page is handled like the other pages again (knob focus, a press fires at once)
 mutate guest/azmod/screen_community.c "$d/src-ctl-knobfocus/screen_community.c" 's/    if \(g_cm_view == CMV_HOME\) \{\n        \/\* The home page works by touch/    if (0) {\n        \/* The home page works by touch/'
 # control 2: a drag on the page moves nothing
 mutate guest/azmod/menu_full.c "$d/src-ctl-noscroll/menu_full.c" 's/        cmoved = cm_home_scroll_to\(fb, g_rdrag\.s0 - dy, phase\);/        cmoved = false;/'
 # control 3: no scroll bar
-mutate guest/azmod/screen_community.c "$d/src-ctl-nobar/screen_community.c" 's/        if \(draw\) draw_vsb\(fb, bx \+ bw \+ pad, by, bh, content, bh, g_cm_scroll\);\n//'
+mutate guest/azmod/screen_community.c "$d/src-ctl-nobar/screen_community.c" 's/        if \(draw\) draw_vsb\(fb, cm_isplit\(\) \? bx \+ bw \/ 2 - pad \/ 2 : bx \+ bw \+ pad, by, bh, content, bh, g_cm_scroll\);\n//'
 # control 4: a press on the header hits the page's control scrolled up under it
 mutate guest/azmod/screen_community.c "$d/src-ctl-header/screen_community.c" 's/    if \(ty < dock_y\(fb\) \+ menu_hdrh\(fb\) \|\| ty >= dock_y\(fb\) \+ dock_h\(fb\)\)\n        return -1;\n//'
 # control 5: the knob scrolls past the ends
 mutate guest/azmod/screen_community.c "$d/src-ctl-noclamp/screen_community.c" 's/\(float\) cm_scroll_clamp\(\(int\) \(from \+ 0\.5f\) \+ d \* c_rrowh\(fb\), g_cm_smax\)/(float) ((int) (from + 0.5f) + d * c_rrowh(fb))/; s/glide_step\(&g_cm_gl, cm_ms\(\), \(float\) g_cm_smax\);/glide_step(\&g_cm_gl, cm_ms(), 1e9f);/'
-# control 6: every home control counts as navigation (a slow press on an order button picks it)
-mutate guest/azmod/screen_community.c "$d/src-ctl-slow/screen_community.c" 's/    return k == CMC_TAB \|\| k == CMC_TILE \|\| k == CMC_MOD \|\| k == CMC_INSTCAT \|\| k == CMC_BACK;/    return k >= 0;/'
+# control 6: every home control counts as navigation (a slow press on a view button switches it)
+mutate guest/azmod/screen_community.c "$d/src-ctl-slow/screen_community.c" 's/    return k == CMC_TAB \|\| k == CMC_TILE \|\| k == CMC_STILE \|\| k == CMC_SEEALL \|\| k == CMC_MOD \|\| k == CMC_INSTCAT \|\| k == CMC_BACK \|\|\n           k == CMC_SORTBTN \|\| k == CMC_SORT \|\| k == CMC_SORTOFF;/    return k >= 0;/'
 # control 8: the glide forgets that it took over an offset set from outside, so it cancels every later drag
 mutate guest/azmod/screen_community.c "$d/src-ctl-staleglide/screen_community.c" 's/    g_cm_glpx = g_cm_scroll;\n}/}/'
+# control 11: the finger margin is tried before an exact hit again (the top of a rail tab picks the tab above)
+mutate guest/azmod/screen_community.c "$d/src-ctl-railedge/screen_community.c" 's/    for \(int pass = 0; pass < 2; pass\+\+\) \{\n        int pad = pass \? fb->h \* 8 \/ 800 : 0;\n        for \(int k = nb;/    for (int pass = 1; pass < 2; pass++) {\n        int pad = pass ? fb->h * 8 \/ 800 : 0;\n        for (int k = nb;/'
+# control 10: the full screen draws the Mod Menu's left list under it again (unseen, every frame)
+mutate guest/azmod/menu_composite.c "$d/src-ctl-drawleft/menu_composite.c" 's/if \(s->mode == AZ_COMMUNITY && g_cm_full && !cm_animating\(\)\) \{/if (0) {/'
 # control 9: a drag eases toward the finger instead of being at it (the page trails the finger)
 mutate guest/azmod/screen_community.c "$d/src-ctl-lag/screen_community.c" 's/    else glide_drag\(&g_cm_gl, \(float\) v, cm_ms\(\)\);/    else glide_to(\&g_cm_gl, (float) v, cm_ms());/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
     -c -o "$d/stubs.o" guest/azmod/lanetest.c
-for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag; do
+for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag ctl-drawleft ctl-railedge; do
     $CC -std=gnu11 -O1 -w -Iguest/azmod -I$T -DMENU_C="\"$d/src-$v/menu.c\"" -DCM_CATALOG="\"$d/catalog-$v\"" \
         -o "$d/$v" $T/cmtouch_test.c "$d/stubs.o"
 done
 suite "community touch" "$d/real"
+
+# cmorderly_test.c: guest/azmod/cm_orderly.h (each control: a changed copy of the header, found first)
+d="$OUT/cmorderly"; mkdir -p "$d"
+for v in real ctl-always ctl-noraise ctl-firstseen ctl-norestore; do mkdir -p "$d/inc-$v"; done
+cp guest/azmod/cm_orderly.h "$d/inc-real/cm_orderly.h"
+# control 1: every SIGTERM clears the count (a frozen deck's too)
+mutate guest/azmod/cm_orderly.h "$d/inc-ctl-always/cm_orderly.h" 's/if \(g_cmo_path\[0\] && cmo_alive\([^\n]*\)\)\n/if (g_cmo_path[0])\n/'
+# control 2: the handler does not raise the signal again (EP147 would keep running)
+mutate guest/azmod/cm_orderly.h "$d/inc-ctl-noraise/cm_orderly.h" 's/    raise\(sig\);\n/    (void) 0;\n/'
+# control 3: the first count seen counts as a heartbeat
+mutate guest/azmod/cm_orderly.h "$d/inc-ctl-firstseen/cm_orderly.h" 's/        if \(g_cmo_seen >= 0\)\n            __atomic_store_n/        __atomic_store_n/'
+# control 4: the default disposition instead of the one before the handler
+mutate guest/azmod/cm_orderly.h "$d/inc-ctl-norestore/cm_orderly.h" 's/sigaction\(sig, &g_cmo_old, NULL\);/signal(sig, SIG_DFL);/'
+for v in real ctl-always ctl-noraise ctl-firstseen ctl-norestore; do
+    $CC -std=gnu11 -O1 -w -I"$d/inc-$v" -Iguest/azmod -I$T -o "$d/$v" $T/cmorderly_test.c -lpthread
+done
+suite "community orderly stop" "$d/real"
 
 # ---------------------------------------------------------------- community icons (PNG gate)
 d="$OUT/png"; mkdir -p "$d"
@@ -2065,6 +2411,7 @@ meta = (chunk(b"iCCP", b"x\0\0" + zlib.compress(b"y" * 100)) + chunk(b"tEXt", b"
         + chunk(b"tIME", b"\x07\xea\x0a\x09\x0c\x00\x00") + chunk(b"bKGD", b"\0\0\0\0\0\0") + chunk(b"zTXt", b"c\0\0" + zlib.compress(b"z" * 50)))
 w("editor.png", png(32, 32, extra=meta)); w("editor-plain.png", png(32, 32))
 w("critical.png", png(32, 32, extra=chunk(b"ABCD", b"1234")))
+w("shot1280.png", png(1280, 800, ct=2)); w("shot1281.png", png(1281, 800, ct=2)); w("shot801.png", png(1280, 801, ct=2))
 w("big1024.png", png(1024, 1024)); w("noiend.png", good[:-12])
 lo = bytearray(good); lo[33:37] = struct.pack(">I", 1 << 30); w("lenover.png", bytes(lo))
 w("twoihdr.png", good[:33] + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 6, 0, 0, 0)) + good[33:])
@@ -2123,7 +2470,7 @@ grep -q 'azcm_icons_done' "$d/real.inc" && grep -q 'CMI_WAIT_MS' "$d/real.inc" |
 # controls: a queued decode not reported as pending (the placeholder shows, then the picture
 # replaces it), and the wait never running out (a stuck decode leaves the tile empty for good)
 mutate "$d/real.inc" "$d/ctl-nowait.inc" 's/    \*pending = 1;\n    return NULL;/    return NULL;/'
-mutate "$d/real.inc" "$d/ctl-forever.inc" 's/ && now_ms\(\) - g_cmi\[i\]\.asked < CMI_WAIT_MS//'
+mutate "$d/real.inc" "$d/ctl-forever.inc" 's/ && now_ms\(\) - a\[i\]\.asked < CMI_WAIT_MS//'
 for v in real ctl-nowait ctl-forever; do
     $CC "${CFLAGS[@]}" -I$T -DICON_INC="\"$d/$v.inc\"" -o "$d/$v" $T/iconwait_test.c
 done
@@ -2626,6 +2973,17 @@ for v in real ctl-noforce ctl-range ctl-x8 ctl-nokill ctl-norow ctl-retest; do
 done
 suite "streaming key" "$d/real"
 
+# Camelot Keys on the deck screen: EP147's Camelot rule for a pitch class and a major/minor flag
+d="$OUT/camelot"; mkdir -p "$d"
+cp guest/azmod/camelot_text.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-default.h" 's/int v = i < 11 \? num\[i\] : 8, n = 0;/int v = i < 11 ? num[i] : 1, n = 0;/'
+mutate "$d/real.h" "$d/ctl-suffix.h"  's/out\[n\+\+\] = major \? .B. : .A.;/out[n++] = major ? '"'"'A'"'"' : '"'"'B'"'"';/'
+mutate "$d/real.h" "$d/ctl-index.h"   's/unsigned i = \(unsigned\) \(pitch - 1\) & 0xffu;/unsigned i = (unsigned) pitch \& 0xffu;/'
+for v in real ctl-default ctl-suffix ctl-index; do
+    $CC "${CFLAGS[@]}" -I$T -DCAMELOT_HDR="\"$d/$v.h\"" -o "$d/$v" $T/camelot_test.c
+done
+suite "camelot text" "$d/real"
+
 # Preview Hot Cues: a track's hot cues from its analysis file
 d="$OUT/hcanlz"; mkdir -p "$d"
 cp guest/azmod/hc_anlz.h "$d/real.h"
@@ -2678,7 +3036,7 @@ mutate "$d/real.c" "$d/ctl-after.c"    's/    sb_apply\(strategy\);\n(    g_o_sb
 mutate "$d/real.c" "$d/ctl-nooff.c"    's/return on \? SB_CAP_MS : SB_STOCK_MS;/return on ? SB_CAP_MS : cur;/'
 mutate "$d/real.c" "$d/ctl-noalign.c"  's/\(core & 7\) \|\| //'
 for v in real ctl-anyvalue ctl-anycore ctl-after ctl-nooff ctl-noalign; do
-    $CC "${CFLAGS[@]}" -pthread -I$T -DSB_SRC="\"$d/$v.c\"" -o "$d/$v" $T/spinback_test.c
+    $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -I$T -DSB_SRC="\"$d/$v.c\"" -o "$d/$v" $T/spinback_test.c
 done
 suite "extended lead-in" "$d/real"
 
@@ -2696,17 +3054,93 @@ done
 $CC "${CFLAGS[@]}" -I$T -I"$d/anymode" -DBLF_SRC="\"$d/anymode/real.inc\"" -o "$d/ctl-anymode" $T/blflip_test.c
 suite "beat loop flip" "$d/real"
 
-# EP147's PREVIEW button and sub column choice remembered across restarts (browse_remember.c)
-d="$OUT/brem"; mkdir -p "$d"
-cp guest/azmod/browse_remember.c "$d/real.c"
+# Column Edit's columns, and the Browse PREVIEW button and sub column remembered (browse_columns.c);
+# the stem marks' column from the list's header (stem_marks.c sm_hdr_lastcol)
+d="$OUT/bcols"; mkdir -p "$d"
+cp guest/azmod/browse_columns.c "$d/real.c"
+extract guest/azmod/stem_marks.c '^static int sm_hdr_lastcol\(' > "$d/sm.inc"
+grep -q 'ep_off(7, 8)' "$d/sm.inc" || { echo "extraction of sm_hdr_lastcol failed"; exit 2; }
+mutate "$d/real.c" "$d/ctl-compact.c" 's/return \(int\) \(m >> \(8 \* \(BC_HDR_MODE & 7\)\)\) == 0 \? h : 0;/return h;/'
+mutate "$d/real.c" "$d/ctl-all.c"     's/bc_set_cols\(h, g_bc_cols, AZMOD_BCOL_SET_OF\(g_bc_cols\)\);/bc_set_cols(h, g_bc_cols, AZMOD_BCOL_ALL);/'
+mutate "$d/real.c" "$d/ctl-unset.c"   's/bc_set_cols\(h, g_bc_cols, AZMOD_BCOL_SET_OF\(g_bc_cols\)\);/bc_set_cols(h, g_bc_cols, (g_bc_cols ^ AZMOD_BCOL_DEFAULT) & AZMOD_BCOL_ALL);/'
+mutate "$d/real.c" "$d/ctl-ungated.c" 's/        if \(bc_ce_on\(\)\)\n            bc_set_cols/        if (1)\n            bc_set_cols/'
+mutate "$d/real.c" "$d/ctl-noback.c"  's/    if \(!want\)\n        for/    if (0)\n        for/'
+mutate "$d/real.c" "$d/ctl-recself.c" 's/        g_bc_setvis = g_o_bc_setvis;/        g_bc_setvis = bc_setvis_hook;/'
+mutate "$d/real.c" "$d/ctl-gone.c"    's/    if \(i >= 0\)\n        memset\(&g_bc_ep\[i\], 0, sizeof g_bc_ep\[i\]\);/    (void) i;/'
 mutate "$d/real.c" "$d/ctl-early.c"   's/\} else if \(__atomic_load_n\(&g_sc_tries, __ATOMIC_ACQUIRE\) > 0\) \{/} else {/'
-mutate "$d/real.c" "$d/ctl-pvany.c"   's/if \(br_killed\(BR_PV_OFF, &g_pv_off\) \|\| !br_obj\(\(uintptr_t\) fb, BR_FB_VT\)\)/if (br_killed(BR_PV_OFF, \&g_pv_off))/'
-mutate "$d/real.c" "$d/ctl-compact.c" 's/return \(int\) \(m >> \(8 \* \(BR_HDR_MODE & 7\)\)\) == 0 \? h : 0;/return h;/'
-mutate "$d/real.c" "$d/ctl-scoff.c"   's/if \(!br_killed\(BR_SC_OFF, &g_sc_off\) && BR_FC_VT/if (BR_FC_VT/'
-for v in real ctl-early ctl-pvany ctl-compact ctl-scoff; do
-    $CC "${CFLAGS[@]}" -I$T -DBR_SRC="\"$d/$v.c\"" -o "$d/$v" $T/browse_remember_test.c
+mutate "$d/real.c" "$d/ctl-pvany.c"   's/if \(bc_killed\(BC_PV_OFF, &g_pv_off\) \|\| !bc_obj\(\(uintptr_t\) fb, BC_FB_VT\)\)\n        return;\n    on =/if (bc_killed(BC_PV_OFF, &g_pv_off))\n        return;\n    on =/'
+mutate "$d/real.c" "$d/ctl-afon.c"    's/    return bc_allfields\(\) \? 1 : v;/    return 1 ? 1 : v;/'
+mutate "$d/real.c" "$d/ctl-afseq.c"   's/    if \(!bc_allfields\(\) \|\| g_o_sort_vis\(row\)\)\n        return seq;/    return seq;/'
+mutate "$d/real.c" "$d/ctl-ids.c"     's/case AZMOD_BCOL_BPM: return ep_off\(6, 7\);/case AZMOD_BCOL_BPM: return 6;/'
+mutate "$d/sm.inc" "$d/ctl-smasc.inc" 's/for \(int id = ep_off\(7, 8\); id >= 1; id--\)/for (int id = 1; id <= ep_off(7, 8); id++)/'
+for v in real ctl-compact ctl-all ctl-unset ctl-ungated ctl-noback ctl-recself ctl-gone ctl-early ctl-pvany ctl-afon ctl-afseq ctl-ids; do
+    $CC "${CFLAGS[@]}" -I$T -DBC_SRC="\"$d/$v.c\"" -DSM_INC="\"$d/sm.inc\"" -o "$d/$v" $T/bcols_test.c
 done
-suite "browse remember" "$d/real"
+$CC "${CFLAGS[@]}" -I$T -DBC_SRC="\"$d/real.c\"" -DSM_INC="\"$d/ctl-smasc.inc\"" -o "$d/ctl-smasc" $T/bcols_test.c
+suite "browse columns" "$d/real"
+
+# Column Edit, any field (browse_fields.c, browse_fields.h): the fields and their text, the saved
+# file, the columns that can show one, a pick, the buttons, a cell, the Preview component, and the
+# worker on its own thread over fake sticks. Each variant is a copy of browse_fields.c with
+# browse_fields.h beside it (the .c includes the header from its own directory).
+d="$OUT/bfields"; mkdir -p "$d/real"
+cp guest/azmod/browse_fields.c guest/azmod/browse_fields.h "$d/real/"
+extract guest/azmod/browse_columns.c '^static int bc_col_id\(' > "$d/bcid.inc"
+grep -q 'AZMOD_BCOL_KEY' "$d/bcid.inc" || { echo "extraction of bc_col_id failed"; exit 2; }
+awk '/^#define AZMOD_BCOL_/ { on = 1 } on { print } on && !/\\\r?$/ { on = 0 }' guest/azmod/browse_columns.c | tr -d '\r' > "$d/bcol.inc"
+grep -q 'AZMOD_BCOL_KEY' "$d/bcol.inc" || { echo "extraction of the AZMOD_BCOL definitions failed"; exit 2; }
+BF_C="ctl-track ctl-stale ctl-ownclick ctl-restore ctl-compact ctl-sel1 ctl-load ctl-wave ctl-disagree ctl-inset
+      ctl-narrow ctl-cover ctl-left0 ctl-ownfwd ctl-still ctl-stack ctl-norestore ctl-popleft ctl-poprow ctl-preview
+      ctl-evcomp ctl-evcol ctl-tapmove ctl-dragtap ctl-pause ctl-owngate ctl-tlfull ctl-tlparent ctl-tlclamp ctl-look ctl-negx
+      ctl-ungated ctl-hidekeep ctl-hideany ctl-hidepass ctl-unhide ctl-hidestale ctl-hideott ctl-hidelate"
+BF_H="ctl-dup ctl-overlong"
+for v in $BF_C $BF_H; do mkdir -p "$d/$v"; cp "$d/real/browse_fields.c" "$d/real/browse_fields.h" "$d/$v/"; done
+mutate "$d/real/browse_fields.h" "$d/ctl-dup/browse_fields.h"      's/ \|\| field\[id\] != B2_NONE\)/)/'
+mutate "$d/real/browse_fields.h" "$d/ctl-overlong/browse_fields.h" 's/if \(cp < min \|\| /if (/'
+mutate "$d/real/browse_fields.c" "$d/ctl-track/browse_fields.c"    's/\(unsigned char\) \(f == B2_TRACK \? B2_NONE : f\)/(unsigned char) f/'
+mutate "$d/real/browse_fields.c" "$d/ctl-stale/browse_fields.c"    's/ \|\| drag_now_ms\(\) - g_bf_ask_ms > B2_ASK_MS\)/)/'
+mutate "$d/real/browse_fields.c" "$d/ctl-ownclick/browse_fields.c" 's/        __atomic_store_n\(&g_bf_ask, 0, __ATOMIC_RELEASE\);\n        b2_hide_row\(wref_get/        b2_hide_row(wref_get/'
+mutate "$d/real/browse_fields.c" "$d/ctl-restore/browse_fields.c"  's/ __attribute__\(\(cleanup\(b2_restore\)\)\)//; s/    b2_restore\(&sw\);\n    return 1;/    return 1;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-compact/browse_fields.c"  's/ \|\| !b2_full_list\(self\)\)/)/'
+mutate "$d/real/browse_fields.c" "$d/ctl-sel1/browse_fields.c"     's/    if \(col != 1\) \{\n        g_b2_sel_model/    if (1) {\n        g_b2_sel_model/'
+mutate "$d/real/browse_fields.c" "$d/ctl-load/browse_fields.c"     's/if \(rc > 0 && bf_swappable\(id\)\)/if (rc > 0)/'
+mutate "$d/real/browse_fields.c" "$d/ctl-wave/browse_fields.c"     's/if \(bf_field_of\(1\) == B2_NONE \|\| !on_msg_thread\(\)/if (!on_msg_thread()/'
+mutate "$d/real/browse_fields.c" "$d/ctl-disagree/browse_fields.c" 's/\} else if \(strcmp\(got, v\) \|\| gk != k\) \{/} else if (0) {/'
+mutate "$d/real/browse_fields.c" "$d/ctl-inset/browse_fields.c"    's/\? x\[r\] \+ w\[r\] - zone - B2_BTN_W :/? x[r] + w[r] - B2_BTN_W :/'
+mutate "$d/real/browse_fields.c" "$d/ctl-narrow/browse_fields.c"   's/: x\[r\] \+ w\[r\] - B2_BTN_W;/: -1;\n        if (b < 0)\n            continue;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-cover/browse_fields.c"    's/        if \(b \+ B2_BTN_W > limit\)\n            b = limit - B2_BTN_W;\n//'
+mutate "$d/real/browse_fields.c" "$d/ctl-left0/browse_fields.c"    's/        if \(b < 0\)\n            b = 0;\n        bx\[r\] = b;/        bx[r] = b;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-ownfwd/browse_fields.c"   's/    if \(!h \|\| !b2_hdr_xy\(\(uintptr_t\) btn, e, &x, &y\)\) \{\n        g_o_b2_btn_mouse\[0\]/    if (!b2_hdr_xy((uintptr_t) btn, e, \&x, \&y)) {\n        g_o_b2_btn_mouse[0]/'
+mutate "$d/real/browse_fields.c" "$d/ctl-tapmove/browse_fields.c"  's/    if \(!tap \|\| dragged\)\n        return;/    if (dragged)\n        return;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-dragtap/browse_fields.c"  's/    if \(!tap \|\| dragged\)\n        return;/    if (!tap)\n        return;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-owngate/browse_fields.c"  's/if \(be_editing\(\) && own_q/if (own_q/'
+mutate "$d/real/browse_fields.c" "$d/ctl-tlfull/browse_fields.c"   's/                drag_is_widget\(w\) \|\| !b2_full_list\(w\)\)\n                return 0;\n            \*row/                drag_is_widget(w))\n                return 0;\n            *row/'
+mutate "$d/real/browse_fields.c" "$d/ctl-tlparent/browse_fields.c" 's/        par != g_b2_tl_sub\.label \|\| /        0 || /'
+mutate "$d/real/browse_fields.c" "$d/ctl-tlclamp/browse_fields.c"  's/            w\[i\] = ob\[0\] - x\[i\];/            (void) 0;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-look/browse_fields.c"     's/vt == g_b2_btn_vt && img_q\(vt \+ 4 \* 8, &fn\) && fn\)/vt == g_b2_btn_vt \&\& 0)/'
+mutate "$d/real/browse_fields.c" "$d/ctl-pause/browse_fields.c"    's/long ms = ev == 1 && g_b2_gest\.down \? g_b2_gest\.seq\.last : now_ms\(\);/long ms = now_ms();/'
+mutate "$d/real/browse_fields.c" "$d/ctl-still/browse_fields.c"    's/    b2_lis_click\(lis, \(void \*\) B2_BTN_NAME\);/    (void) lis;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-stack/browse_fields.c"    's/memcpy\(pb, g_b2_pop_orig, sizeof pb\); \/\* moved before/b2_bounds(pop, pb); \/* moved before/'
+mutate "$d/real/browse_fields.c" "$d/ctl-norestore/browse_fields.c" 's/ \/\* and its rows as EP147 made them \*\/\n        b2_pop_restore\(\);/ \/* and its rows as EP147 made them *\//'
+mutate "$d/real/browse_fields.c" "$d/ctl-popleft/browse_fields.c"  's/    if \(x \+ dx < left\)\n        dx = left - x;\n//'
+mutate "$d/real/browse_fields.c" "$d/ctl-poprow/browse_fields.c"   's/\(lb, g_b2_pop\.row, 1, 1\)/(lb, 0, 1, 1)/'
+mutate "$d/real/browse_fields.c" "$d/ctl-preview/browse_fields.c"  's/    if \(!row\) \{\n        g_o_b2_wave_mouse\[k\]\(self, e\);\n        return;\n    \}/    g_o_b2_wave_mouse[k](self, e);\n    if (!row)\n        return;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-evcomp/browse_fields.c"   's/    memcpy\(b \+ 0x28, &row, sizeof row\);\n//'
+mutate "$d/real/browse_fields.c" "$d/ctl-evcol/browse_fields.c"    's/cb\[0\] \+ cb\[2\] - b2_me_x\(e\) \+ 1/cb[0] - b2_me_x(e) + 1/'
+mutate "$d/real/browse_fields.c" "$d/ctl-ungated/browse_fields.c"  's/    if \(!g_b2_on \|\| !bc_ce_on\(\) \|\| id < 1/    if (!g_b2_on || id < 1/'
+mutate "$d/real/browse_fields.c" "$d/ctl-hidekeep/browse_fields.c" 's/    if \(have\) \{ \/\* the last label goes/    if (0) { \/* the last label goes/'
+mutate "$d/real/browse_fields.c" "$d/ctl-hideany/browse_fields.c"  's/want = g_b2_hide_ok && col && b2_col_bit\(col\) != 0;/want = g_b2_hide_ok \&\& col;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-hidepass/browse_fields.c" 's/        g_o_b2_pop_click\(model, -1\);/        g_o_b2_pop_click(model, row);/'
+mutate "$d/real/browse_fields.c" "$d/ctl-unhide/browse_fields.c"   's/    if \(b2_col_hidden\(col\)\) \/\* a field picked for a hidden column: shown again \*\/\n        bc_set_mask[^\n]*\n//'
+mutate "$d/real/browse_fields.c" "$d/ctl-hidestale/browse_fields.c" 's/ && own_str\(t, tok, sizeof tok\) && !strcmp\(tok, B2_HIDE_LABEL\);/;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-hideott/browse_fields.c"  's/    uintptr_t obj = c \+ \(uintptr_t\) off;/    uintptr_t obj = c;/'
+mutate "$d/real/browse_fields.c" "$d/ctl-hidelate/browse_fields.c" 's/        b2_hide_row\(pc, self->col\);\n//'
+mutate "$d/real/browse_fields.c" "$d/ctl-negx/browse_fields.c"     's/if \(!own_q\(\(uintptr_t\) e \+ 8, &q\) \|\| !b2_bounds/if (!own_q((uintptr_t) e + 8, \&q) || (int32_t) q < 0 || !b2_bounds/'
+for v in real $BF_C $BF_H; do
+    $CC "${CFLAGS[@]}" -pthread -I$T -Iguest/azmod -DBF_SRC="\"$d/$v/browse_fields.c\"" -DBCID_INC="\"$d/bcid.inc\"" \
+        -DBCOL_INC="\"$d/bcol.inc\"" -o "$d/$v/t" $T/bfields_test.c -ldl
+done
+suite "browse fields" "$d/real/t"
 
 # Hide Track Title: a press counts for a deck's bar only when JUCE's hit test gives it to that
 # deck's widget, not to a popup drawn over it
@@ -2725,17 +3159,37 @@ d="$OUT/cmbrowse"; mkdir -p "$d"
 cp guest/azmod/cm_browse.h "$d/real.h"
 mutate "$d/real.h" "$d/ctl-unknown.h"   's/    return CMB_OTHER;\n\}/    return 0;\n}/'
 mutate "$d/real.h" "$d/ctl-date.h"      's/return mo >= 1 && mo <= 12 && d >= 1 && d <= 31;/return 1;/'
-mutate "$d/real.h" "$d/ctl-anyword.h"   's/            return 0;\n        q \+= n;/            return 0;\n        if (n)\n            return 1;\n        q += n;/'
-mutate "$d/real.h" "$d/ctl-case.h"      's/cmb_lower\(\(unsigned char\) s\[i\]\) == cmb_lower\(\(unsigned char\) w\[i\]\)/s[i] == w[i]/'
 mutate "$d/real.h" "$d/ctl-unstable.h"  's/\(c == 0 && out\[j - 1\] < i\)/(c == 0 \&\& 0)/'
 mutate "$d/real.h" "$d/ctl-undated.h"   's/            return da \? -1 : 1;/            return da ? 1 : -1;/'
 mutate "$d/real.h" "$d/ctl-usable.h"    's/if \(!a->usable != !b->usable\)/if (0)/'
 mutate "$d/real.h" "$d/ctl-installed.h" 's/if \(sort == CMB_SORT_INSTALLED && !a->installed != !b->installed\)/if (0)/'
 mutate "$d/real.h" "$d/ctl-digits.h"    's/if \(cmb_digit\(\*a\) && cmb_digit\(\*b\)\) \{/if (0) {/'
-for v in real ctl-unknown ctl-date ctl-anyword ctl-case ctl-unstable ctl-undated ctl-usable ctl-installed ctl-digits; do
+mutate "$d/real.h" "$d/ctl-dl14.h"      's/if \(i >= 13 \|\| v\[i\] < /if (v[i] < /'
+mutate "$d/real.h" "$d/ctl-dlorder.h"   's/return a->downloads > b->downloads \? -1 : 1;/return a->downloads < b->downloads ? -1 : 1;/'
+mutate "$d/real.h" "$d/ctl-uncounted.h" 's/return a->counted \? -1 : 1;/return a->counted ? 1 : -1;/'
+mutate "$d/real.h" "$d/ctl-shelfmin.h"  's/#define CMB_SHELF_MIN 2 /#define CMB_SHELF_MIN 1 /'
+mutate "$d/real.h" "$d/ctl-topzero.h"   's/return m->counted && m->downloads > 0;/return m->counted;/'
+mutate "$d/real.h" "$d/ctl-comma.h"     's/if \(d && d % 3 == 0\)/if (0)/'
+mutate "$d/real.h" "$d/ctl-clock.h"     's/long age = now >= CMB_CLOCK_SET \?/long age = 1 ?/'
+for v in real ctl-unknown ctl-date ctl-unstable ctl-undated ctl-usable ctl-installed ctl-digits ctl-dl14 ctl-dlorder ctl-uncounted ctl-shelfmin ctl-topzero ctl-comma ctl-clock; do
     $CC "${CFLAGS[@]}" -I$T -DCMBROWSE_HDR="\"$d/$v.h\"" -o "$d/$v" $T/cmbrowse_test.c
 done
 suite "community browse" "$d/real"
+
+# Community Mods > Updates: Update all, one install after another (guest/azmod/cm_updall.h)
+d="$OUT/cmupd"; mkdir -p "$d"
+cp guest/azmod/cm_updall.h "$d/real.h"
+mutate "$d/real.h" "$d/ctl-nowait.h"  's/    if \(r->sent\) \{/    if (r->sent \&\& 0) {/'
+mutate "$d/real.h" "$d/ctl-nocat.h"   's/if \(in->cgen == r->cgen0 && ok\(/if (0 \&\& ok(/'
+mutate "$d/real.h" "$d/ctl-noerr.h"   's/        if \(!strcmp\(st, "error"\)\) return cmu_end\(r, CMU_FAILED\);\n//'
+mutate "$d/real.h" "$d/ctl-noskip.h"  's/    while \(r->pos < r->n && !ok\(r->ids\[r->pos\], user\)\) r->pos\+\+;\n//'
+mutate "$d/real.h" "$d/ctl-busy.h"    's/    if \(cmu_busy_state\(st\)\) return CMU_WAIT;/    if (0) return CMU_WAIT;/'
+mutate "$d/real.h" "$d/ctl-stale.h"   's/        if \(in->sgen == r->sgen0\) \/\*/        if (0) \/*/'
+mutate "$d/real.h" "$d/ctl-count.h"   's/\(r->pos < r->n \? r->pos : r->n - 1\) \+ 1, r->n\)/r->pos, r->n)/'
+for v in real ctl-nowait ctl-nocat ctl-noerr ctl-noskip ctl-busy ctl-stale ctl-count; do
+    $CC "${CFLAGS[@]}" -I$T -DCMUPD_HDR="\"$d/$v.h\"" -o "$d/$v" $T/cmupd_test.c
+done
+suite "community updates" "$d/real"
 
 # a scrolled list's motion: follow, fling, ends, catch, knob
 d="$OUT/glide"; mkdir -p "$d"
@@ -3122,10 +3576,48 @@ fz_revert pdbstr pdbsync pdb_sync.c 's/unsigned n = s\[0\] >> 1 \? \(s\[0\] >> 1
 fz_revert elfalign elfcheck elfcheck.inc 's/ && off % align == 0;/;/'
 fz_revert datelen cmbrowse cm_browse.h 's/    if \(v\[10\]\)\n        return 0;\n//'
 fz_revert jsonu stemname stemname.inc 's/                if \(strnlen\(s \+ 1, 4\) < 4\)[^\n]*\n                    return 0;\n//'
+# a planted bug the colfields corpus must catch: a duplicate column id accepted (browse_fields.h)
+fz_revert colfdup colfields browse_fields.h 's/ \|\| field\[id\] != B2_NONE\)/)/'
 fz_prepare cmjson "$FZ/ctl-strat/src" || exit 2
 mutate "$FZ/ctl-strat/src/cmjson.inc" "$FZ/ctl-strat/cmjson.mut" 's/if \(k < n - 1\) out\[k\+\+\] = c;/if (k < n) out[k++] = c;/'
 mv "$FZ/ctl-strat/cmjson.mut" "$FZ/ctl-strat/src/cmjson.inc"
 fz_compile cmjson "$FZ/ctl-strat/src" "$FZ/ctl-strat/replay" replay || exit 2
+# tools/fuzz/run.sh must fail closed: a harness that does not extract or build is a FAIL line and a
+# non-zero exit, in every mode, and the other harnesses are still reported. The scratch trees share
+# guest/ and the unit tests and carry their own copy of tools/fuzz with one thing broken.
+fz_closed_tree() { # <dir>
+    mkdir -p "$1/tools"
+    ln -s "$ROOT/guest" "$1/guest"
+    ln -s "$ROOT/tools/unit-tests" "$1/tools/unit-tests"
+    cp -R tools/fuzz "$1/tools/fuzz"
+}
+fz_closed_tree "$FZ/ctl-closed-build"
+echo 'this line is not C;' >> "$FZ/ctl-closed-build/tools/fuzz/png_fuzz.c"
+fz_closed_tree "$FZ/ctl-closed-extract"
+mutate "$FZ/ctl-closed-extract/tools/fuzz/lib.sh" "$FZ/ctl-closed-extract/lib.mut" 's/static int cmi_png_fit\(unsigned char/static int cmi_png_gone(unsigned char/'
+mv "$FZ/ctl-closed-extract/lib.mut" "$FZ/ctl-closed-extract/tools/fuzz/lib.sh"
+# fz_closed <tree> <FAIL prefix> <other harnesses that must still PASS> <run.sh args...>: exits
+# nonzero only when run.sh did the same AND named the broken harness; zero (a BROKEN TEST) otherwise
+fz_closed() {
+    local d=$1 want=$2 others=$3 rc=0 got; shift 3
+    ( cd "$d" && bash tools/fuzz/run.sh "$@" ) > "$d/run.out" 2>&1 || rc=$?
+    got=$(grep -c '^PASS' "$d/run.out" || true)
+    if [ "$rc" -ne 0 ] && grep -q "^FAIL  $want" "$d/run.out" && [ "$got" -eq "$others" ]; then
+        grep "^FAIL  $want" "$d/run.out" | head -2
+        return 1
+    fi
+    echo "run.sh $*: exit $rc, $got PASS lines (wanted $others), no FAIL line for the broken harness"
+    return 0
+}
+# the same round passes: an intact harness replays through run.sh with exit 0 and a PASS line
+fz_runsh_passes() { # <name>
+    local out
+    out=$(bash tools/fuzz/run.sh --replay "$1") || { echo "$out"; return 1; }
+    echo "$out"
+    grep -q "^PASS  fuzz replay $1: " <<< "$out"
+}
+suite "fuzz run.sh: replay png through the script passes" fz_runsh_passes png
+FZ_ALL_OTHERS=$(( $(wc -w <<< "$FZ_NAMES") - 1 ))
 FZ_LIB=0
 if fz_has_libfuzzer; then
     FZ_LIB=1
@@ -3144,7 +3636,7 @@ else
     echo "(fuzz: no libFuzzer with this host's compiler: the corpora were replayed, not fuzzed)"
 fi
 else
-    FZ="$OUT/fuzz" FZ_LIB=0
+    FZ="$OUT/fuzz" FZ_LIB=0 FZ_ALL_OTHERS=0
     echo "(fuzz: plain pass only; the harnesses carry their own clang-10 ASan + UBSan)"
 fi
 echo
@@ -3190,6 +3682,11 @@ control "clock_tz: a transition applies one second late"    "$OUT/clocktz/ctl-ed
 control "clock_tz: a DST footer rule read as no DST"       "$OUT/clocktz/ctl-rule/t" $T/fixtures/zoneinfo
 control "clock_tz: transition times not checked for order" "$OUT/clocktz/ctl-order/t" $T/fixtures/zoneinfo
 control "clock_tz: 12-hour noon and midnight shown as 0"   "$OUT/clocktz/ctl-12h/t" $T/fixtures/zoneinfo
+control "leadin jump: a target exactly at the floor refused"        "$OUT/leadin/ctl-edge"
+control "leadin jump: an unknown sample rate accepted"              "$OUT/leadin/ctl-rate"
+control "leadin jump: a target at the start taken as before it"     "$OUT/leadin/ctl-start"
+control "leadin jump: the floor computed in 32 bits"                "$OUT/leadin/ctl-ovf"
+control "leadin jump: the floor's milliseconds taken as 1024ths"    "$OUT/leadin/ctl-unit"
 control "clock set: a field carries instead of wrapping"   "$OUT/clockset/ctl-carry/t" $T/fixtures/zoneinfo
 control "clock set: 2000 taken as a common year"           "$OUT/clockset/ctl-leap/t" $T/fixtures/zoneinfo
 control "clock set: a skipped local time lands an hour early" "$OUT/clockset/ctl-gap/t" $T/fixtures/zoneinfo
@@ -3199,6 +3696,15 @@ control "clock native: the Clock drawn while EP147 records"      "$OUT/clocknati
 control "clock native: an unreadable icon taken as not recording" "$OUT/clocknative/ctl-unknown/t"
 control "clock native: the Clock drawn without a checked label"  "$OUT/clocknative/ctl-label/t"
 control "clock native: a rect at the screen's edge dropped"      "$OUT/clocknative/ctl-origin/t"
+control "browse edit: a duplicate column id in the width file accepted" "$OUT/bedit/ctl-dup/t"
+control "browse edit: a divider grabbed one pixel outside the zone"    "$OUT/bedit/ctl-zone/t"
+control "browse edit: the title column resized by a drag"              "$OUT/bedit/ctl-title/t"
+control "browse edit: a drag below the narrowest width"                "$OUT/bedit/ctl-minw/t"
+control "browse edit: saved widths never give way to the title"        "$OUT/bedit/ctl-giveway/t"
+control "browse edit: a tap outside edit mode toggles instead of sorting" "$OUT/bedit/ctl-tap/t"
+control "browse edit: a divider no touch can drag marked as a handle"   "$OUT/bedit/ctl-handles/t"
+control "browse edit: two resizable neighbors do not trade width"     "$OUT/bedit/ctl-partner/t"
+control "browse edit: a trade past the neighbor's narrowest width"   "$OUT/bedit/ctl-trademax/t"
 control "fd tracking: the old code (open-only tracking)"   "$FD_DIR/ctl-old"
 control "fd tracking: close does not forget"             "$FD_DIR/ctl-close"
 control "fd tracking: dup2 does not forget"              "$FD_DIR/ctl-dup2"
@@ -3235,7 +3741,26 @@ control "catalog: an installed id named from the other author's line" "$OUT/cmca
 control "catalog: field 20 (updated) never read"            "$OUT/cmcat/ctl-noupd"
 control "catalog: the trust note on every tab"              "$OUT/cmcat/ctl-noteall"
 control "catalog: the breadcrumb without the tab"           "$OUT/cmcat/ctl-notab"
+control "catalog: field 21 (downloads) never read"          "$OUT/cmcat/ctl-nodl"
+control "catalog: a tile with no count shows 0"             "$OUT/cmcat/ctl-dlzero"
+control "catalog: Browse opens on All mods"                 "$OUT/cmcat/ctl-nohome"
+control "catalog: See all keeps the old order"              "$OUT/cmcat/ctl-seeall"
+control "catalog: a shelf draws past the grid's edge"        "$OUT/cmcat/ctl-rowall"
+control "catalog: the knob on Home scrolls nothing"         "$OUT/cmcat/ctl-homeknob"
+control "catalog: the mod page's dot as UTF-8"              "$OUT/cmcat/ctl-dotutf8"
 control "installed mod page: \"on\" read as \"loaded\" (a refused mod offered Enable)" "$OUT/cmmod/ctl-loaded"
+control "not loaded: Reload resets the page to the question Load next time answered" "$OUT/cmnotloaded/ctl-reset"
+control "not loaded: the notice on the Browse tab too"              "$OUT/cmnotloaded/ctl-alltabs"
+control "not loaded: no Reload in the header after Load next time"  "$OUT/cmnotloaded/ctl-nobutton"
+control "not loaded: the notice shrinks and the rows move"          "$OUT/cmnotloaded/ctl-resize"
+control "not loaded: a row says Held back"                          "$OUT/cmnotloaded/ctl-oldrow"
+control "not loaded: a line in the left-pane card"                  "$OUT/cmnotloaded/ctl-leftline"
+control "not loaded: a crash reason shown as restarts"              "$OUT/cmnotloaded/ctl-crash"
+control "not loaded: Keep off takes the notice away and the rows move" "$OUT/cmnotloaded/ctl-keepoff"
+control "not loaded: Reload over 400 ms is taken back" "$OUT/cmnotloaded/ctl-reload400"
+control "not loaded: Reload after Load next time sends nothing"     "$OUT/cmnotloaded/ctl-noreq"
+control "card: the master switch sends a reload by itself"         "$OUT/cmnotloaded/ctl-togglereload"
+control "card: a pressed Reload does not wait"                      "$OUT/cmnotloaded/ctl-nowait"
 control "screen row: the row keeps its old behavior (no page)" "$OUT/screenrow/ctl-flash"
 control "screen row: the row's own screen is ignored"          "$OUT/screenrow/ctl-ownscr"
 control "screen row: the preview band stays empty"             "$OUT/screenrow/ctl-band"
@@ -3244,9 +3769,25 @@ control "menu scroll: the old scale-down (the compact list's budget counts the m
 control "menu scroll: the compact list's last row ends under the version footer" "$OUT/menuscroll/ctl-footer"
 control "menu scroll: the knob does not scroll (the selection goes off-screen)" "$OUT/menuscroll/ctl-offscreen"
 control "menu scroll: a drag still fires the control under it" "$OUT/menuscroll/ctl-dragtoggle"
+control "menu scroll: a lift never flings" "$OUT/menuscroll/ctl-nofling"
+control "menu scroll: a finger on a flinging list fires the control under it" "$OUT/menuscroll/ctl-nocatch"
+control "menu scroll: another pane keeps the right pane's offset and glide" "$OUT/menuscroll/ctl-noput"
+control "menu Reload: a press over 400 ms is taken back" "$OUT/menuscroll/ctl-reload400"
+control "menu Reload: a press held a full second still restarts" "$OUT/menuscroll/ctl-reloadkeep"
+control "icon cache: the ground color left out of the key" "$OUT/iconcache/ctl-noground"
+control "icon cache: the theme left out of the key" "$OUT/iconcache/ctl-notheme"
+control "icon cache: an icon over a pattern is kept" "$OUT/iconcache/ctl-anyground"
+control "icon cache: the cache never answers" "$OUT/iconcache/ctl-nohit"
+control "icon cache: an icon draws past its box" "$OUT/iconcache/ctl-spill"
+control "overlay put clipping: a part cut on the left drawn at the window's edge" "$OUT/ovclip/ctl-nodx"
+control "overlay put clipping: no cut at the right edge" "$OUT/ovclip/ctl-noright"
 control "community touch: the home page keeps knob focus and fires on the press" "$OUT/cmtouch/ctl-knobfocus"
 control "community touch: a drag does not scroll the page"   "$OUT/cmtouch/ctl-noscroll"
 control "community touch: no scroll bar"                     "$OUT/cmtouch/ctl-nobar"
+control "community orderly stop: every SIGTERM clears the count" "$OUT/cmorderly/ctl-always"
+control "community orderly stop: the signal is not raised again" "$OUT/cmorderly/ctl-noraise"
+control "community orderly stop: the first count seen is a heartbeat" "$OUT/cmorderly/ctl-firstseen"
+control "community orderly stop: the default disposition, not the one before" "$OUT/cmorderly/ctl-norestore"
 control "community touch: a drag eases behind the finger"   "$OUT/cmtouch/ctl-lag"
 control "clock zone list: the row does not open the list"    "$OUT/clocktzlist/ctl-cycle"
 control "clock zone list: the knob lands on headings"        "$OUT/clocktzlist/ctl-noskip"
@@ -3258,8 +3799,10 @@ control "clock zone list: Set Time hands nothing over"       "$OUT/clocktzlist/c
 control "clock zone list: the time picker never edits"       "$OUT/clocktzlist/ctl-noedit"
 control "community touch: a press on the header hits a control scrolled under it" "$OUT/cmtouch/ctl-header"
 control "community touch: the knob scrolls past the ends"    "$OUT/cmtouch/ctl-noclamp"
-control "community touch: a slow press on an order button picks it" "$OUT/cmtouch/ctl-slow"
+control "community touch: a slow press on a view button switches it" "$OUT/cmtouch/ctl-slow"
+control "community touch: a tap on a rail tab's top edge picks the tab above" "$OUT/cmtouch/ctl-railedge"
 control "community touch: a set offset leaves the glide stuck"      "$OUT/cmtouch/ctl-staleglide"
+control "community touch: the full screen draws the left list under it" "$OUT/cmtouch/ctl-drawleft"
 control "stem_folder_rank: any 8-char suffix accepted"     "$OUT/stemrank/ctl-anyhex"
 control "stem_folder_rank: prefix match accepted"          "$OUT/stemrank/ctl-prefix"
 control "stem_folder_rank: case-sensitive"                 "$OUT/stemrank/ctl-case"
@@ -3339,6 +3882,8 @@ control "beat jump jog: any pointer taken as the staging area"  "$OUT/bjjog/ctl-
 control "beat jump jog: every layout variant swapped"           "$OUT/bjjog/ctl-novariant"
 control "deck identity: tiles claimed in order of arrival"        "$OUT/deckid/ctl-arrival"
 control "deck identity: an unknown container is deck 0"            "$OUT/deckid/ctl-default"
+control "deck screen evidence: every getter caller counts"       "$OUT/deckscreen/ctl-anycaller"
+control "deck screen evidence: the pad title's calls ignored"     "$OUT/deckscreen/ctl-notitle"
 control "wave identity: an unknown provider bound by its point count" "$OUT/wavezoom/ctl-guess"
 control "wave identity: an unknown deck taken as deck 0"           "$OUT/wavezoom/ctl-deck0"
 control "wave identity: one zoom model per color mode for all decks" "$OUT/wavezoom/ctl-onekey"
@@ -3350,6 +3895,8 @@ control "wave att: the coarse 1/64 gain step"                     "$OUT/waveatt/
 control "wave att: overview tiles refreshed on every gain rebuild" "$OUT/waveatt/ctl-ovevery/t"
 control "wave att: one deck's change refreshes every deck's tiles" "$OUT/waveatt/ctl-ovall/t"
 control "wave att: the envelope retry publishes a curve each tick" "$OUT/waveatt/ctl-retry/t"
+control "wave att: the decode's progress rebuilds on every tick" "$OUT/waveatt/ctl-progress/t"
+control "wave att: the frame count in the key" "$OUT/waveatt/ctl-framekey/t"
 control "folder copy: \"..\" accepted as a name"                 "$OUT/foldercopy/ctl-dotdot/t"
 control "folder copy: AppleDouble ._ files copied"                "$OUT/foldercopy/ctl-junk/t"
 control "folder copy: a file of another size overwritten"         "$OUT/foldercopy/ctl-overwrite/t"
@@ -3383,8 +3930,28 @@ control "pdb_stock: unresolved mount still synced"       "$OUT/pdbstock/ctl-nomo
 control "pdb_stock: media 0 noted"                       "$OUT/pdbstock/ctl-media0"
 control "envelope cache: saved in place" "$OUT/envcache/ctl-inplace" "$OUT/envcache/scratch-ctl-inplace"
 control "envelope cache: any frame count taken" "$OUT/envcache/ctl-anyframes" "$OUT/envcache/scratch-ctl-anyframes"
+control "stem offset cache: another source size taken" "$OUT/ofscache/ctl-nosize" "$OUT/ofscache/scratch-ctl-nosize"
+control "stem offset cache: another stem set taken" "$OUT/ofscache/ctl-nokey" "$OUT/ofscache/scratch-ctl-nokey"
+control "stem offset cache: a lag past the window taken" "$OUT/ofscache/ctl-anylag" "$OUT/ofscache/scratch-ctl-anylag"
+control "stem offset cache: text after the line taken" "$OUT/ofscache/ctl-trailing" "$OUT/ofscache/scratch-ctl-trailing"
+control "stem offset cache: saved in place" "$OUT/ofscache/ctl-inplace" "$OUT/ofscache/scratch-ctl-inplace"
 control "remote stems request: a title's line break adds a key line" "$OUT/rsreq/ctl-title" "$OUT/rsreq/scratch-ctl-title"
 control "remote stems request: a split or cut path queued" "$OUT/rsreq/ctl-path" "$OUT/rsreq/scratch-ctl-path"
+control "remote stems scan: any file in the queue counted as a request" "$OUT/rsscan/ctl-anyfile" "$OUT/rsscan/scratch-ctl-anyfile"
+control "remote stems scan: taking the answer does not clear it" "$OUT/rsscan/ctl-noclear" "$OUT/rsscan/scratch-ctl-noclear"
+control "remote stems scan: the loop scans while the feature is off" "$OUT/rsscan/ctl-ignoreon" "$OUT/rsscan/scratch-ctl-ignoreon"
+control "remote stems scan: the loop never scans" "$OUT/rsscan/ctl-noscan" "$OUT/rsscan/scratch-ctl-noscan"
+control "remote stems scan: run from the stem-marks worker" rsscan_home "$OUT/rsscan/ctl-guest"
+if [ "$RSS_TSAN" = 1 ]; then
+control "remote stems scan: a plain flag between the threads (TSan race)" env TSAN_OPTIONS=halt_on_error=1 "$OUT/rsscan/tsan-ctl-plain" "$OUT/rsscan/scratch-ctl-plain"
+fi
+control "touch guard: a failed read passed through" "$OUT/touchguard/ctl-noguard"
+control "touch guard: every descriptor's failed read rewritten" "$OUT/touchguard/ctl-everyfd"
+control "touch guard: a closed descriptor stays tracked" "$OUT/touchguard/ctl-noforget"
+control "touch guard: a longer path counted as the reader" "$OUT/touchguard/ctl-prefix"
+if [ "$TG_TSAN" = 1 ]; then
+control "touch guard: a plain table between the threads (TSan race)" env TSAN_OPTIONS=halt_on_error=1 "$OUT/touchguard/tsan-ctl-plain"
+fi
 control "save logs request: written in place" "$OUT/savelogs/ctl-inplace" "$OUT/savelogs/scratch-ctl-inplace"
 control "save logs request: an earlier press's result taken as this one's" "$OUT/savelogs/ctl-anyid" "$OUT/savelogs/scratch-ctl-anyid"
 control "save logs request: no wait limit" "$OUT/savelogs/ctl-nowait" "$OUT/savelogs/scratch-ctl-nowait"
@@ -3570,6 +4137,9 @@ control "streaming key: an id past the table is asked for in Camelot" "$OUT/skey
 control "streaming key: the string is not written in the caller's place" "$OUT/skey/ctl-x8"
 control "streaming key: installed with the kill switch"           "$OUT/skey/ctl-nokill"
 control "streaming key: Camelot with the row off"                 "$OUT/skey/ctl-norow"
+control "camelot text: an out-of-table pitch class gives 1"  "$OUT/camelot/ctl-default"
+control "camelot text: major and minor letters swapped"     "$OUT/camelot/ctl-suffix"
+control "camelot text: the table indexed by the pitch class" "$OUT/camelot/ctl-index"
 control "streaming key: no self-test after the row changes"       "$OUT/skey/ctl-retest"
 control "hot cues: the PCOB lists win over the colored PCO2 list"  "$OUT/hcanlz/ctl-nopco2"
 control "hot cues: a section longer than the file is read"        "$OUT/hcanlz/ctl-seclen"
@@ -3589,22 +4159,97 @@ control "spin back: a misaligned core is used"                    "$OUT/spinback
 control "beat loop flip: a deck without stems flips azmod's page" "$OUT/blflip/ctl-anydeck"
 control "beat loop flip: the side's deck index read for the logical deck" "$OUT/blflip/ctl-sidedeck"
 control "beat loop flip: flips whatever EP147's mode"                 "$OUT/blflip/ctl-anymode"
-control "browse remember: the sub column taken as restored before an ask" "$OUT/brem/ctl-early"
-control "browse remember: PREVIEW saved from any object"                  "$OUT/brem/ctl-pvany"
-control "browse remember: a compact pane asks for the sub column"         "$OUT/brem/ctl-compact"
-control "browse remember: the sub column kill switch ignored"             "$OUT/brem/ctl-scoff"
+control "browse columns: a compact pane's columns changed too"           "$OUT/bcols/ctl-compact"
+control "browse columns: every column set at each layout, defaults too"   "$OUT/bcols/ctl-all"
+control "browse columns: only columns off EP147's TRACK default applied" "$OUT/bcols/ctl-unset"
+control "browse columns: the columns applied with Column Edit off"       "$OUT/bcols/ctl-ungated"
+control "browse columns: Column Edit off keeps the DJ's columns"         "$OUT/bcols/ctl-noback"
+control "browse columns: our own column changes taken as EP147's"        "$OUT/bcols/ctl-recself"
+control "browse columns: a destroyed header's record kept"               "$OUT/bcols/ctl-gone"
+control "browse columns: the sub column taken as restored before an ask"  "$OUT/bcols/ctl-early"
+control "browse columns: PREVIEW saved from any object"                   "$OUT/bcols/ctl-pvany"
+control "browse columns: every sort row offered, Column Edit off too"  "$OUT/bcols/ctl-afon"
+control "browse columns: an offered hidden row keeps EP147's order"    "$OUT/bcols/ctl-afseq"
+control "browse columns: BPM is column 6 on every build"                  "$OUT/bcols/ctl-ids"
+control "browse columns: the stem marks' column is the leftmost visible"  "$OUT/bcols/ctl-smasc"
+control "browse fields: an id given twice in the saved file accepted"   "$OUT/bfields/ctl-dup/t"
+control "browse fields: an overlong UTF-8 form kept as valid"           "$OUT/bfields/ctl-overlong/t"
+control "browse fields: Track set as a column's field"                  "$OUT/bfields/ctl-track/t"
+control "browse fields: a stale pick taken for a column"                "$OUT/bfields/ctl-stale/t"
+control "browse fields: EP147's own button leaves the column's ask"     "$OUT/bfields/ctl-ownclick/t"
+control "browse fields: the row's sub item not restored after a paint"  "$OUT/bfields/ctl-restore/t"
+control "browse fields: a compact list drawn with a field"              "$OUT/bfields/ctl-compact/t"
+control "browse fields: column 1 records the selected row"              "$OUT/bfields/ctl-sel1/t"
+control "browse fields: a saved id that cannot show a field loaded"     "$OUT/bfields/ctl-load/t"
+control "browse fields: Preview's own paint replaced with no field"     "$OUT/bfields/ctl-wave/t"
+control "browse fields: two sticks that disagree read as known"         "$OUT/bfields/ctl-disagree/t"
+control "browse fields: a field button over a divider's zone"           "$OUT/bfields/ctl-inset/t"
+control "browse fields: a narrow column gets no button"                 "$OUT/bfields/ctl-narrow/t"
+control "browse fields: a button covers its right neighbour"            "$OUT/bfields/ctl-cover/t"
+control "browse fields: a button past the header's left edge"           "$OUT/bfields/ctl-left0/t"
+control "browse fields: a press on EP147's own button taken"            "$OUT/bfields/ctl-ownfwd/t"
+control "browse fields: a moved touch on a button opens its list"       "$OUT/bfields/ctl-tapmove/t"
+control "browse fields: a divider's drag ending on a button opens it"   "$OUT/bfields/ctl-dragtap/t"
+control "browse fields: a drag after a pause read as a new touch"       "$OUT/bfields/ctl-pause/t"
+control "browse fields: EP147's own button taken outside edit mode"     "$OUT/bfields/ctl-owngate/t"
+control "browse fields: a compact list's title drawn with a field"      "$OUT/bfields/ctl-tlfull/t"
+control "browse fields: another label's text drawn as the field"        "$OUT/bfields/ctl-tlparent/t"
+control "browse fields: the title's button over EP147's own"            "$OUT/bfields/ctl-tlclamp/t"
+control "browse fields: a button left looking pressed after a lift"     "$OUT/bfields/ctl-look/t"
+control "browse fields: a still release does not open the list"         "$OUT/bfields/ctl-still/t"
+control "browse fields: a second list move stacks on the first"         "$OUT/bfields/ctl-stack/t"
+control "browse fields: EP147's own click leaves the list moved"        "$OUT/bfields/ctl-norestore/t"
+control "browse fields: the list moved past the header's left edge"     "$OUT/bfields/ctl-popleft/t"
+control "browse fields: a drag off a button's left edge dropped"       "$OUT/bfields/ctl-negx/t"
+control "browse fields: the moved list selects the wrong row"           "$OUT/bfields/ctl-poprow/t"
+control "browse fields: the preview still plays with a field"           "$OUT/bfields/ctl-preview/t"
+control "browse fields: the event keeps the waveform as its component"  "$OUT/bfields/ctl-evcomp/t"
+control "browse fields: the tap lands on Preview's own column"          "$OUT/bfields/ctl-evcol/t"
+control "browse fields: fields shown with Column Edit off"              "$OUT/bfields/ctl-ungated/t"
+control "browse fields: Hide Column left in EP147's own list"           "$OUT/bfields/ctl-hidekeep/t"
+control "browse fields: Hide Column offered on Preview and the title"  "$OUT/bfields/ctl-hideany/t"
+control "browse fields: the Hide Column row's index passed to EP147"   "$OUT/bfields/ctl-hidepass/t"
+control "browse fields: a field picked for a hidden column, still hidden" "$OUT/bfields/ctl-unhide/t"
+control "browse fields: a row EP147 rebuilt taken as Hide Column"       "$OUT/bfields/ctl-hidestale/t"
+control "browse fields: the popup's component taken as the popup object" "$OUT/bfields/ctl-hideott/t"
+control "browse fields: Hide Column added only after EP147 shows the list" "$OUT/bfields/ctl-hidelate/t"
 control "hide title: a press on a popup over the bar counts"    "$OUT/htcover/ctl-any"
 control "hide title: a press on the title's label does not count" "$OUT/htcover/ctl-direct"
 control "hide title: a press on one bar counts for every deck"  "$OUT/htcover/ctl-every"
 control "community browse: an unknown category taken as Visual"    "$OUT/cmbrowse/ctl-unknown"
 control "community browse: any digits taken as a date"             "$OUT/cmbrowse/ctl-date"
-control "community browse: one word of the search is enough"       "$OUT/cmbrowse/ctl-anyword"
-control "community browse: the search minds case"                  "$OUT/cmbrowse/ctl-case"
 control "community browse: ties not kept in catalog order"         "$OUT/cmbrowse/ctl-unstable"
 control "community browse: undated mods first"                     "$OUT/cmbrowse/ctl-undated"
 control "community browse: mods that cannot install here mixed in" "$OUT/cmbrowse/ctl-usable"
 control "community browse: Installed ignores installs"             "$OUT/cmbrowse/ctl-installed"
 control "community browse: numbers in names compared as text"      "$OUT/cmbrowse/ctl-digits"
+control "community browse: a count of 14 digits taken"             "$OUT/cmbrowse/ctl-dl14"
+control "community browse: Downloads puts the fewest first"       "$OUT/cmbrowse/ctl-dlorder"
+control "community browse: mods with no count before counted ones" "$OUT/cmbrowse/ctl-uncounted"
+control "community browse: a shelf of one mod shown"              "$OUT/cmbrowse/ctl-shelfmin"
+control "community browse: 0 downloads on Most downloaded"        "$OUT/cmbrowse/ctl-topzero"
+control "community browse: a count with no commas"                "$OUT/cmbrowse/ctl-comma"
+control "community updates: the next install sent before the last is done" "$OUT/cmupd/ctl-nowait"
+control "community updates: the next sent before the catalog is read again" "$OUT/cmupd/ctl-nocat"
+control "community updates: an error does not stop the run"          "$OUT/cmupd/ctl-noerr"
+control "community updates: a mod that stopped qualifying is sent"   "$OUT/cmupd/ctl-noskip"
+control "community updates: an install sent while the fetcher is busy" "$OUT/cmupd/ctl-busy"
+control "community updates: a done from before the send taken for it" "$OUT/cmupd/ctl-stale"
+control "community updates: the button counts from 0"                "$OUT/cmupd/ctl-count"
+control "updates tab: a mod removed this start listed"            "$OUT/cmupdtab/ctl-removed"
+control "updates tab: the rail's tab without its count"          "$OUT/cmupdtab/ctl-railcount"
+control "updates tab: other requests sent while Update all runs" "$OUT/cmupdtab/ctl-noblock"
+control "updates tab: a reload leaves the run going"             "$OUT/cmupdtab/ctl-noreload"
+control "updates tab: the run moves only with the menu drawn"    "$OUT/cmupdtab/ctl-nobg"
+control "updates tab: the Reload note between two installs"     "$OUT/cmupdtab/ctl-reloadmid"
+control "installed rows: a touch on the checkbox opens the page"   "$OUT/cmupdtab/ctl-chkopens"
+control "installed rows: the knob's press toggles the checkbox"   "$OUT/cmupdtab/ctl-knobchk"
+control "updates tab: the header's count drawn under its band"  "$OUT/cmupdtab/ctl-countunder"
+control "installed split: a row opens the full page"            "$OUT/cmupdtab/ctl-splitopens"
+control "installed rows: a second toggle sent while the first is unanswered" "$OUT/cmupdtab/ctl-noflight"
+control "community: every opening refreshes"                        "$OUT/cmupdtab/ctl-autoeach"
+control "community: a failed refresh is not retried on the next opening" "$OUT/cmupdtab/ctl-autonoretry"
+control "community browse: a clock that is not set counts days"   "$OUT/cmbrowse/ctl-clock"
 control "input memory: a name inside a longer name is matched" "$OUT/inputmem/ctl-boundary"
 control "input memory: a string entry read as an integer"     "$OUT/inputmem/ctl-type"
 control "input memory: applied before EP147's own apply"      "$OUT/inputmem/ctl-settle"
@@ -3687,6 +4332,12 @@ control "fuzz replay: ps_str trusts a short string's length (pdb_sync.c)" "$FZ/r
 control "fuzz replay: cm_elf_check reads misaligned section headers (community.c)" "$FZ/rev-elfalign/replay" tools/fuzz/corpus/elfcheck
 control "fuzz replay: cmb_date_ok takes a date with more after it (cm_browse.h)" "$FZ/rev-datelen/replay" tools/fuzz/corpus/cmbrowse
 control "fuzz replay: json_str copies a \\u escape past the end (stem_playback.c)" "$FZ/rev-jsonu/replay" tools/fuzz/corpus/stemname
+control "fuzz replay: b2_fields_parse takes a column id twice (browse_fields.h)" "$FZ/rev-colfdup/replay" tools/fuzz/corpus/colfields
+control "fuzz run.sh: a harness that does not build, --replay one" fz_closed "$FZ/ctl-closed-build" "fuzz replay png: build failed" 0 --replay png
+control "fuzz run.sh: a harness that does not build, --replay all still reports the rest" fz_closed "$FZ/ctl-closed-build" "fuzz replay png: build failed" "$FZ_ALL_OTHERS" --replay all
+control "fuzz run.sh: a harness whose source cannot be extracted, --replay one" fz_closed "$FZ/ctl-closed-extract" "fuzz replay png: could not prepare" 0 --replay png
+control "fuzz run.sh: a harness whose source cannot be extracted, --replay all" fz_closed "$FZ/ctl-closed-extract" "fuzz replay png: could not prepare" "$FZ_ALL_OTHERS" --replay all
+[ "$FZ_LIB" = 0 ] || control "fuzz run.sh: a harness that does not build, fuzz mode" fz_closed "$FZ/ctl-closed-build" "fuzz png: build failed" 0 png 1
 [ "$FZ_LIB" = 0 ] || control "fuzz: the planted off-by-one found from a harmless seed (120 s cap)" fz_planted_found
 echo
 

@@ -49,6 +49,9 @@ void     azcm_draw_init(az_draw *d, const azmod_fb *fb, az_rect area);
  * On NULL, *pending says what to draw: 1 = a decode is queued, draw nothing yet; 0 = draw the
  * placeholder (community_icons.c; decoded on EP147's message thread) */
 const uint32_t *azcm_icon(const char *path, int sz, int *pending);
+/* a mod's screenshot scaled to fit bw x bh with its aspect kept: its size in *ow x *oh; NULL and
+ * *pending as azcm_icon */
+const uint32_t *azcm_shot(const char *path, int bw, int bh, int *ow, int *oh, int *pending);
 /* how many Community icons have finished (decoded or refused): a change means redraw */
 unsigned azcm_icons_done(void);
 /* 1 = a mod needing min_core ("" = none) runs on this core (AZ_CORE_VERSION, community.c) */

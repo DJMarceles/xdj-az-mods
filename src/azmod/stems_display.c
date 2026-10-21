@@ -660,6 +660,14 @@ static void wavector_hook(long self, long *ctx, unsigned deck) {
  * EP147's native stems case: stems tiles and stems title, no glyph work. Every
  * other caller, including wave_is_beatloop, sees the real mode. */
 static int (*g_orig_modeget)(long);
+/* Is this getter call the deck screen asking? Only its own widgets are: the pad-mode
+ * dispatcher (WAVE_SWITCH) and the pad title (TITLE_UPDATE). azmod's own reads
+ * (wave_is_beatloop from waveswitch_hook) also run while EP147 builds its views at
+ * startup, before any screen is shown, so they say nothing about what is on screen. */
+static int modeget_from_deck_screen(uintptr_t lr) {
+    return (lr >= WAVE_SWITCH && lr < WAVE_SWITCH + 0x230) ||
+           (lr >= TITLE_UPDATE && lr < TITLE_UPDATE_END);
+}
 static int modeget_hook(long p) {
     /* Read the caller's return address before making any call: on aarch64
      * every `bl` overwrites x30, so reading it later would yield an address
@@ -679,7 +687,9 @@ static int modeget_hook(long p) {
             __atomic_store_n(&g_tm_seq[dk], seq, __ATOMIC_RELEASE);
         }
     }
-    wave_mark(); /* the pad-mode dispatcher only runs on the deck screen */
+    int from_deck_screen = modeget_from_deck_screen(caller_lr);
+    if (from_deck_screen)
+        wave_mark(); /* the deck screen's widgets read the mode only while it is up */
     /* Hijack only when the real mode is the stems Beat Loop page; otherwise HOT
      * CUE, GATE CUE and the rest would render the stems tile set too. */
     if (__atomic_load_n(&g_force_truemode, __ATOMIC_ACQUIRE))
@@ -692,8 +702,7 @@ static int modeget_hook(long p) {
         int deck = deck_for_modeobj(p);
         if (deck >= 0 && g_state.stems_available[deck] &&
             !bl_on_native_vpage(deck)) { /* unknown => native, see waveswitch_hook */
-            if ((caller_lr >= WAVE_SWITCH && caller_lr < WAVE_SWITCH + 0x230) ||
-                (caller_lr >= TITLE_UPDATE && caller_lr < TITLE_UPDATE_END))
+            if (from_deck_screen)
                 return 0x0b; /* stems-basic enum: native case in the dispatcher */
         }
     }

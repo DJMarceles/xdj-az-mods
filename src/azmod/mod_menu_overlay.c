@@ -273,9 +273,9 @@ static int detect_source(Display *dpy, Window root) {
     return title_match(dpy, root, SRCREF);
 }
 /* "Is the deck (WAVEFORM) screen up?", answered by EP147 itself rather than a screen scrape.
- * WaveformView::paint and the pad-mode dispatcher only run while that view is up, so the hooks
- * timestamp them (wave_mark) and "seen recently" means visible. The stem strip shows only on
- * this screen. */
+ * WaveformView::paint and the deck screen's own pad-mode reads (modeget_from_deck_screen) only
+ * run while that view is up, so the hooks timestamp them (wave_mark) and "seen recently" means
+ * visible. The stem strip shows only on this screen. */
 static _Atomic long g_wave_seen_ms = 0; /* last WaveformView::paint / mode dispatch */
 static int g_wave_hooked = 0;
 static _Atomic int g_wave_vis = -1; /* its JUCE visibility: -1 unknown, 0/1 from setVisible */
@@ -594,6 +594,7 @@ static void bus_cfg_publish(void) {
  * may call into EP147 or wait: what needs a running EP147 (the hide-title juce::String, X, the
  * USB asset mods) stays on the overlay thread. The table of what each install did is written to
  * AZM_HOOKTABLE_PATH by the overlay thread. */
+static void install_browse_fields(void); /* browse_fields.c */
 static void install_static_hooks(void) {
     /* First: cached component pointers (wref) are cleared by this hook, so it must be in place
      * before EP147 builds the first component. Without it no component may be cached. */
@@ -621,6 +622,7 @@ static void install_static_hooks(void) {
             fclose(pf);
         }
     }
+    install_browse_fields(); /* Column Edit: fields on the columns; needs the above */
     install_hidetitle();     /* Hide Track Title (mod 35): inert while the mod is off */
     install_phasemeter();    /* Phase Meter (mod 36): data hooks; drawing is gated on the mod */
     if (daymode_wanted()) {
@@ -655,6 +657,9 @@ struct overlay_ctx {
     uint8_t *buf; /* the full-screen software framebuffer behind g_fb */
     struct touch_seq touch; /* every button event on our windows, in order (overlay thread) */
     XImage *img;  /* wraps buf for XPutImage */
+    XImage *shimg;          /* wraps buf when buf is a shared segment (ov_shm_create), else NULL */
+    XShmSegmentInfo shm;
+    int shm_busy;           /* a shared put may still be unread by the server (ov_shm_wait) */
 
     struct ov_window menu;     /* the Mod Menu, docked panel and stem strip (deck 1) */
     int menu_shaped;           /* the menu's fade-to-clear X-Shape mask is applied */
@@ -687,6 +692,111 @@ static void sdk_overlay_place(struct overlay_ctx *c, int layer);
 static void sdk_overlay_place_xwin(struct overlay_ctx *c);
 static void sdk_overlay_present(struct overlay_ctx *c, int all);
 static int sdk_any_redraw(void);
+
+#include "ov_clip.h" /* a window's part of the buffer, clipped as XPutImage clips */
+/* ---- frames through a shared segment (MIT-SHM) ----------------------------------------------
+ * A plain XPutImage copies the frame through the X socket: ~33 ms for the full-screen menu on the
+ * deck, half of a frame. EP147 sends its own frames through shared memory, and so does the
+ * overlay when the server offers it: the composite buffer IS the segment, and a put is ~3.6 ms
+ * (both measured on the deck, put + XSync). The server reads the segment when it handles the
+ * request, so nothing may draw into the buffer while a put is unread: ov_shm_wait before every
+ * write that follows one. Without the extension, or when the attach fails, the plain path: the
+ * same pixels. */
+static int (*g_ov_prev_xerr)(Display *, XErrorEvent *);
+static Display *g_ov_shm_dpy;           /* the attach in flight: its display and request serial */
+static unsigned long g_ov_shm_serial;
+static int g_ov_shm_err;
+static Display *g_ov_dpy;  /* the overlay's display, once its segment is attached */
+static int g_ov_shm_major; /* MIT-SHM's request code on it */
+static int g_ov_shm_broken; /* the server refused a shared put: the plain path from now on */
+/* X calls report errors here from any thread of the process (EP147's own included). Ours: the
+ * attach's error, and any refused shared request on the overlay's display, which turns the
+ * shared path off instead of ending EP147 (Xlib's default handler exits). Every other error
+ * goes to the handler that was installed before. */
+static int ov_shm_xerr(Display *d, XErrorEvent *e) {
+    if (d == __atomic_load_n(&g_ov_shm_dpy, __ATOMIC_ACQUIRE) &&
+        e->serial == __atomic_load_n(&g_ov_shm_serial, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g_ov_shm_err, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    int major = __atomic_load_n(&g_ov_shm_major, __ATOMIC_RELAXED);
+    if (d == __atomic_load_n(&g_ov_dpy, __ATOMIC_ACQUIRE) && major && e->request_code == major) {
+        __atomic_store_n(&g_ov_shm_broken, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    return g_ov_prev_xerr ? g_ov_prev_xerr(d, e) : 0;
+}
+static uint8_t *ov_shm_create(struct overlay_ctx *c) {
+    if (!XShmQueryExtension(c->dpy))
+        return NULL;
+    XImage *im = XShmCreateImage(c->dpy, DefaultVisual(c->dpy, c->scr), DefaultDepth(c->dpy, c->scr), ZPixmap,
+                                 NULL, &c->shm, (unsigned) c->scr_w, (unsigned) c->scr_h);
+    if (!im)
+        return NULL;
+    if (im->bits_per_pixel != 32 || im->bytes_per_line != c->scr_w * 4) { /* not g_fb's layout */
+        XDestroyImage(im);
+        return NULL;
+    }
+    c->shm.shmid = shmget(IPC_PRIVATE, (size_t) c->scr_w * c->scr_h * 4, IPC_CREAT | 0600);
+    if (c->shm.shmid < 0) {
+        XDestroyImage(im);
+        return NULL;
+    }
+    c->shm.shmaddr = shmat(c->shm.shmid, NULL, 0);
+    c->shm.readOnly = True;
+    int ok = c->shm.shmaddr != (char *) -1;
+    if (ok) {
+        XSync(c->dpy, False); /* every earlier request's errors are someone else's */
+        static int installed;
+        if (!installed) {
+            g_ov_prev_xerr = XSetErrorHandler(ov_shm_xerr);
+            installed = 1;
+        }
+        __atomic_store_n(&g_ov_shm_err, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_ov_shm_serial, NextRequest(c->dpy), __ATOMIC_RELAXED);
+        __atomic_store_n(&g_ov_shm_dpy, c->dpy, __ATOMIC_RELEASE);
+        ok = XShmAttach(c->dpy, &c->shm) && (XSync(c->dpy, False), !__atomic_load_n(&g_ov_shm_err, __ATOMIC_RELAXED));
+        __atomic_store_n(&g_ov_shm_dpy, NULL, __ATOMIC_RELEASE);
+    }
+    shmctl(c->shm.shmid, IPC_RMID, NULL); /* freed with the last attach (ours and the server's) */
+    if (!ok) {
+        if (c->shm.shmaddr != (char *) -1)
+            shmdt(c->shm.shmaddr);
+        XDestroyImage(im);
+        return NULL;
+    }
+    im->data = c->shm.shmaddr;
+    c->shimg = im;
+    int op, ev, er;
+    if (XQueryExtension(c->dpy, "MIT-SHM", &op, &ev, &er))
+        __atomic_store_n(&g_ov_shm_major, op, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_ov_dpy, c->dpy, __ATOMIC_RELEASE);
+    memset(c->shm.shmaddr, 0, (size_t) c->scr_w * c->scr_h * 4);
+    return (uint8_t *) c->shm.shmaddr;
+}
+/* until the server has read every shared put so far: before any write into the buffer */
+static void ov_shm_wait(struct overlay_ctx *c) {
+    if (c->shm_busy) {
+        XSync(c->dpy, False);
+        c->shm_busy = 0;
+    }
+}
+/* one window's part of the buffer to the screen: the part of its rectangle that is in the
+ * buffer (a parked window's is not), as XPutImage would clip it (ov_clip.h) */
+static void ov_put(struct overlay_ctx *c, Window w, int x, int y, int ww, int hh) {
+    struct ov_part p;
+    if (!ov_clip(x, y, ww, hh, c->scr_w, c->scr_h, &p))
+        return;
+    if (c->shimg && __atomic_load_n(&g_ov_shm_broken, __ATOMIC_RELAXED)) {
+        dbg("overlay: the server refused a shared put: frames through the socket from now on\n");
+        c->shimg = NULL; /* the segment stays the buffer; plain puts read it like any memory */
+    }
+    if (c->shimg) {
+        XShmPutImage(c->dpy, w, c->gc, c->shimg, p.sx, p.sy, p.dx, p.dy, (unsigned) p.w, (unsigned) p.h, False);
+        c->shm_busy = 1;
+    } else
+        XPutImage(c->dpy, w, c->gc, c->img, p.sx, p.sy, p.dx, p.dy, (unsigned) p.w, (unsigned) p.h);
+}
 
 /* Connect to the X server, waiting up to 30 s for it, and set up the framebuffer. */
 static int ov_open_display(struct overlay_ctx *c) {
@@ -737,7 +847,12 @@ static void ov_create_windows(struct overlay_ctx *c) {
     c->menu.x = 0;
     c->menu.y = 0;
     c->gc = XCreateGC(c->dpy, c->menu.id, 0, NULL);
-    c->buf = calloc(1, (size_t) c->scr_w * c->scr_h * 4);
+    c->shimg = NULL;
+    c->shm_busy = 0;
+    c->buf = ov_shm_create(c);
+    dbg("overlay: frames %s\n", c->buf ? "through a shared segment (MIT-SHM)" : "through the socket (no MIT-SHM)");
+    if (!c->buf)
+        c->buf = calloc(1, (size_t) c->scr_w * c->scr_h * 4);
     c->img = XCreateImage(c->dpy, DefaultVisual(c->dpy, c->scr), DefaultDepth(c->dpy, c->scr),
                           ZPixmap, 0, (char *) c->buf, c->scr_w, c->scr_h, 32, c->scr_w * 4);
     g_fb.px = c->buf;
@@ -789,6 +904,7 @@ static int ov_reload_banner(struct overlay_ctx *c) {
      * waits ~1.5 s. Keep the RELOADING banner painted (each repaint re-raises it) until we
      * die with the restart. The loader owns both the flag and the restart. */
     if (access("/run/az-reloading", F_OK) == 0) {
+        ov_shm_wait(c); /* the banner draws into the buffer */
         show_reloading(c->dpy, c->menu.id, c->gc, c->img, c->buf, c->scr_w, c->scr_h);
         c->reloading_was = 1;
         usleep(30000);
@@ -1482,6 +1598,7 @@ static void ov_fire_reload(struct overlay_ctx *c) {
     /* Hold RELOADING on screen for ~1 s, re-raising every 50 ms so EP147's repaints
      * cannot bury it, then daemon-reload and restart. */
     for (int k = 0; k < 20; k++) {
+        ov_shm_wait(c); /* the banner draws into the buffer */
         show_reloading(c->dpy, c->menu.id, c->gc, c->img, c->buf, c->scr_w, c->scr_h);
         usleep(50000);
     }
@@ -1508,6 +1625,7 @@ static void ov_fire_reload(struct overlay_ctx *c) {
      * still-open menu over the banner for the seconds EP147 takes to stop. This thread
      * dies with the process; the 30 s bound only matters if the restart never happens. */
     for (int k = 0; k < 600; k++) {
+        ov_shm_wait(c); /* the banner draws into the buffer */
         show_reloading(c->dpy, c->menu.id, c->gc, c->img, c->buf, c->scr_w, c->scr_h);
         usleep(50000);
     }
@@ -2266,18 +2384,24 @@ static void ov_sync_wave_hooks(void) {
 /* Rebuild a deck's waveform attenuation table when its stem mask, its track or a Stem Volume
  * gain changes. Runs on every overlay tick, so a knob turn is followed at the tick rate; a gain
  * sweep is rate limited per deck (watt_should_build), and its overview tiles on a slower
- * cadence (watt_ov_step). A pad toggle or a track change rebuilds and refreshes on this tick.
+ * cadence (watt_ov_step). A pad toggle or a track change rebuilds and refreshes on this tick;
+ * a load's decode progress alone rebuilds at most every WATT_PROG_MIN_MS (watt_progress_due).
  * Overlay thread only. */
 static void ov_rebuild_attenuation(void) {
     static unsigned sig[AZMOD_STEM_DECKS];
     static unsigned long long gsig[AZMOD_STEM_DECKS];
     static long last_ms[AZMOD_STEM_DECKS], ov_last_ms[AZMOD_STEM_DECKS];
     static int ov_pend[AZMOD_STEM_DECKS];
+    static long fsig[AZMOD_STEM_DECKS];
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     long now_ms = (long) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
     for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
-        unsigned cur = (unsigned) (g_stem_frames ? g_stem_frames(d) : 0) << 5;
+        /* The key: the pad toggles, whether stems are loaded, and the envelope's identity (a new
+         * track or a finished build). The decode's growing frame count is not in it. */
+        long fr = g_stem_frames ? g_stem_frames(d) : 0;
+        unsigned eg = azmod_stem_env_gen ? azmod_stem_env_gen(d) : 0;
+        unsigned cur = (fr > 0 ? 1u << 4 : 0) | ((eg & 0x07ffffffu) << 5);
         for (int k = 0; k < AZMOD_STEM_COUNT; k++)
             if (g_state.stem_on[d][k])
                 cur |= 1u << k;
@@ -2288,9 +2412,11 @@ static void ov_rebuild_attenuation(void) {
         unsigned long long gcur = watt_gain_key(gq);
         int have = __atomic_load_n(&g_att_have[d], __ATOMIC_RELAXED);
         int built = 0, keyed = cur != sig[d] || (cur && !have); /* not a gain-only change */
-        if (watt_should_build(cur, gcur, sig[d], gsig[d], have, now_ms, last_ms[d])) {
+        if (watt_should_build(cur, gcur, sig[d], gsig[d], have, now_ms, last_ms[d]) ||
+            watt_progress_due(fr, fsig[d], now_ms, last_ms[d])) {
             sig[d] = cur;
             gsig[d] = gcur;
+            fsig[d] = fr;
             last_ms[d] = now_ms;
             built = build_atten(d, gq);
         }
@@ -2588,6 +2714,7 @@ static void ov_place_windows(struct overlay_ctx *c) {
 static void ov_present(struct overlay_ctx *c) {
     struct timespec ct0, ct1;
     clock_gettime(CLOCK_MONOTONIC, &ct0);
+    ov_shm_wait(c); /* the last frame's puts are read before this one overwrites them */
     fb_ground(c->buf, c->scr_w, c->scr_h);
     g_state.menu_focused = __atomic_load_n(
         &g_menu_focused,
@@ -2606,25 +2733,28 @@ static void ov_present(struct overlay_ctx *c) {
     }
     /* Each window is sized to exactly what is visible; copy its sub-rect out of the
      * full-screen software buffer. */
-    XPutImage(c->dpy, c->menu.id, c->gc, c->img, c->menu.x, c->menu.y, 0, 0, c->menu.w, c->menu.h);
+    ov_put(c, c->menu.id, c->menu.x, c->menu.y, c->menu.w, c->menu.h);
     if (c->strip2.wanted && c->strip2.mapped)
-        XPutImage(c->dpy, c->strip2.id, c->gc, c->img, c->strip2.x, c->strip2.y, 0, 0, c->strip2.w, c->strip2.h);
+        ov_put(c, c->strip2.id, c->strip2.x, c->strip2.y, c->strip2.w, c->strip2.h);
     for (int d = 0; d < AZMOD_STEM_DECKS; d++)
         if (c->lane[d].wanted && c->lane[d].mapped)
-            XPutImage(c->dpy, c->lane[d].id, c->gc, c->img, c->lane[d].x, c->lane[d].y, 0, 0, c->lane[d].w,
-                      c->lane[d].h);
+            ov_put(c, c->lane[d].id, c->lane[d].x, c->lane[d].y, c->lane[d].w, c->lane[d].h);
+    /* the parts below draw into the buffer after the puts above: the server reads those first */
     if (c->srcicon.wanted && c->srcicon.mapped) {
+        ov_shm_wait(c);
         azmod_draw_srcrow_icon(&g_fb, c->srcicon.x, c->srcicon.y, c->srcicon.w, c->srcicon.h,
                                azmod_docked() && g_state.mode != AZ_CLOSED);
-        XPutImage(c->dpy, c->srcicon.id, c->gc, c->img, c->srcicon.x, c->srcicon.y, 0, 0, c->srcicon.w, c->srcicon.h);
+        ov_put(c, c->srcicon.id, c->srcicon.x, c->srcicon.y, c->srcicon.w, c->srcicon.h);
     }
     if (c->readouts.wanted && c->readouts.mapped) {
+        ov_shm_wait(c);
         azmod_draw_stats(&g_state, &g_fb);
-        XPutImage(c->dpy, c->readouts.id, c->gc, c->img, c->readouts.x, c->readouts.y, 0, 0, c->readouts.w, c->readouts.h);
+        ov_put(c, c->readouts.id, c->readouts.x, c->readouts.y, c->readouts.w, c->readouts.h);
     }
     if (c->clockn.wanted && c->clockn.mapped) {
+        ov_shm_wait(c);
         azmod_draw_clockn(&g_state, &g_fb);
-        XPutImage(c->dpy, c->clockn.id, c->gc, c->img, c->clockn.x, c->clockn.y, 0, 0, c->clockn.w, c->clockn.h);
+        ov_put(c, c->clockn.id, c->clockn.x, c->clockn.y, c->clockn.w, c->clockn.h);
     }
 }
 
@@ -2694,6 +2824,7 @@ static void ov_update_state(struct overlay_ctx *c) {
     ov_docked_gate(c);
     ov_detect_deck_view(c);
     community_tick(); /* community mods: ~30 Hz tick, settings flush, quarantine timer */
+    azmod_cm_bg_tick(); /* Community Mods: Update all's next install */
     ssh_approve_tick(); /* a stick's SSH key waiting to be allowed on the deck */
     sdk_overlay_tick(c); /* their view, long presses and injected pointer events */
     if (community_redraw_wanted())

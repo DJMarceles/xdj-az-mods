@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
@@ -34,6 +35,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <sys/resource.h> /* setpriority: the stem decode threads */
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>

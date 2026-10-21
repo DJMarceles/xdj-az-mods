@@ -1788,7 +1788,7 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
     t_pst_slots = 0;
     if (__atomic_load_n(&g_pst_armed, __ATOMIC_ACQUIRE))
         pst_lib_service(server); /* a stock write's export.pdb sync, due on this stick */
-    if (g_sm_on || g_rs_on)
+    if (g_sm_on || __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
         mm_note(server);
     int want = MV_ARMED;
     uintptr_t c_svc = 0, c_lib = 0, c_db = 0;
@@ -3417,7 +3417,7 @@ static void hlabel_paint_hook(void *self, void *g) {
         HL_OUT(10);
     int await = 0, busy = 0;
     st = sm_status_mb(id | SM_PLF, name, media, &await, &busy);
-    if (!g_rs_on)
+    if (!__atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
         busy = 0; /* Remote Stems off: no animation (the track rows' gate) */
     {
         uintptr_t lb = 0, lbvt = 0; /* the widget is alive: it is painting this row */

@@ -4,9 +4,11 @@
  * writes from what it downloaded, so any bytes. Every parse is followed by a layout of the
  * page the input picks, so the parsed fields reach the drawing code.
  *
- * Input: byte 0 picks the page (home tabs, a catalog mod's page, the search keyboard), its high
- * bits the Browse order and search; byte 1 the mod, or Browse's category; the rest is split at
- * the first NUL into the catalog and the status file (no NUL: no status file).
+ * Input: byte 0 picks the page (home tabs, a catalog mod's page, the Add repository keyboard), its high
+ * bits the Browse order and a turn of the knob on Home; byte 1 the mod, or Browse's
+ * view (Home, All mods, a category); the rest is split at the first NUL into the catalog and the
+ * status file (no NUL: no status file). A mod line's download count (field 21) is any bytes too:
+ * a count is read only as 1 to 13 digits, and Home's shelves and tiles name only catalog mods.
  * The 250 ms re-read throttle runs on a clock this harness advances by 1 s per input, and the
  * fixed catalog and status paths are redirected into the scratch directory. The rest of azmod
  * comes from lanetest.c, compiled as its own object, as in the unit suites. */
@@ -79,15 +81,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     fz_now_s++;
     cm_load();
     FZ_ASSERT(g_ncr >= 0 && g_ncr <= CM_NREPO && g_ncc >= 0 && g_ncc <= CM_NCAT && g_cc_more >= 0);
+    for (int i = 0; i < g_ncc; i++)
+        FZ_ASSERT(g_cc[i].counted ? g_cc[i].dl >= 0 && g_cc[i].dl <= 9999999999999LL : g_cc[i].dl == 0);
     g_cm_full = page >> 3 & 1;
     g_cm_scroll = 0;
     g_cm_sort = (page >> 4 & 3) % CMB_NSORT;
-    g_cm_fcat = pick % (CMB_NCAT + 1) - 1;
-    snprintf(g_cm_q, sizeof g_cm_q, "%s", page & 0x40 ? "e o" : "");
-    g_cm_kbsearch = 0;
+    g_cm_fcat = pick % (CMB_NCAT + 2) - 2; /* CMB_HOME, CMB_ALL, then the categories */
     if ((page & 7) == 7) {
         g_cm_view = CMV_KBD;
-        g_cm_kbsearch = 1;
     } else if ((page & 7) < 3) {
         g_cm_view = CMV_HOME;
         g_cm_tab = page & 3;
@@ -97,7 +98,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
         g_cm_tab = 0;
         g_cm_cat = g_ncc ? pick % g_ncc : -1;
     }
+    if (page & 0x80 && g_cm_view == CMV_HOME) cm_input(&g_s, &g_fb, 0, 0, false, pick % 7 - 3, pick & 1);   /* the knob */
     int nctl = cm_layout(&g_s, &g_fb, g_ctl, 1);
     FZ_ASSERT(nctl >= 0 && nctl <= CM_MAXCTL);
+    for (int i = 0; i < nctl; i++)
+        if (g_ctl[i].kind == CMC_STILE) /* a shelf's tile: a real mod, a real shelf, whole on the screen (no row scrolls sideways) */
+            FZ_ASSERT((g_ctl[i].idx & 0xff) < g_ncc && (g_ctl[i].idx >> 8) < CMB_NSHELF && g_ctl[i].x >= 0 && g_ctl[i].x + g_ctl[i].w <= g_fb.w);
     return 0;
 }

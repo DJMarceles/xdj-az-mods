@@ -5,7 +5,8 @@
  * status bar): while the Clock is on and EP147 is not recording, EP147's label is hidden and the
  * overlay draws the time of day exactly where it was (screen_overlays.c azmod_draw_clockn), in
  * EP147's own face, size and ink. The moment EP147 lights its recording icon, its label shows
- * again and nothing is drawn (clock_native.h cn_take).
+ * again and nothing is drawn (clock_native.h cn_take). While EP147's caution strip (the gray banner
+ * over the status bar, ours or its own) is up, nothing is drawn either: the time never sits on it.
  *
  * This file runs on EP147's message thread (the widget's constructor, its controller's update,
  * calltimers_hook). It publishes to the overlay thread, through atomics only: the label's screen
@@ -67,6 +68,7 @@ static struct {
     int hidden; /* its label is hidden by the clock */
 } g_cn[CN_MAX];
 static int g_cn_on;              /* installed */
+static int g_cn_strip;           /* EP147's caution strip (a gray banner, ours or its own) covers the status bar */
 static int g_cn_bounds_off = -1; /* juce::Component: boundsRelativeToParent */
 static int g_cn_parent_off = -1; /* juce::Component: parentComponent */
 static int cn_clock_on(void) { return azmod_stat_on(&g_state, AZF_CLOCK); }
@@ -167,6 +169,8 @@ static void cn_publish(void) {
         own_q(w + (CN_DIM & ~7u), &dim);
         ink = cn_u32(w + ((dim >> (8 * (CN_DIM & 7)) & 0xff) ? CN_INK_DIM : CN_INK));
     }
+    if (g_cn_strip)
+        r = 0; /* under a banner: the readout it covers is not drawn over it */
     __atomic_store_n(&g_azmod_clockn_ink, ink, __ATOMIC_RELAXED);
     __atomic_store_n(&g_azmod_clockn_ground, ground, __ATOMIC_RELAXED);
     __atomic_store_n(&g_azmod_clockn_rect, r, __ATOMIC_RELEASE);
@@ -201,7 +205,15 @@ static void cn_update_hook(long ctrl) {
 static void cn_tick(void) {
     static long long last;
     long long now = drag_now_ms();
-    if (!g_cn_on || now - last < 250)
+    if (!g_cn_on)
+        return;
+    /* a banner is checked every tick (a few loads), so the time never sits on one that just came up */
+    int strip = az_banner_strip_state() > BN_NONE;
+    if (strip != g_cn_strip) {
+        g_cn_strip = strip;
+        cn_publish();
+    }
+    if (now - last < 250)
         return;
     last = now;
     for (int i = 0; i < CN_MAX; i++)

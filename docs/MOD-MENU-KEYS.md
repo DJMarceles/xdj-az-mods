@@ -12,7 +12,7 @@ reused, and a removed setting keeps its key reserved.
 | `row_value(handle)` | a toggle reads `1` only while it and every toggle above it are on; a choice reads its index |
 | `row_set(handle, value)` | refused (`-1`) for an official row: only the DJ changes those |
 | a community mod's own rows | saved in `azmod.conf` as `<mod-id>:<key>` |
-| groups (`fps60`, `extras`) | hold other rows only; no value |
+| groups (`fps60`, `browse-view`, `extras`) | hold other rows only; no value |
 
 The table is generated from `src/azmod/features.def` (release build) by
 `tests/unit/keys_test.c`, run with `--print`. The unit tests (`tests/unit/run.sh`) fail when
@@ -42,13 +42,14 @@ the table and `features.def` disagree.
 | `overlay-ram` | RAM Usage | toggle | overlays | 0 = off, 1 = on |
 | `overlay-clock` | Clock | toggle | extras | 0 = off, 1 = on |
 | `overlay-clock-24h` | Time Format | choice | overlay-clock | 0 = "12-hour", 1 = "24-hour" |
+| `column-edit` | Column Edit | toggle | browse-view | 0 = off, 1 = on |
+| `preview-hot-cues` | Preview Hot Cues | toggle | browse-view | 0 = off, 1 = on |
 | `beat-jump-2-first` | BEAT JUMP 2 First | toggle | extras | 0 = off, 1 = on |
 | `fine-vinyl-speed` | Fine Vinyl Speed Adjust | toggle | extras | 0 = off, 1 = on |
 | `bt-auto-connect` | Bluetooth Auto-Connect | toggle | extras | 0 = off, 1 = on |
 | `bt-remember-channel` | Remember Selected Channel | toggle | extras | 0 = off, 1 = on |
 | `hide-track-title` | Hide Track Title | toggle | extras | 0 = off, 1 = on |
 | `phase-meter` | Phase Meter | toggle | extras | 0 = off, 1 = on |
-| `preview-hot-cues` | Preview Hot Cues | toggle | extras | 0 = off, 1 = on |
 | `extended-lead-in` | Extended Lead-In | toggle | extras | 0 = off, 1 = on |
 | `camelot-keys` | Camelot Keys | toggle | extras | 0 = off, 1 = on |
 <!-- keys:end -->

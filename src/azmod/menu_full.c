@@ -57,7 +57,10 @@ static int c_detail(int left, int *out) {
     int ord[AZI_COUNT], no = menu_order(ord);
     for (int p = 0; p < no; p++) {
         int it = ord[p];
-        if (it == left || item_hidden(it))
+        /* a screen's own rows (Browse View Mods'): hidden everywhere but there, so only their own
+         * flag counts here, as on the Overlays screen (overlays_rows) */
+        bool own = az_screen(left) >= 0 && az_parent(it) == left;
+        if (it == left || (own ? (az_row(it)->d.flags & AZ_ROW_HIDDEN) != 0 : item_hidden(it)))
             continue;
         if (c_descends(it, left))
             out[n++] = it;
@@ -75,6 +78,68 @@ static int c_lrowh(const azmod_fb *fb) {
         n += !item_is_registered(t[k]);
     int avail = dock_h(fb) - menu_hdrh(fb), r = n ? avail / n : avail, mx = fb->h * 62 / 800;
     return r > mx ? mx : (r ? r : 1);
+}
+/* The left list and the right pane move as the Community Mods home page does (scroll_glide.h):
+ * under the finger while it is down, on in a fling after a lift while moving, and a knob step
+ * glides to the row it shows. g_lscroll and g_rscroll stay the offsets drawn and hit-tested;
+ * beside each, the value its glide last wrote (g_lglpx, g_rglpx), so an offset set anywhere else
+ * (a clamp, a pending show) takes over and stops the glide. The menu's tick moves them
+ * (c_glide_tick); each list's range is the one its last clamp measured. */
+#include "scroll_glide.h"
+static struct glide g_lgl, g_rgl;
+static int g_lglpx, g_rglpx, g_lglmax, g_rglmax;
+static long c_glide_mono_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000;
+}
+static long (*g_glide_ms)(void) = c_glide_mono_ms; /* the glides' clock (a test steps its own) */
+/* the glide follows the offset when anything else set it */
+static void c_glide_sync(struct glide *g, int *px, int v) {
+    if (v == *px)
+        return;
+    glide_set(g, (float) v);
+    *px = v;
+}
+/* put the offset at v at once, its glide stopped (a new pane, a group's screen opened or left) */
+static void c_glide_put(struct glide *g, int *px, int *v, int to) {
+    glide_set(g, (float) to);
+    *v = *px = to;
+}
+/* one frame of a glide within [0, max]; true while it moves */
+static bool c_glide_frame(struct glide *g, int *px, int *v, int max) {
+    c_glide_sync(g, px, *v);
+    if (!g->on)
+        return false;
+    glide_step(g, g_glide_ms(), (float) max);
+    *v = *px = glide_px(g);
+    return true;
+}
+/* The finger's point during a drag (phase 1) and at the lift (2), held within [0, max]: the list
+ * is at the finger, and a lift while moving flings it on. Held first, so a finger past either
+ * end adds no speed. */
+static void c_glide_drag(struct glide *g, int *px, int *v, int to, int max, int phase) {
+    long ms = g_glide_ms();
+    if (to > max)
+        to = max;
+    if (to < 0)
+        to = 0;
+    c_glide_sync(g, px, *v);
+    if (phase == 2)
+        glide_release(g, (float) to, ms, GLIDE_STOP_V);
+    else
+        glide_drag(g, (float) to, ms);
+    glide_step(g, ms, (float) max);
+    *v = *px = glide_px(g);
+}
+/* A finger landing on a moving list stops it where it shows. True when it was flinging: that
+ * touch only catches the list and fires nothing. */
+static bool c_glide_catch(struct glide *g, int *px, int *v) {
+    c_glide_sync(g, px, *v);
+    bool fling = glide_flinging(g);
+    glide_stop(g);
+    *v = *px = glide_px(g);
+    return fling;
 }
 /* Left list scroll, like the right pane's (g_rscroll): g_lscroll is the list's offset in
  * px, 0 = top, subtracted in c_left_rect, so the draw and every hit-test move together. A list
@@ -96,7 +161,7 @@ static void c_left_rect(const azmod_fb *fb, int k, int *x, int *y, int *w, int *
     *y = dock_y(fb) + menu_hdrh(fb) + k * rh - g_lscroll;
 }
 static void c_lclamp(const azmod_fb *fb) {
-    int mx = c_lmax(fb);
+    int mx = g_lglmax = c_lmax(fb);
     if (g_lscroll > mx)
         g_lscroll = mx;
     if (g_lscroll < 0)
@@ -160,6 +225,23 @@ static int c_grow_h(const azmod_fb *fb) {
  * subtracted in c_detail_rect, so the draw and every hit-test (rows, bank buttons,
  * choice buttons) move together. A pane whose rows fit never scrolls (c_rmax = 0). */
 static int g_rscroll;
+/* A group's own screen (Browse View Mods, from its Extras row) is drawn and driven as that group's
+ * pane: its members with icons and descriptions, like Extras' rows. c_pane is the item whose rows
+ * the right pane shows; the Extras pane's scroll is kept while that screen is up. */
+static int g_rscroll_parent;
+static bool c_group_screen(int mode) {
+    return sub_mode(mode) && az_kind(sub_head(mode)) == AZ_ROW_GROUP;
+}
+static int c_pane(const azmod_state *s) {
+    return c_group_screen(s->mode) ? sub_head(s->mode) : s->left_sel;
+}
+static bool c_rows_pane(const azmod_state *s) {
+    return s->mode == AZ_OPEN || c_group_screen(s->mode);
+}
+static void c_group_screen_leave(const azmod_state *s) {
+    if (c_group_screen(s->mode))
+        c_glide_put(&g_rgl, &g_rglpx, &g_rscroll, g_rscroll_parent);
+}
 static void c_detail_rect0(const azmod_fb *fb, int left, int k, int *x, int *y, int *w, int *h);
 static void c_detail_rect(const azmod_fb *fb, int left, int k, int *x, int *y, int *w, int *h) {
     c_detail_rect0(fb, left, k, x, y, w, h);
@@ -176,7 +258,7 @@ static int c_rmax(const azmod_fb *fb, int left) { /* how far the pane can scroll
     return over > 0 ? over : 0;
 }
 static void c_rclamp(const azmod_fb *fb, int left) {
-    int mx = c_rmax(fb, left);
+    int mx = g_rglmax = c_rmax(fb, left);
     if (g_rscroll > mx)
         g_rscroll = mx;
     if (g_rscroll < 0)
@@ -211,6 +293,40 @@ static void c_detail_rect0(const azmod_fb *fb, int left, int k, int *x, int *y, 
     }
     *h = c_grow_h(fb); /* label + its description line */
     *y = c_opts_y(fb, left) + fb->h * 32 / 800 + (k - 1) * (*h + fb->h * 6 / 800);
+}
+/* The knob moved the selection to entry k (the left list) or the focus to row k (left's pane):
+ * glide to the offset c_lshow / c_rshow would set. Quick detents add up from where the glide is
+ * heading, so the offset they measure from is the glide's goal. */
+static void c_lglide_show(const azmod_fb *fb, int k) {
+    c_glide_sync(&g_lgl, &g_lglpx, g_lscroll);
+    int shown = g_lscroll;
+    if (g_lgl.on)
+        g_lscroll = (int) (g_lgl.goal + 0.5f);
+    c_lshow(fb, k);
+    int to = g_lscroll;
+    g_lscroll = shown;
+    glide_to(&g_lgl, (float) to, g_glide_ms());
+}
+static void c_rglide_show(const azmod_fb *fb, int left, int k) {
+    c_glide_sync(&g_rgl, &g_rglpx, g_rscroll);
+    int shown = g_rscroll;
+    if (g_rgl.on)
+        g_rscroll = (int) (g_rgl.goal + 0.5f);
+    c_rshow(fb, left, k);
+    int to = g_rscroll;
+    g_rscroll = shown;
+    glide_to(&g_rgl, (float) to, g_glide_ms());
+}
+/* The menu's tick: a frame of each list's glide; true while one moves. The right pane's glide
+ * stops when the pane no longer shows rows. */
+static bool c_glide_tick(const azmod_state *s) {
+    if (!c_rows_pane(s)) {
+        c_glide_sync(&g_rgl, &g_rglpx, g_rscroll);
+        glide_stop(&g_rgl);
+    }
+    bool l = c_glide_frame(&g_lgl, &g_lglpx, &g_lscroll, g_lglmax);
+    bool r = c_glide_frame(&g_rgl, &g_rglpx, &g_rscroll, g_rglmax);
+    return l || r;
 }
 /* Controls sit at the right end of a sub-option row, centered on the whole block
  * (label + description), like the checkboxes. */
@@ -261,7 +377,7 @@ static int g_last_left = -1;
 /* The mode the right pane shows for a left item, with no row focused. */
 static void c_select(azmod_state *s, int it) {
     if (it != s->left_sel)
-        g_rscroll = 0;
+        c_glide_put(&g_rgl, &g_rglpx, &g_rscroll, 0);
     s->left_sel = it;
     s->pane = 0;
     s->menu_sel = -1;
@@ -369,10 +485,16 @@ static void c_activate(azmod_state *s, int it) { /* a right-pane row by knob pre
         s->menu_sel = 0;
         return;
     }
-    if (sub_screen(it)) { /* Extras > Overlays or Clock: its screen, likewise */
+    if (sub_screen(it)) { /* Extras > Overlays, Clock or Browse View Mods: its screen, likewise */
         s->mode = sub_screen(it);
         s->pane = 1;
         s->menu_sel = 0;
+        if (c_group_screen(s->mode)) { /* a group's screen: its first member, the pane at its top */
+            int r[AZI_COUNT];
+            s->menu_sel = c_detail(it, r) ? r[0] : -1;
+            g_rscroll_parent = g_rscroll;
+            c_glide_put(&g_rgl, &g_rglpx, &g_rscroll, 0);
+        }
         return;
     }
 #ifdef AZMOD_HAVE_DAYMODE
@@ -389,7 +511,8 @@ static void c_activate(azmod_state *s, int it) { /* a right-pane row by knob pre
 }
 /* Touch acts on controls only. A touch changes something only when the press and the
  * release both land on the same control (a checkbox, a bank / choice button,
- * Reload; padded for a finger), less than ~12 px apart and within 400 ms. Never
+ * Reload; padded for a finger), less than ~12 px apart and within 400 ms (a Reload button:
+ * under 1 s, so only a press held a full second is taken back). Never
  * on the press: on the deck EP147's touch decoder 0x212c6f0 XSendEvent()s a ButtonPress
  * when a finger lands AND at each step while it moves, and a ButtonRelease when it lifts.
  * The overlay turns a press while the finger is down into a drag step (touch_seq.h,
@@ -401,6 +524,7 @@ static void c_activate(azmod_state *s, int it) { /* a right-pane row by knob pre
 #define C_TAP_SLOP_800 12
 #define C_TZ_CTL 0x40000 /* a row of the Clock's zone list (row index below) */
 #define C_TAP_MS 400
+#define C_RELOAD_HOLD_MS 1000 /* a Reload button: a press held this long is taken back */
 static struct {
     bool on, moved, cm; /* cm: a press on the Community Mods home page (screen_community.c) */
     int x0, y0, s0, l0, ctl; /* s0 / l0: the right pane's (or the Community page's) and the left list's offset at the press */
@@ -442,6 +566,13 @@ static bool c_left_box(const azmod_fb *fb, int it, int k, int *bx, int *by, int 
 /* The control under a point: -1 none; 0x10000|k = left row k's checkbox; (k << 8) | part
  * for right-pane row k, part 0 = its checkbox (or Reload's row, a button), 1+b = bank or
  * choice button b. Every rect is the drawn one (scroll included) plus a finger pad. */
+/* 1 = the control (c_ctl_at's) is the Reload row's button */
+static bool c_is_reload(azmod_state *s, int ctl) {
+    if (ctl < 0 || ctl >= 0x10000 || (ctl & 0xff) || !c_rows_pane(s))
+        return false;
+    int r[AZI_COUNT], m = c_detail(c_pane(s), r), k = ctl >> 8;
+    return k < m && r[k] == AZI_RELOAD;
+}
 static int c_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty) {
     int pad = fb->h * 16 / 800;
     if (tx < c_lw(fb)) {
@@ -462,15 +593,15 @@ static int c_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty) {
         }
         return -1;
     }
-    if (s->mode != AZ_OPEN)
+    if (!c_rows_pane(s))
         return -1;
-    int top = dock_y(fb) + menu_hdrh(fb);
+    int pn = c_pane(s), top = dock_y(fb) + menu_hdrh(fb);
     if (ty < top)
         return -1; /* the header covers scrolled rows */
-    int r[AZI_COUNT], m = c_detail(s->left_sel, r);
+    int r[AZI_COUNT], m = c_detail(pn, r);
     for (int k = 0; k < m; k++) {
         int x, y, w, h;
-        c_detail_rect(fb, s->left_sel, k, &x, &y, &w, &h);
+        c_detail_rect(fb, pn, k, &x, &y, &w, &h);
         if (!in_rect(tx, ty, x, y - pad, w, h + 2 * pad))
             continue;
         int it = r[k];
@@ -482,7 +613,7 @@ static int c_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty) {
         if (item_is_bank(it)) {
             for (int b = 0; b < az_n_choices(it); b++) {
                 int qx, qy, qw, qh;
-                c_bank_rect(fb, s->left_sel, k, it, b, &qx, &qy, &qw, &qh);
+                c_bank_rect(fb, pn, k, it, b, &qx, &qy, &qw, &qh);
                 if (in_rect(tx, ty, qx - 4, qy - 4, qw + 8, qh + 8))
                     return (k << 8) | (1 + b);
             }
@@ -491,7 +622,7 @@ static int c_ctl_at(azmod_state *s, const azmod_fb *fb, int tx, int ty) {
         if (c_is_choice(it)) {
             for (int b = 0; b < 2; b++) {
                 int qx, qy, qw, qh;
-                c_choice_rect(fb, s->left_sel, k, b, &qx, &qy, &qw, &qh);
+                c_choice_rect(fb, pn, k, b, &qx, &qy, &qw, &qh);
                 if (in_rect(tx, ty, qx - 4, qy - 4, qw + 8, qh + 8))
                     return (k << 8) | (1 + b);
             }
@@ -539,7 +670,7 @@ static void c_fire(azmod_state *s, int ctl) {
         else c_toggle(s, tops[k]);
         return;
     }
-    int r[AZI_COUNT], m = c_detail(s->left_sel, r), k = ctl >> 8, part = ctl & 0xff;
+    int r[AZI_COUNT], m = c_detail(c_pane(s), r), k = ctl >> 8, part = ctl & 0xff;
     if (k >= m)
         return;
     int it = r[k];
@@ -619,11 +750,26 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
             int r = tzl_row_at(fb, tx, ty);
             c_press(tx, ty, r >= 0 ? C_TZ_CTL | r : -1, false, g_tzl_first);
             return 1;
-        } else if (s->mode != AZ_OPEN) {
+        } else if (s->mode == AZ_COMMUNITY && !g_cm_full) {
+            /* the preview card (Community Mods selected but not open): its own Reload square,
+             * top right, is a control even though the card itself is not entered yet; any
+             * other tap in the pane opens the full screen as before. */
+            int rx, ry, rsz, p = fb->h * 10 / 800;
+            cm_card_reload_rect(fb, &rx, &ry, &rsz);
+            if (cm_card_rshow() && in_rect(tx, ty, rx - p, ry - p, rsz + 2 * p, rsz + 2 * p)) {
+                if (cm_card_tap_reload())
+                    return 1;
+            }
+            s->pane = 1;
+            return 0;
+        } else if (!c_rows_pane(s)) {
             s->pane = 1;
             return 0;
         }
-        c_press(tx, ty, c_ctl_at(s, fb, tx, ty), false, g_rscroll);
+        int ctl = c_ctl_at(s, fb, tx, ty);
+        bool caught = tx < c_lw(fb) ? c_glide_catch(&g_lgl, &g_lglpx, &g_lscroll)
+                                    : c_glide_catch(&g_rgl, &g_rglpx, &g_rscroll);
+        c_press(tx, ty, caught ? -1 : ctl, false, g_rscroll); /* a flinging list is only caught */
         return 1;
     }
     if (s->pane == 0) {
@@ -636,15 +782,15 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
             else
                 k = (k + (d > 0 ? 1 : -1) + n) % n;
             c_select(s, tops[k]);
-            c_lshow(fb, k); /* the list scrolls to keep the selection in view */
+            c_lglide_show(fb, k); /* the list scrolls to keep the selection in view */
         }
         if (click)
             c_enter(s);
         return 1;
     }
-    if (s->mode != AZ_OPEN)
+    if (!c_rows_pane(s))
         return 0;
-    int r[AZI_COUNT], m = c_detail(s->left_sel, r);
+    int pn = c_pane(s), r[AZI_COUNT], m = c_detail(pn, r);
     if (d && m) {
         int k = 0;
         while (k < m && r[k] != s->menu_sel)
@@ -654,7 +800,7 @@ static int c_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touc
         else
             k = (k + (d > 0 ? 1 : -1) + m) % m;
         s->menu_sel = r[k];
-        c_rshow(fb, s->left_sel, k);
+        c_rglide_show(fb, pn, k);
     }
     if (click && s->menu_sel >= 0)
         c_activate(s, s->menu_sel);
@@ -692,14 +838,14 @@ int azmod_pane_drag(azmod_state *s, const azmod_fb *fb, int x, int y, int phase)
         g_rdrag.moved = true;
     int was = g_rscroll, lwas = g_lscroll;
     bool cmoved = false;
-    bool scrolls = !cm && s->mode == AZ_OPEN && g_rdrag.x0 >= c_lw(fb) && c_rmax(fb, s->left_sel) > 0;
+    bool scrolls = !cm && c_rows_pane(s) && g_rdrag.x0 >= c_lw(fb) && c_rmax(fb, c_pane(s)) > 0;
     if (g_rdrag.moved && scrolls) {
-        g_rscroll = g_rdrag.s0 - dy;
-        c_rclamp(fb, s->left_sel);
+        int mx = g_rglmax = c_rmax(fb, c_pane(s)), to = g_rdrag.s0 - dy;
+        c_glide_drag(&g_rgl, &g_rglpx, &g_rscroll, to, mx, phase);
     }
     if (g_rdrag.moved && !cm && g_rdrag.x0 < c_lw(fb)) { /* the left list follows the finger */
-        g_lscroll = g_rdrag.l0 - dy;
-        c_lclamp(fb);
+        int mx = g_lglmax = c_lmax(fb), to = g_rdrag.l0 - dy;
+        c_glide_drag(&g_lgl, &g_lglpx, &g_lscroll, to, mx, phase);
     }
     if (g_rdrag.moved && cm) /* the Community Mods home page follows the finger */
         cmoved = cm_home_scroll_to(fb, g_rdrag.s0 - dy, phase);
@@ -721,7 +867,9 @@ int azmod_pane_drag(azmod_state *s, const azmod_fb *fb, int x, int y, int phase)
     /* navigation (a left row; on the Community page a tab, a tile, a mod row, the back square)
      * is not held to the 400 ms */
     bool nav = g_rdrag.ctl >= 0 && (cm ? cm_home_nav(g_rdrag.ctl) : (g_rdrag.ctl & (0x20000 | C_TZ_CTL)) != 0);
-    if (g_mnow - g_rdrag.t0 > C_TAP_MS && !nav) {
+    bool reload = g_rdrag.ctl >= 0 && (cm ? cm_home_reload(g_rdrag.ctl) : !tz && c_is_reload(s, g_rdrag.ctl));
+    long held = g_mnow - g_rdrag.t0;
+    if (!nav && (reload ? held >= C_RELOAD_HOLD_MS : held > C_TAP_MS)) {
         g_mhit = "release:too-slow";
         return g_rscroll != was;
     }
@@ -827,7 +975,7 @@ static void c_focus_ring(const azmod_fb *fb, int x, int y, int w, int h) {
 }
 static void c_draw_group(azmod_state *s,
                          const azmod_fb *fb) { /* a group's members, each described */
-    int x0 = dock_x(fb), w0 = dock_w(fb), it0 = s->left_sel;
+    int x0 = dock_x(fb), w0 = dock_w(fb), it0 = c_pane(s);
     int dpx = fb->h * 17 / 800, lh = fb->h * 26 / 800;
     c_text_fit(fb, x0 + fb->w / 40, c_master_y(fb) - g_rscroll, w0 - fb->w / 20, lh, c_desc(it0),
                dpx, C_TEXT_DIM);
@@ -835,6 +983,8 @@ static void c_draw_group(azmod_state *s,
     for (int k = 0; k < m; k++) {
         int it = r[k], x, y, w, h;
         c_detail_rect(fb, it0, k, &x, &y, &w, &h);
+        if (y >= fb->h || y + h <= 0)
+            continue; /* wholly outside the buffer (a pane taller than the screen): nothing of it shows */
         bool fl = s->pressed_item == it && s->pressed_ticks > 0;
         bool foc = (s->pane == 1 && s->menu_sel == it) || fl, hi = false;
         fill_rect(fb, x + fb->w / 80, y, w - fb->w / 40, h, foc ? C_FOCUS_BAND : 0x00343434u);
@@ -870,7 +1020,7 @@ static void c_draw_right_body(azmod_state *s, const azmod_fb *fb);
 static void c_draw_right(azmod_state *s, const azmod_fb *fb) { /* a mod's settings, or Reload */
     int x0 = dock_x(fb), top = dock_y(fb), hh = menu_hdrh(fb), w0 = dock_w(fb);
     fill_rect(fb, x0, top, w0, dock_h(fb), C_MENU_SCRIM);
-    int it0 = s->left_sel;
+    int it0 = c_pane(s);
     c_rclamp(fb, it0); /* rows can change (a flag, a reload) */
     c_draw_right_body(s, fb);
     /* the header goes on last: rows scrolled up slide under it */
@@ -898,7 +1048,7 @@ static void c_draw_right(azmod_state *s, const azmod_fb *fb) { /* a mod's settin
     }
 }
 static void c_draw_right_body(azmod_state *s, const azmod_fb *fb) {
-    int x0 = dock_x(fb), w0 = dock_w(fb), it0 = s->left_sel;
+    int x0 = dock_x(fb), w0 = dock_w(fb), it0 = c_pane(s);
     int dpx = fb->h * 17 / 800, lh = fb->h * 26 / 800, dy = c_desc_y(fb) - g_rscroll;
     if (az_kind(it0) == AZ_ROW_GROUP) {
         c_draw_group(s, fb);
@@ -934,6 +1084,8 @@ static void c_draw_right_body(azmod_state *s, const azmod_fb *fb) {
     for (int k = 0; k < m; k++) {
         int it = r[k], x, y, w, h;
         c_detail_rect(fb, it0, k, &x, &y, &w, &h);
+        if (y >= fb->h || y + h <= 0)
+            continue; /* wholly outside the buffer (a pane taller than the screen): nothing of it shows */
         bool fl = s->pressed_item == it && s->pressed_ticks > 0;
         bool foc = (s->pane == 1 && s->menu_sel == it) || (fl && !item_is_bank(it)),
              hi = false;

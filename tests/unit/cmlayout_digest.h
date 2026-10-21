@@ -8,4 +8,5 @@
  * controls and captured text are restored afterwards, so their checks see exactly what they would
  * without the digest. Text color is not covered: the text stub records the words only. */
 static void cmd_record(void);
+#define CM_NOW() 1950134400LL /* 2031-10-19 UTC: a mod page's "updated N days ago" draws the same every day */
 #define CMLAYOUT_DIGEST() cmd_record()
