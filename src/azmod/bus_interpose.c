@@ -454,12 +454,18 @@ int ioctl(int fd, unsigned long req, ...) {
                         }
                         pb[i * 4 + 2] = 0x00;
                     }
-                    /* Pads 5-7 dark while armed: the read() path swallows their
+                    /* Pads 5-6 dark while armed: the read() path swallows their
                      * slip-loop actions, so lit pads would advertise dead controls.
+                     * Pad 7 is HOLD: dim amber off, bright amber on (linear light).
                      * Unarmed they are left alone. */
-                    if (on)
-                        for (int i = 4; i < 7; i++)
+                    if (on) {
+                        for (int i = 4; i < 6; i++)
                             pb[i * 4 + 0] = pb[i * 4 + 1] = pb[i * 4 + 2] = 0x00;
+                        int hold = __atomic_load_n(&g_drum_hold[ld], __ATOMIC_RELAXED);
+                        pb[6 * 4 + 0] = hold != DRUM_HOLD_OFF ? 0xFF : 0x10;
+                        pb[6 * 4 + 1] = hold != DRUM_HOLD_OFF ? 0x30 : 0x03;
+                        pb[6 * 4 + 2] = 0x00;
+                    }
                     pb[7 * 4 + 0] = on ? 0x00 : 0xFF; /* pad 8: green on, red off */
                     pb[7 * 4 + 1] = on ? 0xFF : 0x00;
                     pb[7 * 4 + 2] = 0x00;
@@ -940,21 +946,35 @@ static void mixer_xpad_drum(uint8_t *b, ssize_t r, uint64_t cfg) {
     int idx = (int) ((raw * 6u) / span); /* 6 zones, left -> right */
     if (idx > 5)
         idx = 5;
-    int any_held = 0;
+    int any_held = 0, held_zone = -1;
     void (*rate_fn)(int, int) = __atomic_load_n(&g_drum_rate_fn, __ATOMIC_ACQUIRE);
     void (*touch_fn)(int, int) = __atomic_load_n(&g_drum_touch_fn, __ATOMIC_ACQUIRE);
     for (int ld = 0; ld < AZMOD_STEM_DECKS; ld++) {
         if (!__atomic_load_n(&g_drum_held[ld], __ATOMIC_RELAXED))
             continue;
         any_held = 1;
+        /* HOLD (pad 7): a release is not passed on, so the roll keeps its zone and goes on */
+        int hold = __atomic_load_n(&g_drum_hold[ld], __ATOMIC_RELAXED);
+        if (drum_hold_frame(hold, touched) == DRUM_HOLD_KEEP) {
+            if (hold == DRUM_HOLD_RUN)
+                held_zone = __atomic_load_n(&g_drum_hold_zone[ld], __ATOMIC_RELAXED);
+            continue;
+        }
         if (rate_fn)
             rate_fn(ld, idx);
         if (touch_fn)
             touch_fn(ld, touched);
+        if (hold != DRUM_HOLD_OFF) {
+            /* only while HOLD is still on: pad 7 (the pad bus) may have just turned it off,
+             * and then the next release stops the roll as without HOLD */
+            __atomic_store_n(&g_drum_hold_zone[ld], idx, __ATOMIC_RELAXED);
+            __atomic_compare_exchange_n(&g_drum_hold[ld], &hold, DRUM_HOLD_RUN, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
     }
-    /* the row art follows the finger: zone while touched, idle strip when not
-     * (fxrow_apply_tick turns this into a strip index, change-only) */
-    __atomic_store_n(&g_fxrow_zone, (any_held && touched) ? idx : -1, __ATOMIC_RELAXED);
+    /* the row art follows the finger: zone while touched, a held roll's zone under HOLD, idle
+     * strip when not (fxrow_apply_tick turns this into a strip index, change-only) */
+    __atomic_store_n(&g_fxrow_zone, (any_held && touched) ? idx : held_zone, __ATOMIC_RELAXED);
     if (any_held)
         bus_capture_xpad_fx(b, r, &xp, touched, have_zone);
 }
@@ -1325,6 +1345,8 @@ static void erp_pads_drum_roll(uint8_t *eb, int d, int ld, int off, int mode_off
         if (nval)
             drum_disarm_others(ld, "pad8 arm");
         __atomic_store_n(&g_drum_held[ld], nval, __ATOMIC_RELAXED);
+        /* Arming starts and disarming ends without HOLD (the gate below forgets the finger) */
+        __atomic_store_n(&g_drum_hold[ld], DRUM_HOLD_OFF, __ATOMIC_RELAXED);
         __atomic_fetch_or(&g_caption_repaint, 1u << ld, __ATOMIC_RELEASE);
         /* Bounded flip log: one press must be exactly one flip, and a multi-flip must name
          * its source. */
@@ -1354,6 +1376,14 @@ static void erp_pads_drum_roll(uint8_t *eb, int d, int ld, int off, int mode_off
         void (*select)(int, int) = __atomic_load_n(&g_drum_select_fn, __ATOMIC_ACQUIRE);
         if (select)
             select(ld, sel);
+    }
+    /* Pad 7, armed: HOLD on, or off (which stops a held roll). Rising edge only. */
+    if (__atomic_load_n(&g_drum_held[ld], __ATOMIC_RELAXED) && (rise8 & 0x40u)) {
+        if (__atomic_load_n(&g_drum_hold[ld], __ATOMIC_RELAXED) != DRUM_HOLD_OFF)
+            drum_hold_clear(ld);
+        else
+            __atomic_store_n(&g_drum_hold[ld], DRUM_HOLD_ON, __ATOMIC_RELAXED);
+        __atomic_fetch_or(&g_caption_repaint, 1u << ld, __ATOMIC_RELEASE);
     }
     /* Pad 8 always (the arm toggle); pads 1-7 only while this deck is armed, the same
      * condition the LEDs use, so unarmed pads never look stock and do nothing. Because pad 8
@@ -1398,7 +1428,8 @@ static void erp_side(uint8_t *eb, int d, int crc_in) {
      * the pad set. After a select these pads show and drive the new deck; the old deck stays
      * armed but silent, because a roll sounds only while armed and the x-pad is touched
      * (drumroll.c: `gate = g_drum_gate[d] && g_drum_touch[d]`), and touches now go to the new
-     * deck. Do not add a latch transfer. */
+     * deck. Do not add a latch transfer. A held roll (pad 7 HOLD) would not stop on its own, so
+     * leaving a deck's drum-roll pads ends its HOLD (drum_hold_surface below). */
     unsigned padbits = eb[off] & 0xFFu; /* PAD1..PAD8 (bits 0-3 pads1-4, bits 4-7 pads5-8) */
     unsigned rise8 = padbits & ~g_erp_last8[d];
     g_erp_last8[d] = padbits;
@@ -1408,7 +1439,9 @@ static void erp_side(uint8_t *eb, int d, int crc_in) {
     g_dbg_padbits[d] = padbits;
     /* Pads belong to drum roll in SLIP LOOP with the mod on, to stems when stems are engaged
      * and this deck shows the stems page; every other pad mode stays native. */
-    if (__atomic_load_n(&g_drum_arm, __ATOMIC_RELAXED) && drum_mode_is_slip(d, ld))
+    int drum_side = __atomic_load_n(&g_drum_arm, __ATOMIC_RELAXED) && drum_mode_is_slip(d, ld);
+    drum_hold_surface(d, ld, drum_side);
+    if (drum_side)
         erp_pads_drum_roll(eb, d, ld, off, mode_off, padbits, rise8, crc_in);
     else if (__atomic_load_n(&g_erp_active[ld], __ATOMIC_RELAXED) && stems_page(d, ld))
         erp_pads_stems(eb, ld, off, padbits, rise8, crc_in);

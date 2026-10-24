@@ -27,6 +27,12 @@ static _Atomic int g_drum_arm = 0;                  /* mod 6 enabled */
 static int g_drum_held[AZMOD_STEM_DECKS] = {
     0}; /* pad 8 latch: this deck armed; written by the bus thread and the
            overlay (mod off), so every access is __atomic */
+/* Pad 7 HOLD, per logical deck, while armed (as on the RMX-1000): DRUM_HOLD_OFF, DRUM_HOLD_ON
+ * (waiting for the first touch) or DRUM_HOLD_RUN (rolling). Under HOLD the x-pad's release
+ * is not passed on, so the roll keeps going at the last zone touched until pad 7 again or a
+ * disarm. Written by the bus thread and the overlay (mod off), so every access is __atomic. */
+static int g_drum_hold[AZMOD_STEM_DECKS] = {0};
+static int g_drum_hold_zone[AZMOD_STEM_DECKS] = {0}; /* the zone a held roll runs at */
 static _Atomic unsigned g_caption_repaint;      /* per-deck bit: caption needs a re-run */
 static volatile unsigned g_drum_sel_led[AZMOD_STEM_DECKS] = {0, 0}; /* pads 1-4, for the LED */
 /* azstem's exported control surface, resolved by dlsym at overlay init. NULL
@@ -117,6 +123,32 @@ static int drum_mode_is_slip(int d, int ld) {
     __atomic_store_n(&g_slip_last[d], r, __ATOMIC_RELAXED);
     return r;
 }
+/* HOLD and the x-pad, one frame for one armed deck: pass the frame's rate and touch on (no
+ * HOLD, or a finger on the strip), or keep what azstem has (HOLD, finger up: the roll goes
+ * on at its zone). */
+static int drum_hold_frame(int hold, int touched) {
+    return (hold == DRUM_HOLD_OFF || touched) ? DRUM_HOLD_PASS : DRUM_HOLD_KEEP;
+}
+/* HOLD off for deck ld (pad 7 again): a held roll stops, as when the finger lifts. A disarm
+ * clears the state itself: azstem's gate already forgets the finger. */
+static void drum_hold_clear(int ld) {
+    if (__atomic_exchange_n(&g_drum_hold[ld], DRUM_HOLD_OFF, __ATOMIC_RELAXED) == DRUM_HOLD_OFF)
+        return;
+    void (*touch)(int, int) = __atomic_load_n(&g_drum_touch_fn, __ATOMIC_ACQUIRE);
+    if (touch)
+        touch(ld, 0);
+}
+/* HOLD belongs to the drum-roll pads, where pad 7 can end it. Pad set d now shows deck ld,
+ * as the drum roll (drum_side) or not: leaving the drum-roll pads of a deck (another pad
+ * mode, or the pad set switched to another deck) ends that deck's held roll, which pad 7
+ * could no longer reach. The arm itself stays, as without HOLD (erp_side). Bus thread only. */
+static void drum_hold_surface(int d, int ld, int drum_side) {
+    static int on_pads[AZMOD_PAD_DECKS] = {-1, -1}; /* the deck pad set d drove as drum roll */
+    int was = on_pads[d];
+    if (was >= 0 && (!drum_side || was != ld))
+        drum_hold_clear(was);
+    on_pads[d] = drum_side ? ld : -1;
+}
 /* Drop every deck's drum-roll latch. Used by the FX controls below and by the
  * mod-off path, so "armed" can never outlive the thing that armed it. */
 static void drum_disarm_all(const char *why) {
@@ -131,6 +163,7 @@ static void drum_disarm_all(const char *why) {
         if (__atomic_load_n(&g_drum_held[d], __ATOMIC_RELAXED) && gate)
             gate(d, 0);
         __atomic_store_n(&g_drum_held[d], 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_drum_hold[d], DRUM_HOLD_OFF, __ATOMIC_RELAXED);
     }
     FILE *f = azlog_open("/tmp/azmod-drumtile.log", "a");
     if (f) {
@@ -147,6 +180,7 @@ static void drum_disarm_others(int keep, const char *why) {
         if (d == keep || !__atomic_load_n(&g_drum_held[d], __ATOMIC_RELAXED))
             continue;
         __atomic_store_n(&g_drum_held[d], 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_drum_hold[d], DRUM_HOLD_OFF, __ATOMIC_RELAXED);
         __atomic_fetch_or(&g_caption_repaint, 1u << d, __ATOMIC_RELEASE);
         void (*gate)(int, int) = __atomic_load_n(&g_drum_gate_fn, __ATOMIC_ACQUIRE);
         if (gate)

@@ -21,7 +21,8 @@ pad mode:
 |---|---|
 | Pad 8 | arms the roll on that deck; press again to disarm. Arming one deck disarms the others |
 | Pads 1 to 4 (armed) | choose the sample: kick, snare, clap, hihat |
-| Pads 5 to 7 (armed) | nothing: pads 1 to 7 are kept from EP147 while armed |
+| Pads 5 and 6 (armed) | nothing: pads 1 to 7 are kept from EP147 while armed |
+| Pad 7 (armed) | HOLD on or off (dim amber off, bright amber on). Under HOLD the X-PAD's release is not passed on: the roll goes on at the last zone touched, a touch on another zone changes its rate, and pads 1 to 4 still change the sample. Pad 7 again stops it; any disarm (pad 8, arming another deck, the Beat FX controls, Drum Roll off) also ends HOLD, and so does leaving the deck's drum-roll pads (another pad mode, or the pad set switched to another deck), where pad 7 could no longer stop it |
 | X-PAD (armed) | a finger plays the chosen sample as a roll. The six zones, left to right, retrigger every 1, 1/2, 1/4, 1/8, 1/16 and 1/32 beat. The X-PAD's frames still reach EP147 unchanged, so the selected Beat FX engages with the roll; turn the FX down for a dry roll |
 | Beat FX ON/OFF, FX select knob | disarm every deck |
 | MIC 2 HI | roll volume: 12 o'clock unchanged, fully left silent, fully right +6 dB |

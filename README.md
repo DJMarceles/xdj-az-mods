@@ -167,7 +167,9 @@ rekordbox. Turn it on under **Playlist Editing** in the Mod Menu.
 A sample roll instrument on the X-PAD. In SLIP LOOP mode, **pad 8** arms it
 (red off, green on). Pads 1-4 pick **kick · snare · clap · hi-hat**. The six
 X-PAD zones set the rate, **1 to 1/32** of a beat, locked to the deck's BPM.
-Four banks of your own samples.
+**Pad 7** is HOLD, as on the RMX-1000 (dim amber off, bright amber on): the roll keeps going after
+you lift your finger, at the last zone you touched; touch another zone to change
+it, and press pad 7 again to stop. Four banks of your own samples.
 
 The **MIC 2** EQ knobs shape the roll on both decks. **HI** is the volume:
 12 o'clock is the normal level, turn left to fade it out or right for up to

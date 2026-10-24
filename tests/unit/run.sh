@@ -52,6 +52,8 @@
 #                deck's; two decks' providers at one address keep separate models (waveform.c)
 #   drumtile8    the DRUM ROLL tile-8 index is written only through a chain re-proven at use, and
 #                never for an unknown deck (drum_roll_display.c drum8_index_apply)
+#   drumhold     Drum Roll HOLD (pad 7): a release is not passed on, so the roll goes on at its zone;
+#                pad 7 again and every disarm end it (bus_interpose.c, drum_roll_display.c)
 #   bjjog        BEAT JUMP 2 First: the jog display's pad page is swapped BEAT JUMP <-> BEAT JUMP 2
 #                on a copy handed to PlayerInfoData's store, never in EP147's staging area, and only
 #                for the object's own staging area with the expected vtable (beat_jump.c bj_joginfo_hook)
@@ -1459,6 +1461,30 @@ for v in real ctl-notilevt ctl-nocap ctl-nocompvt ctl-anydeck; do
     $CC "${CFLAGS[@]}" -I$T -DTILE_INC="\"$d/$v.inc\"" -o "$d/$v" $T/drumtile8_test.c
 done
 suite "drum tile 8" "$d/real"
+# ---------------------------------------------------------------- drum roll HOLD (pad 7)
+d="$OUT/drumhold"; mkdir -p "$d"
+{
+    extract guest/azmod/drum_roll_display.c '^static int drum_hold_frame\('
+    extract guest/azmod/drum_roll_display.c '^static void drum_hold_clear\('
+    extract guest/azmod/drum_roll_display.c '^static void drum_hold_surface\('
+    extract guest/azmod/drum_roll_display.c '^static void drum_disarm_all\('
+    extract guest/azmod/drum_roll_display.c '^static void drum_disarm_others\('
+    extract guest/azmod/bus_interpose.c '^static void erp_pads_drum_roll\('
+    extract guest/azmod/bus_interpose.c '^static void mixer_xpad_drum\('
+} > "$d/real.inc"
+for f in drum_hold_frame drum_hold_clear drum_hold_surface drum_disarm_all drum_disarm_others erp_pads_drum_roll mixer_xpad_drum; do
+    grep -q "^static [a-z]* $f(" "$d/real.inc" || { echo "extraction of $f failed"; exit 2; }
+done
+mutate "$d/real.inc" "$d/ctl-nohold.inc" 's/\(hold == DRUM_HOLD_OFF \|\| touched\)/(1)/'      # every frame passed on: no HOLD at all
+mutate "$d/real.inc" "$d/ctl-pad8keeps.inc" 's/\n\s*__atomic_store_n\(&g_drum_hold\[ld\], DRUM_HOLD_OFF, __ATOMIC_RELAXED\);//'  # pad 8 leaves HOLD on
+mutate "$d/real.inc" "$d/ctl-allkeeps.inc" 's/(__atomic_store_n\(&g_drum_held\[d\], 0, __ATOMIC_RELAXED\);)\n\s*__atomic_store_n\(&g_drum_hold\[d\], DRUM_HOLD_OFF, __ATOMIC_RELAXED\);/$1/g'  # FX / other deck leave HOLD on
+mutate "$d/real.inc" "$d/ctl-clearsilent.inc" 's/\n\s*if \(touch\)\n\s*touch\(ld, 0\);//'  # pad 7 off leaves the roll running
+mutate "$d/real.inc" "$d/ctl-plainstore.inc" 's/__atomic_compare_exchange_n\(&g_drum_hold\[ld\], &hold, DRUM_HOLD_RUN, 0,\s*__ATOMIC_RELAXED, __ATOMIC_RELAXED\)/__atomic_store_n(&g_drum_hold[ld], DRUM_HOLD_RUN, __ATOMIC_RELAXED)/'  # HOLD turned off mid-frame comes back
+mutate "$d/real.inc" "$d/ctl-surfacekeeps.inc" 's/if \(was >= 0 && \(!drum_side \|\| was != ld\)\)\n\s*drum_hold_clear\(was\);//'  # leaving the pads leaves the roll running
+for v in real ctl-nohold ctl-pad8keeps ctl-allkeeps ctl-clearsilent ctl-plainstore ctl-surfacekeeps; do
+    $CC "${CFLAGS[@]}" -I$T -DHOLD_INC="\"$d/$v.inc\"" -o "$d/$v" $T/drumhold_test.c
+done
+suite "drum roll HOLD" "$d/real"
 # ---------------------------------------------------------------- BEAT JUMP 2 First jog display
 d="$OUT/bjjog"; mkdir -p "$d"
 region guest/azmod/beat_jump.c '^/\* ---- Jog display ---- \*/' '^#### never' > "$d/real.inc"
@@ -3874,6 +3900,12 @@ control "drum tile 8: the tile's vtable not checked"               "$OUT/drumtil
 control "drum tile 8: stem child not compared with the capture"    "$OUT/drumtile8/ctl-nocap"
 control "drum tile 8: the component's vtable not checked"          "$OUT/drumtile8/ctl-nocompvt"
 control "drum tile 8: an unknown deck falls back to deck 1"        "$OUT/drumtile8/ctl-anydeck"
+control "drum roll HOLD: every frame passed on (no HOLD)"          "$OUT/drumhold/ctl-nohold"
+control "drum roll HOLD: pad 8 leaves HOLD on"                     "$OUT/drumhold/ctl-pad8keeps"
+control "drum roll HOLD: the FX controls leave HOLD on"            "$OUT/drumhold/ctl-allkeeps"
+control "drum roll HOLD: pad 7 off leaves the roll running"        "$OUT/drumhold/ctl-clearsilent"
+control "drum roll HOLD: HOLD turned off mid-frame comes back"     "$OUT/drumhold/ctl-plainstore"
+control "drum roll HOLD: leaving the drum-roll pads leaves it running" "$OUT/drumhold/ctl-surfacekeeps"
 control "beat jump jog: the jog shows EP147's page (no swap)"     "$OUT/bjjog/ctl-noswap"
 control "beat jump jog: staging left swapped after the store"   "$OUT/bjjog/ctl-casewrite"
 control "beat jump jog: what the store filled in is lost"       "$OUT/bjjog/ctl-nocopyback"

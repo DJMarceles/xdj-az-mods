@@ -21,6 +21,21 @@ static _Atomic int g_drum_arm;
 
 static int g_drum_held[AZMOD_STEM_DECKS];
 
+/* Pad 7 HOLD (drum_roll_display.c): the state per logical deck and one x-pad frame's fate */
+enum {
+    DRUM_HOLD_OFF = 0,
+    DRUM_HOLD_ON = 1,
+    DRUM_HOLD_RUN = 2
+};
+enum {
+    DRUM_HOLD_KEEP = 0,
+    DRUM_HOLD_PASS = 1
+};
+
+static int g_drum_hold[AZMOD_STEM_DECKS];
+
+static int g_drum_hold_zone[AZMOD_STEM_DECKS];
+
 static _Atomic unsigned g_caption_repaint;
 
 static volatile unsigned g_drum_sel_led[AZMOD_STEM_DECKS];
@@ -314,6 +329,12 @@ static int dg_slip_enum;
 static _Atomic int g_true_mode;
 
 static int drum_mode_is_slip(int d, int ld);
+
+static int drum_hold_frame(int hold, int touched);
+
+static void drum_hold_clear(int ld);
+
+static void drum_hold_surface(int d, int ld, int drum_side);
 
 static void drum_disarm_all(const char *why);
 
