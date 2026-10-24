@@ -83,6 +83,16 @@ static _Atomic int g_drag_committing, g_drag_into = -1, g_drag_into_dir, g_drag_
                                       g_drag_into_note, g_drag_kind, g_drag_on, g_drag_origin, g_drag_rows,
                                       g_drag_target, g_drum_arm;
 static int g_drum_held[AZMOD_STEM_DECKS];
+enum {
+    DRUM_HOLD_OFF = 0,
+    DRUM_HOLD_ON = 1,
+    DRUM_HOLD_RUN = 2
+};
+enum {
+    DRUM_HOLD_KEEP = 0,
+    DRUM_HOLD_PASS = 1
+};
+static int g_drum_hold[AZMOD_STEM_DECKS], g_drum_hold_zone[AZMOD_STEM_DECKS]; /* pad 7 HOLD */
 static volatile unsigned g_drum_sel_led[AZMOD_STEM_DECKS];
 static volatile int g_erp_active[AZMOD_STEM_DECKS];
 static long g_erp_crc_ok, g_erp_crc_bad;
@@ -133,6 +143,22 @@ static int drag_remap_any(int nt) { return (nt * 3 + 1) % PLO_MAXROWS; }
 static void drag_request_update(void) { printf(" C:drag_update"); }
 static void drum_disarm_all(const char *why) { printf(" C:disarm_all(%s)", why); }
 static void drum_disarm_others(int ld, const char *why) { printf(" C:disarm_others(%d,%s)", ld, why); }
+/* HOLD: the frame rule as drum_roll_display.c has it; clear and surface print their effect */
+static int drum_hold_frame(int hold, int touched) {
+    return (hold == DRUM_HOLD_OFF || touched) ? DRUM_HOLD_PASS : DRUM_HOLD_KEEP;
+}
+static void drum_hold_clear(int ld) {
+    if (g_drum_hold[ld] == DRUM_HOLD_OFF)
+        return;
+    g_drum_hold[ld] = DRUM_HOLD_OFF;
+    printf(" C:hold_clear(%d)", ld);
+}
+static void drum_hold_surface(int d, int ld, int drum_side) {
+    static int on_pads[AZMOD_PAD_DECKS] = {-1, -1};
+    if (on_pads[d] >= 0 && (!drum_side || on_pads[d] != ld))
+        drum_hold_clear(on_pads[d]);
+    on_pads[d] = drum_side ? ld : -1;
+}
 static void f_gate(int a, int b) { printf(" C:gate(%d,%d)", a, b); }
 static void f_select(int a, int b) { printf(" C:select(%d,%d)", a, b); }
 static void f_rate(int a, int b) { printf(" C:rate(%d,%d)", a, b); }
@@ -252,7 +278,7 @@ int main(int argc, char **argv) {
         P(g_caption_repaint); P(g_erp_crc_ok); P(g_erp_crc_bad); P(wd_stall); P(g_src_swallow);
         P(g_last_click_bit); P(g_last_back_bit); P(g_dh.state); P(g_dh.it.op); P(g_dh.it.origin); P(g_dh.it.target); P(g_dh.it.into); P(g_dh.posted); P(g_dh.refused); P(g_dh.full);
         PA(g_pad_req, 4); PA(g_pad_solo_req, 4); PA(g_bl_enter, 2); PA(g_bl_vpage2, 4);
-        PA(g_deck_sel, 2); PA(g_drum_held, 4); PA(g_drum_sel_led, 4); PA(g_pad_mode_bl, 4);
+        PA(g_deck_sel, 2); PA(g_drum_held, 4); PA(g_drum_hold, 4); PA(g_drum_sel_led, 4); PA(g_pad_mode_bl, 4);
         PA(g_pad_mode_slip, 4); PA(g_mode_down, 2); PA(g_mode_edge_ms, 2); PA(g_mode_edge_seq, 2);
         PA(g_stemeq_knobs, 2); PA(g_erp_last, 4); PA(g_erp_last8, 4); PA(g_dbg_reqraised, 4);
         /* clang-format on */
