@@ -1201,6 +1201,17 @@ for v in real ctl-noref ctl-resurrect ctl-nodestroy ctl-nowait; do
     $CC "${CFLAGS[@]}" -pthread -I$T -DGRID_INC="\"$d/$v.inc\"" -o "$d/$v" $T/meowgrid_test.c
 done
 suite "meowgrid" "$d/real" 1.0
+# ---------------------------------------------------------------- drum grid service: a grid that comes later
+d="$OUT/gridretry"; mkdir -p "$d"
+extract $DR '^static void drum_grid_service\(' > "$d/real.inc"
+grep -q 'g_drum_grid_retry' "$d/real.inc" || { echo "extraction of drum_grid_service failed"; exit 2; }
+mutate "$d/real.inc" "$d/ctl-once.inc" 's/if \(!fresh && !g_drum_grid_retry\[d\]\)/if (!fresh)/'   # asked once per track change (the bug)
+mutate "$d/real.inc" "$d/ctl-noinval.inc" 's/\n\s*drum_grid_publish\(d, 0, 0, 0\.0\); \/\* invalidate first \*\///'   # the previous track's grid kept
+mutate "$d/real.inc" "$d/ctl-forever.inc" 's/\n\s*g_drum_grid_retry\[d\] = 0;\n/\n/'   # a locked deck still asked on every pass
+for v in real ctl-once ctl-noinval ctl-forever; do
+    $CC "${CFLAGS[@]}" -I$T -DGRID_INC="\"$d/$v.inc\"" -o "$d/$v" $T/drumgrid_retry_test.c
+done
+suite "drum grid retry" "$d/real"
 # ---------------------------------------------------------------- reader count + destructor hook
 # The three EP147 objects azmod caches across calls (TaglistEditor, mixer Channel,
 # VinylSpeedAdjustor): a destructor waits for a message-thread reader inside the count, never
@@ -3848,6 +3859,9 @@ control "meowgrid: grid used without a reference"                  "$OUT/meowgri
 control "meowgrid: a dying grid taken back (count 0 acquired)"      "$OUT/meowgrid/ctl-resurrect" 1.0
 control "meowgrid: the last release destroys nothing"               "$OUT/meowgrid/ctl-nodestroy" 1.0
 control "meowgrid: LoadState teardown does not wait for readers"   "$OUT/meowgrid/ctl-nowait" 1.0
+control "drum grid retry: asked once per track change"           "$OUT/gridretry/ctl-once"
+control "drum grid retry: the previous track's grid kept"          "$OUT/gridretry/ctl-noinval"
+control "drum grid retry: a locked deck still asked on every pass" "$OUT/gridretry/ctl-forever"
 # readers is built on Linux only: off Linux its binaries do not exist, and a missing binary
 # (exit 127) would count as a control that failed
 if [ "$(uname -s)" = Linux ]; then
