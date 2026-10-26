@@ -642,18 +642,24 @@ static void test_follow(void) {
     azstem_drum_follow(1, 0);
     CHECK("an empty deck follows the master", atomic_load(&g_drum_follow[1]) == 0);
 
-    /* the master playing, the empty deck pressed off the beat */
-    long long pos = (long long) beat * 6 + 700;
-    for (int b = 0; b < 6; b++, pos += MIX_NS) {
-        mix_block(0, pos);
+    /* the master playing, the empty deck pressed off the beat. EP147 refreshes the master's
+     * playhead every other block, so it reports the true position on even blocks and the
+     * previous one on odd blocks; the press lands on a stale (odd) block, where only the
+     * master's moving playhead says to wait for its grid. */
+    long long pos = (long long) beat * 6 + 700; /* true position */
+    int blk = 0;
+#define MASTER_SRC(p, b) ((p) - ((b) & 1 ? MIX_NS : 0))
+    for (; blk < 7; blk++, pos += MIX_NS) {
+        mix_block(0, MASTER_SRC(pos, blk));
         mix_block(1, -1);
     }
     mix_press(1, 2);
     double ph = fmod((double) pos, sub);
     int want = (int) ((sub - ph) / MIX_NS); /* blocks from the press to the master's boundary */
     int hit = -1, second = -1;
-    for (int b = 0; b < 40; b++, pos += MIX_NS) {
-        mix_block(0, pos);
+    CHECK("follow: setup: the press lands on a stale master block", blk & 1);
+    for (int b = 0; b < 40; b++, blk++, pos += MIX_NS) {
+        mix_block(0, MASTER_SRC(pos, blk));
         if (mix_block(1, -1) > 0.4f) {
             if (hit < 0)
                 hit = b;
@@ -666,6 +672,7 @@ static void test_follow(void) {
     CHECK("...and lands in the block holding the master's next grid boundary", hit == want);
     CHECK("...and the next one a subdivision later, on the master's grid",
           second == (int) ((sub * 2 - ph) / MIX_NS));
+#undef MASTER_SRC
     azstem_drum_gate(1, 0);
     for (int b = 0; b < 8; b++, pos += MIX_NS) {
         mix_block(0, pos);
